@@ -26,7 +26,7 @@
 - Create `src/bot.rs`: poll loop, offset persistence, queue worker, job execution.
 - Create `src/run_mode.rs`: one-shot cron/launchd execution.
 - Create `ai.gateway.plist`: macOS LaunchAgent equivalent of the Go gateway.
-- Create `gateway-launch.sh`: zsh launcher for the bot process.
+- Create `launch`: zsh launcher for the bot process.
 - Create `README.md`: build, install, bot, and cron examples.
 
 ## Task 1: Scaffold Rust Crate
@@ -3049,7 +3049,7 @@ git commit -m "feat: add telegram bot mode"
 
 **Files:**
 - Create: `ai.gateway.plist`
-- Create: `gateway-launch.sh`
+- Create: `launch`
 - Create: `README.md`
 
 - [ ] **Step 1: Write launch and README content**
@@ -3076,7 +3076,7 @@ Create `ai.gateway.plist`:
     <key>ProgramArguments</key>
     <array>
       <string>/bin/zsh</string>
-      <string>/Users/example/.config/gateway/gateway-launch.sh</string>
+      <string>/Users/example/gateway/launch</string>
     </array>
     <key>StandardOutPath</key>
     <string>/Users/example/.local/share/gateway/logs/gateway.log</string>
@@ -3086,7 +3086,7 @@ Create `ai.gateway.plist`:
 </plist>
 ```
 
-Create `gateway-launch.sh`:
+Create `launch`:
 
 ```zsh
 #!/bin/zsh
@@ -3162,20 +3162,20 @@ launchctl kickstart -k "gui/$(id -u)/ai.gateway"
 
 - [ ] **Step 2: Make launcher executable**
 
-Run: `chmod +x gateway-launch.sh`
+Run: `chmod +x launch`
 
-Expected: `gateway-launch.sh` becomes executable.
+Expected: `launch` becomes executable.
 
 - [ ] **Step 3: Verify shell syntax**
 
-Run: `zsh -n gateway-launch.sh`
+Run: `zsh -n launch`
 
 Expected: exits 0 with no output.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add ai.gateway.plist gateway-launch.sh README.md
+git add ai.gateway.plist launch README.md
 git commit -m "docs: add gateway launch instructions"
 ```
 
@@ -3216,7 +3216,7 @@ Expected: no unfinished-work markers; any remaining `unwrap` or `expect` appears
 - [ ] **Step 5: Commit final cleanup**
 
 ```bash
-git add Cargo.toml src ai.gateway.plist gateway-launch.sh README.md
+git add Cargo.toml src ai.gateway.plist launch README.md
 git commit -m "chore: verify rust gateway"
 ```
 
