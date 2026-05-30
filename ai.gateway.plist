@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>ai.gateway</string>
+    <key>Comment</key>
+    <string>Telegram to Codex Gateway</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>1</integer>
+    <key>Umask</key>
+    <integer>63</integer>
+    <key>ProgramArguments</key>
+    <array>
+      <string>/bin/zsh</string>
+      <string>/Users/example/.config/gateway/gateway-launch.sh</string>
+    </array>
+    <key>StandardOutPath</key>
+    <string>/Users/example/.local/share/gateway/logs/gateway.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/example/.local/share/gateway/logs/gateway.err.log</string>
+  </dict>
+</plist>
