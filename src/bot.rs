@@ -3,7 +3,7 @@ use crate::commands::{directive_help, is_allowed, unknown_directive_message};
 use crate::config::Config;
 use crate::session::{SessionKey, SessionStore};
 use crate::status::{fastfetch_status, format_status_message, status_header};
-use crate::telegram::{Message, TelegramClient};
+use crate::telegram::{Message, TelegramClient, Update};
 use crate::text::{
     command_arg, log_line_count, parse_command, session_label, split_telegram_message,
     tail_log_text,
@@ -51,10 +51,18 @@ pub fn run(cfg: Config) -> Result<(), String> {
     let _worker = thread::spawn(move || worker_loop(worker_cfg, rx));
 
     let mut offset = read_offset(&cfg.offset_file);
+    if offset == 0 {
+        if let Ok(updates) = tg.get_updates(0, 0) {
+            offset = skip_offset(&updates);
+            if offset > 0 {
+                write_offset(&cfg.offset_file, offset)?;
+            }
+        }
+    }
     loop {
         let updates = tg.get_updates(offset, cfg.poll_timeout_sec)?;
         for update in updates {
-            offset = offset.max(update.update_id + 1);
+            offset = advance_offset(offset, update.update_id);
             write_offset(&cfg.offset_file, offset)?;
             if let Some(message) = update.message {
                 handle_message(&cfg, &tg, &store, &tx, message)?;
@@ -89,6 +97,18 @@ pub fn message_text(text: &str, caption: &str) -> Result<String, String> {
         return Ok(caption.to_string());
     }
     Err("Text messages only.".to_string())
+}
+
+fn advance_offset(current: i64, update_id: i64) -> i64 {
+    current.max(update_id + 1)
+}
+
+fn skip_offset(updates: &[Update]) -> i64 {
+    updates
+        .iter()
+        .map(|update| update.update_id + 1)
+        .max()
+        .unwrap_or(0)
 }
 
 fn handle_message(
@@ -152,7 +172,11 @@ fn handle_command(
                 &format!("New session ready. Model: {}", state.model),
                 msg.message_id,
             ),
-            Err(err) => tg.send_message(msg.chat.id, &format!("Failed to reset session: {err}"), msg.message_id),
+            Err(err) => tg.send_message(
+                msg.chat.id,
+                &format!("Failed to reset session: {err}"),
+                msg.message_id,
+            ),
         },
         "/restart" => {
             tg.send_message(msg.chat.id, "Restarting gateway.", msg.message_id)?;
@@ -175,7 +199,11 @@ fn handle_command(
                     ),
                     msg.message_id,
                 ),
-                Err(err) => tg.send_message(msg.chat.id, &format!("Failed to set model: {err}"), msg.message_id),
+                Err(err) => tg.send_message(
+                    msg.chat.id,
+                    &format!("Failed to set model: {err}"),
+                    msg.message_id,
+                ),
             }
         }
         "/resume" => {
@@ -337,6 +365,28 @@ mod tests {
         std::fs::write(&path, "bad").unwrap();
 
         assert_eq!(read_offset(&path), 0);
+    }
+
+    #[test]
+    fn offset_advances_monotonically() {
+        assert_eq!(advance_offset(10, 3), 10);
+        assert_eq!(advance_offset(10, 12), 13);
+    }
+
+    #[test]
+    fn initial_offset_skips_highest_update() {
+        let updates = vec![
+            crate::telegram::Update {
+                update_id: 4,
+                message: None,
+            },
+            crate::telegram::Update {
+                update_id: 9,
+                message: None,
+            },
+        ];
+
+        assert_eq!(skip_offset(&updates), 10);
     }
 
     #[test]

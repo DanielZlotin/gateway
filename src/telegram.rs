@@ -87,7 +87,7 @@ impl TelegramClient {
         if offset > 0 {
             request = request.query("offset", &offset.to_string());
         }
-        self.call_json(request, "getUpdates")
+        self.call_json(request.call(), "getUpdates")
     }
 
     pub fn send_message(
@@ -173,12 +173,12 @@ impl TelegramClient {
         )
     }
 
-    fn call_json<T: serde::de::DeserializeOwned, R: IntoResponse>(
+    fn call_json<T: serde::de::DeserializeOwned>(
         &self,
-        response: R,
+        response: Result<ureq::Response, ureq::Error>,
         method: &str,
     ) -> Result<T, String> {
-        let response = response.into_response().map_err(|err| {
+        let response = response.map_err(|err| {
             format!(
                 "telegram {method} request failed: {}",
                 redact_token(&self.base_url, &err.to_string())
@@ -196,22 +196,6 @@ impl TelegramClient {
                 .description
                 .unwrap_or_else(|| format!("telegram {method} failed")))
         }
-    }
-}
-
-trait IntoResponse {
-    fn into_response(self) -> Result<ureq::Response, ureq::Error>;
-}
-
-impl IntoResponse for ureq::Request {
-    fn into_response(self) -> Result<ureq::Response, ureq::Error> {
-        self.call()
-    }
-}
-
-impl IntoResponse for Result<ureq::Response, ureq::Error> {
-    fn into_response(self) -> Result<ureq::Response, ureq::Error> {
-        self
     }
 }
 
@@ -277,12 +261,7 @@ pub fn redact_token(base_url: &str, value: &str) -> String {
     value.replace(base_url, "https://api.telegram.org/bot<redacted>")
 }
 
-fn target(
-    name: &str,
-    scope_type: &str,
-    chat_id: Option<i64>,
-    set: bool,
-) -> CommandScopeTarget {
+fn target(name: &str, scope_type: &str, chat_id: Option<i64>, set: bool) -> CommandScopeTarget {
     CommandScopeTarget {
         name: name.to_string(),
         scope: BotCommandScope {
@@ -315,8 +294,8 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "commands", "help", "status", "log", "new", "restart", "model", "resume",
-                "rename", "list"
+                "commands", "help", "status", "log", "new", "restart", "model", "resume", "rename",
+                "list"
             ]
         );
     }
@@ -341,11 +320,7 @@ mod tests {
                 ("default", "default", true),
                 ("all_private_chats", "all_private_chats", true),
                 ("all_group_chats", "all_group_chats", false),
-                (
-                    "all_chat_administrators",
-                    "all_chat_administrators",
-                    false
-                ),
+                ("all_chat_administrators", "all_chat_administrators", false),
                 ("chat:<telegram_chat_id>", "chat", true),
             ]
         );

@@ -89,7 +89,10 @@ mod tests {
         let mut args = base_args();
         args.prompt = Some("from arg".to_string());
 
-        assert_eq!(load_prompt(&args, Cursor::new("from stdin")).unwrap(), "from arg");
+        assert_eq!(
+            load_prompt(&args, Cursor::new("from stdin")).unwrap(),
+            "from arg"
+        );
     }
 
     #[test]

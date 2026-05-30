@@ -64,11 +64,7 @@ pub fn load_from_env(env: &BTreeMap<String, String>) -> Result<Config, String> {
         launchd_target: value(env, "GATEWAY_LAUNCHD_TARGET", "gui/<uid>/ai.gateway"),
         poll_timeout_sec: number(env, "GATEWAY_POLL_TIMEOUT_SECS", 50)?,
         queue_depth: number(env, "GATEWAY_QUEUE_DEPTH", 8)?,
-        codex_timeout: Duration::from_secs(number(
-            env,
-            "GATEWAY_CODEX_TIMEOUT_SECS",
-            45 * 60,
-        )?),
+        codex_timeout: Duration::from_secs(number(env, "GATEWAY_CODEX_TIMEOUT_SECS", 45 * 60)?),
     })
 }
 
@@ -113,7 +109,11 @@ fn allowed_ids(env: &BTreeMap<String, String>) -> Result<Vec<i64>, String> {
         return Ok(vec![DEFAULT_ALLOWED_ID]);
     };
     let mut ids = Vec::new();
-    for part in raw.split(',').map(str::trim).filter(|part| !part.is_empty()) {
+    for part in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
         ids.push(part.parse::<i64>().map_err(|_| {
             "GATEWAY_ALLOWED_IDS must contain comma-separated integers".to_string()
         })?);

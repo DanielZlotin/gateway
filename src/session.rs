@@ -97,10 +97,9 @@ impl SessionStore {
 
     pub fn rename_current(&self, key: &SessionKey, name: &str) -> Result<ChatSession, String> {
         let mut state = self.load(key);
-        let id = state
-            .session_id
-            .clone()
-            .ok_or_else(|| "No current session to rename. Send a normal message first.".to_string())?;
+        let id = state.session_id.clone().ok_or_else(|| {
+            "No current session to rename. Send a normal message first.".to_string()
+        })?;
         state.updated_at = now_string();
         state.sessions = upsert_session(
             state.sessions,
@@ -160,7 +159,10 @@ impl SessionStore {
             } else {
                 item.model.as_str()
             };
-            lines.push(format!("{marker} {} {model} {name}", session_label(&item.id)));
+            lines.push(format!(
+                "{marker} {} {model} {name}",
+                session_label(&item.id)
+            ));
         }
         lines.join("\n")
     }
@@ -237,7 +239,9 @@ pub fn find_session(items: &[SavedSession], target: &str) -> Option<SavedSession
     items
         .iter()
         .find(|item| {
-            item.id == target || session_label(&item.id) == target || item.name.as_deref() == Some(target)
+            item.id == target
+                || session_label(&item.id) == target
+                || item.name.as_deref() == Some(target)
         })
         .cloned()
 }

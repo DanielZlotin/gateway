@@ -72,7 +72,11 @@ pub fn parse_codex_json(output: &str) -> CodexOutput {
         session_id: None,
     };
 
-    for line in output.lines().map(str::trim).filter(|line| !line.is_empty()) {
+    for line in output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
         let Ok(event) = serde_json::from_str::<CodexEvent>(line) else {
             continue;
         };
@@ -114,7 +118,13 @@ pub fn run_codex(
     fs::create_dir_all(state_dir).map_err(|err| format!("create state dir: {err}"))?;
     let out_file = tempfile::NamedTempFile::new_in(state_dir).map_err(|err| err.to_string())?;
     let out_path = out_file.path().to_path_buf();
-    let args = codex_args(&out_path, session_id, model, &cfg.default_model, &cfg.workdir);
+    let args = codex_args(
+        &out_path,
+        session_id,
+        model,
+        &cfg.default_model,
+        &cfg.workdir,
+    );
 
     let mut child = Command::new(&cfg.bin)
         .args(args)

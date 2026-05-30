@@ -19,7 +19,13 @@ pub fn split_telegram_message(text: &str) -> Vec<String> {
             }
         }
 
-        parts.push(chars[..split_at].iter().collect::<String>().trim().to_string());
+        parts.push(
+            chars[..split_at]
+                .iter()
+                .collect::<String>()
+                .trim()
+                .to_string(),
+        );
         rest = chars[split_at..]
             .iter()
             .collect::<String>()
@@ -95,11 +101,9 @@ mod tests {
         let parts = split_telegram_message(&text);
 
         assert_eq!(parts.len(), 2);
-        assert!(
-            parts
-                .iter()
-                .all(|part| part.chars().count() <= TELEGRAM_MESSAGE_LIMIT)
-        );
+        assert!(parts
+            .iter()
+            .all(|part| part.chars().count() <= TELEGRAM_MESSAGE_LIMIT));
     }
 
     #[test]
@@ -152,6 +156,9 @@ mod tests {
 
     #[test]
     fn join_non_empty_trims_and_separates() {
-        assert_eq!(join_non_empty(&[" hello ", "", " world "]), "hello\n\nworld");
+        assert_eq!(
+            join_non_empty(&[" hello ", "", " world "]),
+            "hello\n\nworld"
+        );
     }
 }
