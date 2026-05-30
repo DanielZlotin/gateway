@@ -45,4 +45,4 @@ do
   fi
 done
 
-exec env -i "${gateway_env[@]}" "${GATEWAY_BIN:-$HOME/gateway/target/release/gateway}" bot
+exec env -i "${gateway_env[@]}" "$HOME/gateway/target/release/gateway" bot
