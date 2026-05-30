@@ -328,11 +328,8 @@ fn run_job(
         job.prompt.chars().count(),
         cfg.codex_timeout.as_secs()
     );
-    let stream_message_id = tg.send_message_returning(
-        job.chat_id,
-        "⏳ Codex is starting…",
-        job.reply_to_message_id,
-    )?;
+    let stream_message_id =
+        tg.send_message_returning(job.chat_id, "🫧 Thinking…", job.reply_to_message_id)?;
     let mut streamed = String::new();
     let mut last_edit = Instant::now();
     let output = match {
@@ -399,7 +396,7 @@ fn run_job(
     let final_text = empty_final_text(&output.final_text);
     let parts = split_telegram_message(&final_text);
     if let Some(first) = parts.first() {
-        let _ = tg.edit_message_text(job.chat_id, stream_message_id, first);
+        send_final_message(tg, &job, stream_message_id, first)?;
         for part in parts.iter().skip(1) {
             tg.send_message(job.chat_id, part, 0)?;
         }
@@ -407,6 +404,15 @@ fn run_job(
     } else {
         Ok(())
     }
+}
+
+fn send_final_message(
+    tg: &TelegramClient,
+    job: &Job,
+    stream_message_id: i64,
+    first: &str,
+) -> Result<(), String> {
+    tg.edit_message_text(job.chat_id, stream_message_id, first)
 }
 
 fn single_line(text: &str) -> String {
