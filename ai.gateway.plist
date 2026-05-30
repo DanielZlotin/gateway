@@ -18,7 +18,7 @@
     <array>
       <string>/bin/zsh</string>
       <string>-lc</string>
-      <string>exec "$XDG_CONFIG_HOME/gateway/launch"</string>
+      <string>exec "$HOME/gateway/launch"</string>
     </array>
   </dict>
 </plist>
