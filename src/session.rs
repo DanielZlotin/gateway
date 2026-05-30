@@ -29,7 +29,10 @@ pub struct SavedSession {
 
 #[derive(Debug, Clone)]
 pub enum SessionKey {
-    Chat(i64),
+    Chat {
+        chat_id: i64,
+        thread_id: Option<i64>,
+    },
     Cron(String),
 }
 
@@ -169,7 +172,12 @@ impl SessionStore {
 
     fn path(&self, key: &SessionKey) -> PathBuf {
         match key {
-            SessionKey::Chat(chat_id) => self.chat_dir.join(format!("{chat_id}.json")),
+            SessionKey::Chat { chat_id, thread_id } => {
+                let suffix = thread_id
+                    .map(|id| format!("thread-{id}"))
+                    .unwrap_or_else(|| "main".to_string());
+                self.chat_dir.join(format!("{chat_id}-{suffix}.json"))
+            }
             SessionKey::Cron(name) => self.cron_dir.join(format!("{}.json", sanitize_key(name))),
         }
     }
@@ -302,7 +310,10 @@ mod tests {
             dir.path().join("cron"),
             "gpt-5.5".to_string(),
         );
-        let key = SessionKey::Chat(42);
+        let key = SessionKey::Chat {
+            chat_id: 42,
+            thread_id: None,
+        };
 
         assert_eq!(store.reset(&key).unwrap().generation, 1);
         let loaded = store.load(&key);

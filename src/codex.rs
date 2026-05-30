@@ -1,8 +1,10 @@
 use serde::Deserialize;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
@@ -49,7 +51,6 @@ pub fn codex_args(
         return strings([
             "exec",
             "resume",
-            "--json",
             "-c",
             &instructions_config,
             "--skip-git-repo-check",
@@ -65,7 +66,6 @@ pub fn codex_args(
 
     strings([
         "exec",
-        "--json",
         "--color",
         "never",
         "-c",
@@ -147,6 +147,18 @@ pub fn run_codex(
     timeout: Duration,
     state_dir: &Path,
 ) -> Result<CodexOutput, String> {
+    run_codex_stream(cfg, prompt, session_id, model, timeout, state_dir, |_| {})
+}
+
+pub fn run_codex_stream(
+    cfg: &CodexConfig,
+    prompt: &str,
+    session_id: Option<&str>,
+    model: &str,
+    timeout: Duration,
+    state_dir: &Path,
+    mut on_stdout: impl FnMut(&str),
+) -> Result<CodexOutput, String> {
     fs::create_dir_all(state_dir).map_err(|err| format!("create state dir: {err}"))?;
     write_main_agents_md(&cfg.instructions_file)?;
     let out_file = tempfile::NamedTempFile::new_in(state_dir).map_err(|err| err.to_string())?;
@@ -171,6 +183,35 @@ pub fn run_codex(
         .spawn()
         .map_err(|err| format!("start codex: {err}"))?;
 
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "open codex stdout".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "open codex stderr".to_string())?;
+    let (stdout_tx, stdout_rx) = mpsc::channel::<String>();
+    let stdout_handle = thread::spawn(move || {
+        let mut reader = stdout;
+        let mut buf = [0; 512];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let _ = stdout_tx.send(String::from_utf8_lossy(&buf[..n]).to_string());
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    let stderr_handle = thread::spawn(move || {
+        let mut reader = stderr;
+        let mut buf = Vec::new();
+        let _ = reader.read_to_end(&mut buf);
+        buf
+    });
+
     child
         .stdin
         .as_mut()
@@ -180,32 +221,44 @@ pub fn run_codex(
     drop(child.stdin.take());
 
     let start = Instant::now();
+    let mut stdout_text = String::new();
     loop {
+        while let Ok(chunk) = stdout_rx.try_recv() {
+            stdout_text.push_str(&chunk);
+            on_stdout(&chunk);
+        }
         if start.elapsed() > timeout {
             let _ = child.kill();
-            let output = child.wait_with_output().map_err(|err| err.to_string())?;
-            let final_text = final_text_from_outputs(&out_path, &output.stdout, &output.stderr);
+            let _ = child.wait().map_err(|err| err.to_string())?;
+            let _ = stdout_handle.join();
+            let stderr = stderr_handle.join().unwrap_or_default();
+            let final_text = final_text_from_outputs(&out_path, stdout_text.as_bytes(), &stderr);
             return Err(format!("codex timed out after {timeout:?}\n\n{final_text}"));
         }
         if child.try_wait().map_err(|err| err.to_string())?.is_some() {
-            let output = child.wait_with_output().map_err(|err| err.to_string())?;
-            let parsed = parse_codex_json(&String::from_utf8_lossy(&output.stdout));
+            let status = child.wait().map_err(|err| err.to_string())?;
+            let _ = stdout_handle.join();
+            while let Ok(chunk) = stdout_rx.try_recv() {
+                stdout_text.push_str(&chunk);
+                on_stdout(&chunk);
+            }
+            let stderr = stderr_handle.join().unwrap_or_default();
             let final_text = fs::read_to_string(&out_path)
                 .unwrap_or_default()
                 .trim()
                 .to_string();
             let final_text = if final_text.is_empty() {
-                parsed.final_text
+                stdout_text.trim().to_string()
             } else {
                 final_text
             };
-            if output.status.success() {
+            if status.success() {
                 return Ok(CodexOutput {
                     final_text,
-                    session_id: parsed.session_id,
+                    session_id: parse_session_id(&String::from_utf8_lossy(&stderr)),
                 });
             }
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = String::from_utf8_lossy(&stderr);
             return Err([final_text.as_str(), stderr.trim()]
                 .into_iter()
                 .filter(|part| !part.is_empty())
@@ -214,6 +267,15 @@ pub fn run_codex(
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+fn parse_session_id(stderr: &str) -> Option<String> {
+    stderr.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("session id:")
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+    })
 }
 
 fn write_main_agents_md(path: &Path) -> Result<(), String> {
@@ -294,7 +356,7 @@ mod tests {
         );
         assert_eq!(
             args.join(" "),
-            "exec resume --json -c model_instructions_file=\"/state/AGENTS.md\" --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m gpt-test --output-last-message /tmp/out session-123 -"
+            "exec resume -c model_instructions_file=\"/state/AGENTS.md\" --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m gpt-test --output-last-message /tmp/out session-123 -"
         );
     }
 

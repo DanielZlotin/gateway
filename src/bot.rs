@@ -1,4 +1,4 @@
-use crate::codex::{run_codex, CodexConfig};
+use crate::codex::{run_codex_stream, CodexConfig};
 use crate::commands::{directive_help, is_allowed, unknown_directive_message};
 use crate::config::{save_gateway_config, Config, GatewayConfigFile};
 use crate::session::{SessionKey, SessionStore};
@@ -20,6 +20,7 @@ const TYPING_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 #[derive(Debug, Clone)]
 struct Job {
     chat_id: i64,
+    thread_id: Option<i64>,
     reply_to_message_id: i64,
     prompt: String,
 }
@@ -55,7 +56,10 @@ pub fn run(cfg: Config) -> Result<(), String> {
         cfg.codex_model.clone(),
     );
     for chat_id in &cfg.allowed_ids {
-        let state = store.load(&SessionKey::Chat(*chat_id));
+        let state = store.load(&SessionKey::Chat {
+            chat_id: *chat_id,
+            thread_id: None,
+        });
         send_long_message(
             &tg,
             *chat_id,
@@ -154,6 +158,7 @@ fn handle_message(
 
     let queued = tx.try_send(Job {
         chat_id: msg.chat.id,
+        thread_id: msg.message_thread_id,
         reply_to_message_id: msg.message_id,
         prompt: text,
     });
@@ -177,7 +182,10 @@ fn handle_command(
     text: &str,
     command: &str,
 ) -> Result<(), String> {
-    let key = SessionKey::Chat(msg.chat.id);
+    let key = SessionKey::Chat {
+        chat_id: msg.chat.id,
+        thread_id: msg.message_thread_id,
+    };
     match command {
         "/log" => {
             let lines = log_line_count(text);
@@ -306,7 +314,10 @@ fn run_job(
     job: Job,
 ) -> Result<(), String> {
     let started = Instant::now();
-    let key = SessionKey::Chat(job.chat_id);
+    let key = SessionKey::Chat {
+        chat_id: job.chat_id,
+        thread_id: job.thread_id,
+    };
     let state = store.load(&key);
     eprintln!(
         "[gateway] job start chat={} reply_to={} model={} session={} prompt_chars={} timeout_secs={}",
@@ -317,9 +328,16 @@ fn run_job(
         job.prompt.chars().count(),
         cfg.codex_timeout.as_secs()
     );
+    let stream_message_id = tg.send_message_returning(
+        job.chat_id,
+        "⏳ Codex is starting…",
+        job.reply_to_message_id,
+    )?;
+    let mut streamed = String::new();
+    let mut last_edit = Instant::now();
     let output = match {
         let _typing = start_typing_loop(tg, job.chat_id);
-        run_codex(
+        run_codex_stream(
             &CodexConfig {
                 bin: cfg.codex_bin.clone(),
                 home: cfg.codex_home.clone(),
@@ -338,6 +356,17 @@ fn run_job(
             &state.model,
             cfg.codex_timeout,
             &cfg.state_dir,
+            |chunk| {
+                streamed.push_str(chunk);
+                if last_edit.elapsed() >= Duration::from_millis(1200) {
+                    let _ = tg.edit_message_text(
+                        job.chat_id,
+                        stream_message_id,
+                        &stream_preview(&streamed),
+                    );
+                    last_edit = Instant::now();
+                }
+            },
         )
     } {
         Ok(output) => output,
@@ -367,12 +396,17 @@ fn run_job(
         output.final_text.chars().count(),
         session_label(output.session_id.as_deref().unwrap_or(""))
     );
-    send_long_message(
-        tg,
-        job.chat_id,
-        &empty_final_text(&output.final_text),
-        job.reply_to_message_id,
-    )
+    let final_text = empty_final_text(&output.final_text);
+    let parts = split_telegram_message(&final_text);
+    if let Some(first) = parts.first() {
+        let _ = tg.edit_message_text(job.chat_id, stream_message_id, first);
+        for part in parts.iter().skip(1) {
+            tg.send_message(job.chat_id, part, 0)?;
+        }
+        Ok(())
+    } else {
+        Ok(())
+    }
 }
 
 fn single_line(text: &str) -> String {
@@ -400,6 +434,26 @@ fn empty_final_text(text: &str) -> String {
     } else {
         text.to_string()
     }
+}
+
+fn stream_preview(text: &str) -> String {
+    let text = text.trim();
+    if text.is_empty() {
+        return "⏳ Codex is thinking…".to_string();
+    }
+    let max = 3800;
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let tail: String = text
+        .chars()
+        .rev()
+        .take(max)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    format!("…\n{tail}")
 }
 
 fn send_long_message(

@@ -38,6 +38,8 @@ pub struct Update {
 #[derive(Debug, Deserialize)]
 pub struct Message {
     pub message_id: i64,
+    #[serde(default)]
+    pub message_thread_id: Option<i64>,
     pub from: Option<User>,
     pub chat: Chat,
     #[serde(default)]
@@ -107,6 +109,41 @@ impl TelegramClient {
             values.push(("allow_sending_without_reply", "true".to_string()));
         }
         let _: serde_json::Value = self.post_form("sendMessage", &values)?;
+        Ok(())
+    }
+
+    pub fn send_message_returning(
+        &self,
+        chat_id: i64,
+        text: &str,
+        reply_to_message_id: i64,
+    ) -> Result<i64, String> {
+        let mut values = vec![
+            ("chat_id", chat_id.to_string()),
+            ("text", text.to_string()),
+            ("disable_web_page_preview", "true".to_string()),
+        ];
+        if reply_to_message_id > 0 {
+            values.push(("reply_to_message_id", reply_to_message_id.to_string()));
+            values.push(("allow_sending_without_reply", "true".to_string()));
+        }
+        let message: Message = self.post_form("sendMessage", &values)?;
+        Ok(message.message_id)
+    }
+
+    pub fn edit_message_text(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        text: &str,
+    ) -> Result<(), String> {
+        let values = [
+            ("chat_id", chat_id.to_string()),
+            ("message_id", message_id.to_string()),
+            ("text", text.to_string()),
+            ("disable_web_page_preview", "true".to_string()),
+        ];
+        let _: serde_json::Value = self.post_form("editMessageText", &values)?;
         Ok(())
     }
 
