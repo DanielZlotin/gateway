@@ -7,8 +7,6 @@ Lean Rust Telegram-to-Codex gateway.
 ```zsh
 cargo test
 cargo build --release
-install -d "$HOME/.local/bin"
-install -m 755 target/release/gateway "$HOME/.local/bin/gateway"
 ```
 
 ## Bot
@@ -51,8 +49,16 @@ gateway run --job daily --prompt-file /path/to/prompt.txt --telegram-chat <teleg
 
 ## LaunchAgent
 
+The LaunchAgent is intentionally repo-rooted: the plist runs
+`$HOME/gateway/launch`, and `launch` runs
+`$HOME/gateway/target/release/gateway` by default. Build from `~/gateway`
+before starting it.
+
 ```zsh
-cp ai.gateway.plist "$HOME/Library/LaunchAgents/ai.gateway.plist"
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/ai.gateway.plist"
+cargo build --release
+mkdir -p "$HOME/Library/LaunchAgents"
+ln -sfn "$HOME/gateway/ai.gateway.plist" "$HOME/Library/LaunchAgents/ai.gateway.plist"
+launchctl bootout "gui/$(id -u)/ai.gateway" 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" "$HOME/gateway/ai.gateway.plist"
 launchctl kickstart -k "gui/$(id -u)/ai.gateway"
 ```

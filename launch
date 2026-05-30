@@ -8,7 +8,7 @@ set -euo pipefail
 : "${XDG_DATA_HOME:?XDG_DATA_HOME is required}"
 : "${XDG_STATE_HOME:?XDG_STATE_HOME is required}"
 
-gateway_env_file="${GATEWAY_ENV_FILE:-$HOME/$XDG_CONFIG_HOME/gateway/env}"
+gateway_env_file="${GATEWAY_ENV_FILE:-$XDG_CONFIG_HOME/.sys/.env}"
 if [[ -r "$gateway_env_file" ]]; then
   source "$gateway_env_file"
 fi
@@ -45,4 +45,4 @@ do
   fi
 done
 
-exec env -i "${gateway_env[@]}" "${GATEWAY_BIN:-$XDG_DATA_HOME/gateway/bin/gateway}" bot
+exec env -i "${gateway_env[@]}" "${GATEWAY_BIN:-$HOME/gateway/target/release/gateway}" bot
