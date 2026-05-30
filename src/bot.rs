@@ -12,8 +12,10 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::sync::mpsc;
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
+
+const TYPING_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone)]
 struct Job {
@@ -23,12 +25,18 @@ struct Job {
 }
 
 struct TypingLoop {
-    stop: mpsc::Sender<()>,
+    stop: Option<mpsc::Sender<()>>,
+    handle: Option<JoinHandle<()>>,
 }
 
 impl Drop for TypingLoop {
     fn drop(&mut self) {
-        let _ = self.stop.send(());
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -336,13 +344,16 @@ fn run_job(
 fn start_typing_loop(tg: &TelegramClient, chat_id: i64) -> TypingLoop {
     let tg = tg.clone();
     let (stop, stopped) = mpsc::channel();
-    let _ = thread::spawn(move || loop {
+    let handle = thread::spawn(move || loop {
         let _ = tg.send_chat_action(chat_id, "typing");
-        if stopped.recv_timeout(typing_sleep()).is_ok() {
+        if stopped.recv_timeout(typing_refresh_interval()).is_ok() {
             break;
         }
     });
-    TypingLoop { stop }
+    TypingLoop {
+        stop: Some(stop),
+        handle: Some(handle),
+    }
 }
 
 fn empty_final_text(text: &str) -> String {
@@ -372,8 +383,8 @@ fn restart_gateway(launchd_target: &str) {
         .spawn();
 }
 
-pub fn typing_sleep() -> Duration {
-    Duration::from_secs(4)
+pub fn typing_refresh_interval() -> Duration {
+    TYPING_REFRESH_INTERVAL
 }
 
 #[cfg(test)]
@@ -430,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn typing_sleep_refreshes_before_telegram_expires() {
-        assert!(typing_sleep() < Duration::from_secs(5));
+    fn typing_refreshes_before_telegram_expires() {
+        assert!(typing_refresh_interval() < Duration::from_secs(5));
     }
 }
