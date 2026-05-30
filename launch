@@ -15,6 +15,7 @@ fi
 
 gateway_root="${0:A:h}"
 gateway_bin="$gateway_root/target/release/gateway"
+gateway_log_file="${GATEWAY_LOG_FILE:-$XDG_STATE_HOME/gateway/logs/gateway.log}"
 
 : "${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN is required}"
 : "${GATEWAY_ALLOWED_IDS:?GATEWAY_ALLOWED_IDS is required}"
@@ -33,6 +34,7 @@ gateway_env=(
   XDG_STATE_HOME="$XDG_STATE_HOME"
   TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN"
   GATEWAY_ALLOWED_IDS="$GATEWAY_ALLOWED_IDS"
+  GATEWAY_LOG_FILE="$gateway_log_file"
   GATEWAY_LAUNCHD_TARGET="${GATEWAY_LAUNCHD_TARGET:-gui/$(id -u)/ai.gateway}"
 )
 
@@ -40,10 +42,9 @@ for name in \
   GATEWAY_CODEX_BIN \
   GATEWAY_CODEX_HOME \
   GATEWAY_CODEX_WORKDIR \
-  GATEWAY_CODEX_MODEL \
+  GATEWAY_CONFIG_FILE \
   GATEWAY_FASTFETCH_BIN \
   GATEWAY_STATE_DIR \
-  GATEWAY_LOG_FILE \
   GATEWAY_POLL_TIMEOUT_SECS \
   GATEWAY_QUEUE_DEPTH \
   GATEWAY_CODEX_TIMEOUT_SECS
@@ -53,4 +54,7 @@ do
   fi
 done
 
+mkdir -p "${gateway_log_file:h}"
+exec >>"$gateway_log_file" 2>&1
+print -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] starting gateway"
 exec env -i "${gateway_env[@]}" "$gateway_bin" bot

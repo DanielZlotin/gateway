@@ -1,6 +1,6 @@
 use crate::codex::{run_codex, CodexConfig};
 use crate::commands::{directive_help, is_allowed, unknown_directive_message};
-use crate::config::Config;
+use crate::config::{save_gateway_config, Config, FastfetchConfig, GatewayConfigFile};
 use crate::session::{SessionKey, SessionStore};
 use crate::status::{fastfetch_status, format_status_message, status_header};
 use crate::telegram::{Message, TelegramClient, Update};
@@ -59,7 +59,10 @@ pub fn run(cfg: Config) -> Result<(), String> {
         send_long_message(
             &tg,
             *chat_id,
-            &format_status_message(&state, &fastfetch_status(&cfg.fastfetch_bin)),
+            &format_status_message(
+                &state,
+                &fastfetch_status(&cfg.fastfetch_bin, &cfg.fastfetch_args),
+            ),
             0,
         )?;
     }
@@ -210,15 +213,26 @@ fn handle_command(
                 return tg.send_message(msg.chat.id, &status_header(&state), msg.message_id);
             }
             match store.set_model(&key, &model) {
-                Ok(state) => tg.send_message(
-                    msg.chat.id,
-                    &format!(
-                        "Model set to {}\nSession: {}",
-                        state.model,
-                        session_label(state.session_id.as_deref().unwrap_or(""))
-                    ),
-                    msg.message_id,
-                ),
+                Ok(state) => {
+                    save_gateway_config(
+                        &cfg.gateway_config_file,
+                        &GatewayConfigFile {
+                            model: state.model.clone(),
+                            fastfetch: FastfetchConfig {
+                                args: cfg.fastfetch_args.clone(),
+                            },
+                        },
+                    )?;
+                    tg.send_message(
+                        msg.chat.id,
+                        &format!(
+                            "Model set to {}\nSession: {}",
+                            state.model,
+                            session_label(state.session_id.as_deref().unwrap_or(""))
+                        ),
+                        msg.message_id,
+                    )
+                }
                 Err(err) => tg.send_message(
                     msg.chat.id,
                     &format!("Failed to set model: {err}"),
@@ -269,7 +283,10 @@ fn handle_command(
             send_long_message(
                 tg,
                 msg.chat.id,
-                &format_status_message(&state, &fastfetch_status(&cfg.fastfetch_bin)),
+                &format_status_message(
+                    &state,
+                    &fastfetch_status(&cfg.fastfetch_bin, &cfg.fastfetch_args),
+                ),
                 msg.message_id,
             )
         }
@@ -311,6 +328,7 @@ fn run_job(
                 workdir: cfg.codex_workdir.clone(),
                 path: cfg.path.clone(),
                 default_model: cfg.codex_model.clone(),
+                instructions_file: cfg.state_dir.join("AGENTS.md"),
             },
             &job.prompt,
             state.session_id.as_deref(),

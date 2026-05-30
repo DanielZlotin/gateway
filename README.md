@@ -29,8 +29,25 @@ The process also expects `HOME`, `PATH`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`,
 Useful overrides:
 
 ```zsh
-export GATEWAY_CODEX_MODEL=gpt-5.5
 export GATEWAY_STATE_DIR="$XDG_STATE_HOME/gateway"
+```
+
+Gateway creates `$XDG_CONFIG_HOME/gateway/config.json` on startup when it is
+missing. The selected Codex model and fastfetch arguments are read from there:
+
+```json
+{
+  "model": "gpt-5.5",
+  "fastfetch": {
+    "args": [
+      "--logo",
+      "none",
+      "--pipe",
+      "--structure",
+      "OS:Host:Kernel:Uptime:CPU:GPU:Memory:Swap:Disk:Battery:LocalIp"
+    ]
+  }
+}
 ```
 
 ## Cron or launchd jobs
