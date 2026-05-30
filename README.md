@@ -49,16 +49,17 @@ gateway run --job daily --prompt-file /path/to/prompt.txt --telegram-chat <teleg
 
 ## LaunchAgent
 
-The LaunchAgent is intentionally repo-rooted: the plist runs
-`$HOME/gateway/launch`, and `launch` runs
-`$HOME/gateway/target/release/gateway` by default. Build from `~/gateway`
+The LaunchAgent is repo-rooted without assuming a fixed clone path. The plist
+resolves the loaded plist path, runs `launch` next to it, and `launch` runs
+`target/release/gateway` from the same repo checkout. Build from the repo root
 before starting it.
 
 ```zsh
+repo_root="$(pwd -P)"
 cargo build --release
 mkdir -p "$HOME/Library/LaunchAgents"
-ln -sfn "$HOME/gateway/ai.gateway.plist" "$HOME/Library/LaunchAgents/ai.gateway.plist"
+ln -sfn "$repo_root/ai.gateway.plist" "$HOME/Library/LaunchAgents/ai.gateway.plist"
 launchctl bootout "gui/$(id -u)/ai.gateway" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$HOME/gateway/ai.gateway.plist"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/ai.gateway.plist"
 launchctl kickstart -k "gui/$(id -u)/ai.gateway"
 ```

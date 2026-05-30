@@ -13,8 +13,16 @@ if [[ -r "$gateway_env_file" ]]; then
   source "$gateway_env_file"
 fi
 
+gateway_root="${0:A:h}"
+gateway_bin="$gateway_root/target/release/gateway"
+
 : "${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN is required}"
 : "${GATEWAY_ALLOWED_IDS:?GATEWAY_ALLOWED_IDS is required}"
+if [[ ! -x "$gateway_bin" ]]; then
+  print -u2 "gateway binary is missing or not executable: $gateway_bin"
+  print -u2 "run: cd ${(q)gateway_root} && cargo build --release"
+  exit 127
+fi
 
 gateway_env=(
   HOME="$HOME"
@@ -45,4 +53,4 @@ do
   fi
 done
 
-exec env -i "${gateway_env[@]}" "$HOME/gateway/target/release/gateway" bot
+exec env -i "${gateway_env[@]}" "$gateway_bin" bot

@@ -18,7 +18,7 @@
     <array>
       <string>/bin/zsh</string>
       <string>-lc</string>
-      <string>exec "$HOME/gateway/launch"</string>
+      <string>plist_path="$(/bin/launchctl print "gui/$(/usr/bin/id -u)/ai.gateway" 2>/dev/null | /usr/bin/sed -n 's/^[[:space:]]*path = //p' | /usr/bin/head -n 1)"; [[ -n "$plist_path" ]] || plist_path="$HOME/Library/LaunchAgents/ai.gateway.plist"; exec "${plist_path:A:h}/launch"</string>
     </array>
   </dict>
 </plist>
