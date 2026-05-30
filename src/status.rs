@@ -1,8 +1,10 @@
 use crate::session::ChatSession;
 use crate::text::session_label;
 use std::path::Path;
-use std::process::Command;
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+const FASTFETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn status_header(state: &ChatSession) -> String {
     format!(
@@ -21,18 +23,44 @@ pub fn format_status_message(state: &ChatSession, fetch: &str) -> String {
 }
 
 pub fn fastfetch_status(bin: &Path) -> String {
-    let output = Command::new(bin).output();
-    match output {
-        Ok(output) if output.status.success() => {
-            let text = format_fastfetch_output(&String::from_utf8_lossy(&output.stdout));
-            if text.is_empty() {
-                "fastfetch: no output".to_string()
-            } else {
-                text
+    match run_fastfetch(bin, FASTFETCH_TIMEOUT) {
+        Ok((raw, timed_out)) => {
+            let text = format_fastfetch_output(&raw);
+            match (text.is_empty(), timed_out) {
+                (false, false) => text,
+                (false, true) => {
+                    format!("{text}\n• ⏳ Fastfetch: timed out; showing partial output")
+                }
+                (true, true) => "fastfetch: timed out".to_string(),
+                (true, false) => "fastfetch: no output".to_string(),
             }
         }
-        Ok(output) => format!("fastfetch: exited with {}", output.status),
         Err(err) => format!("fastfetch: {err}"),
+    }
+}
+
+fn run_fastfetch(bin: &Path, timeout: Duration) -> Result<(String, bool), String> {
+    let mut child = Command::new(bin)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| err.to_string())?;
+    let start = Instant::now();
+    loop {
+        if child.try_wait().map_err(|err| err.to_string())?.is_some() {
+            let output = child.wait_with_output().map_err(|err| err.to_string())?;
+            if output.status.success() {
+                return Ok((String::from_utf8_lossy(&output.stdout).to_string(), false));
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(format!("exited with {} {stderr}", output.status));
+        }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let output = child.wait_with_output().map_err(|err| err.to_string())?;
+            return Ok((String::from_utf8_lossy(&output.stdout).to_string(), true));
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -65,6 +93,10 @@ fn fastfetch_emoji(key: &str) -> Option<&'static str> {
         "Host" => Some("💻"),
         "Kernel" => Some("⚙️"),
         "Uptime" => Some("⏱️"),
+        "Packages" => Some("📦"),
+        "Shell" => Some("🐚"),
+        key if key.starts_with("Display") => Some("🖼️"),
+        "Terminal" => Some("🖥️"),
         "CPU" => Some("🧠"),
         "GPU" => Some("🎮"),
         "Memory" => Some("💾"),
@@ -73,6 +105,15 @@ fn fastfetch_emoji(key: &str) -> Option<&'static str> {
         key if key.starts_with("Local IP") => Some("🌐"),
         key if key.starts_with("Battery") => Some("🔋"),
         "Power Adapter" => Some("🔌"),
+        "Locale" => Some("🌍"),
+        "Bluetooth" => Some("🟦"),
+        "Editor" => Some("✏️"),
+        "Date & Time" | "DateTime" | "Datetime" => Some("📅"),
+        "Hebrew Date" => Some("✡️"),
+        "Timezone" => Some("🕒"),
+        "Day of Week" => Some("📆"),
+        "Moon Phase" => Some("🌙"),
+        "Weather" => Some("☁️"),
         _ => None,
     }
 }
@@ -143,7 +184,7 @@ mod tests {
 
         assert_eq!(
             got,
-            "• 🖥️ OS: macOS Tahoe 26.3\n• 💻 Host: MacBook Pro\n• 💾 Memory: 8.60 GiB / 64.00 GiB (13%)"
+            "• 🖥️ OS: macOS Tahoe 26.3\n• 💻 Host: MacBook Pro\n• 📦 Packages: 126\n• 💾 Memory: 8.60 GiB / 64.00 GiB (13%)"
         );
     }
 }
