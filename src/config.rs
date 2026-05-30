@@ -6,6 +6,7 @@ use std::time::Duration;
 
 pub const TELEGRAM_BOT_TOKEN_ENV: &str = "TELEGRAM_BOT_TOKEN";
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.5";
+pub const DEFAULT_CODEX_TIMEOUT_SECS: u64 = 15 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -97,7 +98,11 @@ pub fn load_from_env(env: &BTreeMap<String, String>) -> Result<Config, String> {
         launchd_target: value(env, "GATEWAY_LAUNCHD_TARGET", "ai.gateway"),
         poll_timeout_sec: number(env, "GATEWAY_POLL_TIMEOUT_SECS", 50)?,
         queue_depth: number(env, "GATEWAY_QUEUE_DEPTH", 8)?,
-        codex_timeout: Duration::from_secs(number(env, "GATEWAY_CODEX_TIMEOUT_SECS", 45 * 60)?),
+        codex_timeout: Duration::from_secs(number(
+            env,
+            "GATEWAY_CODEX_TIMEOUT_SECS",
+            DEFAULT_CODEX_TIMEOUT_SECS,
+        )?),
     })
 }
 
@@ -271,7 +276,10 @@ mod tests {
         assert_eq!(cfg.launchd_target, "ai.gateway");
         assert_eq!(cfg.codex_model, DEFAULT_CODEX_MODEL);
         assert_eq!(cfg.queue_depth, 8);
-        assert_eq!(cfg.codex_timeout, Duration::from_secs(45 * 60));
+        assert_eq!(
+            cfg.codex_timeout,
+            Duration::from_secs(DEFAULT_CODEX_TIMEOUT_SECS)
+        );
     }
 
     #[test]

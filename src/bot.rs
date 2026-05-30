@@ -13,7 +13,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const TYPING_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 
@@ -293,7 +293,9 @@ fn worker_loop(cfg: Config, rx: mpsc::Receiver<Job>) {
         cfg.codex_model.clone(),
     );
     for job in rx {
-        let _ = run_job(&cfg, &tg, &store, job);
+        if let Err(err) = run_job(&cfg, &tg, &store, job) {
+            eprintln!("[gateway] job handler failed: {err}");
+        }
     }
 }
 
@@ -303,8 +305,18 @@ fn run_job(
     store: &SessionStore,
     job: Job,
 ) -> Result<(), String> {
+    let started = Instant::now();
     let key = SessionKey::Chat(job.chat_id);
     let state = store.load(&key);
+    eprintln!(
+        "[gateway] job start chat={} reply_to={} model={} session={} prompt_chars={} timeout_secs={}",
+        job.chat_id,
+        job.reply_to_message_id,
+        state.model,
+        session_label(state.session_id.as_deref().unwrap_or("")),
+        job.prompt.chars().count(),
+        cfg.codex_timeout.as_secs()
+    );
     let output = match {
         let _typing = start_typing_loop(tg, job.chat_id);
         run_codex(
@@ -330,6 +342,12 @@ fn run_job(
     } {
         Ok(output) => output,
         Err(err) => {
+            eprintln!(
+                "[gateway] job codex failed chat={} elapsed_ms={} error={}",
+                job.chat_id,
+                started.elapsed().as_millis(),
+                single_line(&err)
+            );
             send_long_message(
                 tg,
                 job.chat_id,
@@ -342,12 +360,23 @@ fn run_job(
     if let Some(session_id) = output.session_id.as_deref() {
         store.save_run(&key, state.generation, session_id)?;
     }
+    eprintln!(
+        "[gateway] job success chat={} elapsed_ms={} final_chars={} session={}",
+        job.chat_id,
+        started.elapsed().as_millis(),
+        output.final_text.chars().count(),
+        session_label(output.session_id.as_deref().unwrap_or(""))
+    );
     send_long_message(
         tg,
         job.chat_id,
         &empty_final_text(&output.final_text),
         job.reply_to_message_id,
     )
+}
+
+fn single_line(text: &str) -> String {
+    text.lines().collect::<Vec<_>>().join(" | ")
 }
 
 fn start_typing_loop(tg: &TelegramClient, chat_id: i64) -> TypingLoop {

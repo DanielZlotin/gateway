@@ -30,6 +30,7 @@ Useful overrides:
 
 ```zsh
 export GATEWAY_STATE_DIR="$XDG_STATE_HOME/gateway"
+export GATEWAY_CODEX_TIMEOUT_SECS=900
 ```
 
 Gateway creates `$XDG_CONFIG_HOME/gateway/config.json` on startup when it is
