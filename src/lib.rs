@@ -1,3 +1,4 @@
+pub mod bot;
 pub mod cli;
 pub mod codex;
 pub mod commands;
