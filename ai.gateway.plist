@@ -17,7 +17,7 @@
     <key>ProgramArguments</key>
     <array>
       <string>/bin/zsh</string>
-      <string>/Users/example/.config/gateway/gateway-launch.sh</string>
+      <string>/Users/example/gateway/gateway-launch.sh</string>
     </array>
     <key>StandardOutPath</key>
     <string>/Users/example/.local/share/gateway/logs/gateway.log</string>
