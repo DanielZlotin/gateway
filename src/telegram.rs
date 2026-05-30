@@ -62,6 +62,7 @@ pub struct Chat {
     pub username: String,
 }
 
+#[derive(Clone)]
 pub struct TelegramClient {
     base_url: String,
     agent: ureq::Agent,

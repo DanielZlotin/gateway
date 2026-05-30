@@ -22,6 +22,16 @@ struct Job {
     prompt: String,
 }
 
+struct TypingLoop {
+    stop: mpsc::Sender<()>,
+}
+
+impl Drop for TypingLoop {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+    }
+}
+
 pub fn run(cfg: Config) -> Result<(), String> {
     fs::create_dir_all(&cfg.state_dir).map_err(|err| format!("create state dir: {err}"))?;
     fs::create_dir_all(&cfg.chat_state_dir)
@@ -145,6 +155,8 @@ fn handle_message(
             "Codex queue is full. Try again after the current requests finish.",
             msg.message_id,
         )?;
+    } else {
+        let _ = tg.send_chat_action(msg.chat.id, "typing");
     }
     Ok(())
 }
@@ -277,25 +289,28 @@ fn run_job(
 ) -> Result<(), String> {
     let key = SessionKey::Chat(job.chat_id);
     let state = store.load(&key);
-    let output = match run_codex(
-        &CodexConfig {
-            bin: cfg.codex_bin.clone(),
-            home: cfg.codex_home.clone(),
-            user_home: cfg.user_home.clone(),
-            xdg_config_home: cfg.xdg_config_home.clone(),
-            xdg_cache_home: cfg.xdg_cache_home.clone(),
-            xdg_data_home: cfg.xdg_data_home.clone(),
-            xdg_state_home: cfg.xdg_state_home.clone(),
-            workdir: cfg.codex_workdir.clone(),
-            path: cfg.path.clone(),
-            default_model: cfg.codex_model.clone(),
-        },
-        &job.prompt,
-        state.session_id.as_deref(),
-        &state.model,
-        cfg.codex_timeout,
-        &cfg.state_dir,
-    ) {
+    let output = match {
+        let _typing = start_typing_loop(tg, job.chat_id);
+        run_codex(
+            &CodexConfig {
+                bin: cfg.codex_bin.clone(),
+                home: cfg.codex_home.clone(),
+                user_home: cfg.user_home.clone(),
+                xdg_config_home: cfg.xdg_config_home.clone(),
+                xdg_cache_home: cfg.xdg_cache_home.clone(),
+                xdg_data_home: cfg.xdg_data_home.clone(),
+                xdg_state_home: cfg.xdg_state_home.clone(),
+                workdir: cfg.codex_workdir.clone(),
+                path: cfg.path.clone(),
+                default_model: cfg.codex_model.clone(),
+            },
+            &job.prompt,
+            state.session_id.as_deref(),
+            &state.model,
+            cfg.codex_timeout,
+            &cfg.state_dir,
+        )
+    } {
         Ok(output) => output,
         Err(err) => {
             send_long_message(
@@ -316,6 +331,18 @@ fn run_job(
         &empty_final_text(&output.final_text),
         job.reply_to_message_id,
     )
+}
+
+fn start_typing_loop(tg: &TelegramClient, chat_id: i64) -> TypingLoop {
+    let tg = tg.clone();
+    let (stop, stopped) = mpsc::channel();
+    let _ = thread::spawn(move || loop {
+        let _ = tg.send_chat_action(chat_id, "typing");
+        if stopped.recv_timeout(typing_sleep()).is_ok() {
+            break;
+        }
+    });
+    TypingLoop { stop }
 }
 
 fn empty_final_text(text: &str) -> String {
@@ -400,5 +427,10 @@ mod tests {
         assert_eq!(message_text(" hello ", "caption").unwrap(), "hello");
         assert_eq!(message_text("", " caption ").unwrap(), "caption");
         assert_eq!(message_text("", "").unwrap_err(), "Text messages only.");
+    }
+
+    #[test]
+    fn typing_sleep_refreshes_before_telegram_expires() {
+        assert!(typing_sleep() < Duration::from_secs(5));
     }
 }
