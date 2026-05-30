@@ -20,8 +20,8 @@ pub fn format_status_message(state: &ChatSession, fetch: &str) -> String {
     format!("{}\n\n{fetch}", status_header(state))
 }
 
-pub fn fastfetch_status(bin: &Path, args: &[String]) -> String {
-    let output = Command::new(bin).args(args).output();
+pub fn fastfetch_status(bin: &Path) -> String {
+    let output = Command::new(bin).output();
     match output {
         Ok(output) if output.status.success() => {
             let text = String::from_utf8_lossy(&output.stdout).trim().to_string();

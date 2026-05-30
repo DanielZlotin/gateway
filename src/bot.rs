@@ -1,6 +1,6 @@
 use crate::codex::{run_codex, CodexConfig};
 use crate::commands::{directive_help, is_allowed, unknown_directive_message};
-use crate::config::{save_gateway_config, Config, FastfetchConfig, GatewayConfigFile};
+use crate::config::{save_gateway_config, Config, GatewayConfigFile};
 use crate::session::{SessionKey, SessionStore};
 use crate::status::{fastfetch_status, format_status_message, status_header};
 use crate::telegram::{Message, TelegramClient, Update};
@@ -59,10 +59,7 @@ pub fn run(cfg: Config) -> Result<(), String> {
         send_long_message(
             &tg,
             *chat_id,
-            &format_status_message(
-                &state,
-                &fastfetch_status(&cfg.fastfetch_bin, &cfg.fastfetch_args),
-            ),
+            &format_status_message(&state, &fastfetch_status(&cfg.fastfetch_bin)),
             0,
         )?;
     }
@@ -218,9 +215,6 @@ fn handle_command(
                         &cfg.gateway_config_file,
                         &GatewayConfigFile {
                             model: state.model.clone(),
-                            fastfetch: FastfetchConfig {
-                                args: cfg.fastfetch_args.clone(),
-                            },
                         },
                     )?;
                     tg.send_message(
@@ -283,10 +277,7 @@ fn handle_command(
             send_long_message(
                 tg,
                 msg.chat.id,
-                &format_status_message(
-                    &state,
-                    &fastfetch_status(&cfg.fastfetch_bin, &cfg.fastfetch_args),
-                ),
+                &format_status_message(&state, &fastfetch_status(&cfg.fastfetch_bin)),
                 msg.message_id,
             )
         }

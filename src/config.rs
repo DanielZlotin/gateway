@@ -7,14 +7,6 @@ use std::time::Duration;
 pub const TELEGRAM_BOT_TOKEN_ENV: &str = "TELEGRAM_BOT_TOKEN";
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.5";
 
-const DEFAULT_FASTFETCH_ARGS: &[&str] = &[
-    "--logo",
-    "none",
-    "--pipe",
-    "--structure",
-    "OS:Host:Kernel:Uptime:CPU:GPU:Memory:Swap:Disk:Battery:LocalIp",
-];
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub bot_token: String,
@@ -31,7 +23,6 @@ pub struct Config {
     pub codex_workdir: PathBuf,
     pub codex_model: String,
     pub fastfetch_bin: PathBuf,
-    pub fastfetch_args: Vec<String>,
     pub state_dir: PathBuf,
     pub chat_state_dir: PathBuf,
     pub cron_state_dir: PathBuf,
@@ -47,14 +38,6 @@ pub struct Config {
 pub struct GatewayConfigFile {
     #[serde(default = "default_codex_model")]
     pub model: String,
-    #[serde(default)]
-    pub fastfetch: FastfetchConfig,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FastfetchConfig {
-    #[serde(default = "default_fastfetch_args")]
-    pub args: Vec<String>,
 }
 
 pub fn current_env() -> BTreeMap<String, String> {
@@ -106,7 +89,6 @@ pub fn load_from_env(env: &BTreeMap<String, String>) -> Result<Config, String> {
             "GATEWAY_FASTFETCH_BIN",
             PathBuf::from("/opt/homebrew/bin/fastfetch"),
         ),
-        fastfetch_args: gateway_config.fastfetch.args,
         state_dir: state_dir.clone(),
         chat_state_dir,
         cron_state_dir,
@@ -213,7 +195,6 @@ impl Default for GatewayConfigFile {
     fn default() -> Self {
         Self {
             model: default_codex_model(),
-            fastfetch: FastfetchConfig::default(),
         }
     }
 }
@@ -225,42 +206,11 @@ impl GatewayConfigFile {
         } else {
             self.model = self.model.trim().to_string();
         }
-        self.fastfetch.normalize();
-    }
-}
-
-impl Default for FastfetchConfig {
-    fn default() -> Self {
-        Self {
-            args: default_fastfetch_args(),
-        }
-    }
-}
-
-impl FastfetchConfig {
-    fn normalize(&mut self) {
-        self.args = self
-            .args
-            .iter()
-            .map(|arg| arg.trim())
-            .filter(|arg| !arg.is_empty())
-            .map(ToOwned::to_owned)
-            .collect();
-        if self.args.is_empty() {
-            self.args = default_fastfetch_args();
-        }
     }
 }
 
 fn default_codex_model() -> String {
     DEFAULT_CODEX_MODEL.to_string()
-}
-
-fn default_fastfetch_args() -> Vec<String> {
-    DEFAULT_FASTFETCH_ARGS
-        .iter()
-        .map(|arg| (*arg).to_string())
-        .collect()
 }
 
 #[cfg(test)]
@@ -320,7 +270,6 @@ mod tests {
         assert!(cfg.gateway_config_file.exists());
         assert_eq!(cfg.launchd_target, "ai.gateway");
         assert_eq!(cfg.codex_model, DEFAULT_CODEX_MODEL);
-        assert_eq!(cfg.fastfetch_args, default_fastfetch_args());
         assert_eq!(cfg.queue_depth, 8);
         assert_eq!(cfg.codex_timeout, Duration::from_secs(45 * 60));
     }
@@ -354,9 +303,6 @@ mod tests {
             &cfg_path,
             &GatewayConfigFile {
                 model: "gpt-test".to_string(),
-                fastfetch: FastfetchConfig {
-                    args: vec!["--pipe".to_string()],
-                },
             },
         )
         .unwrap();
@@ -365,7 +311,6 @@ mod tests {
 
         assert_eq!(cfg.allowed_ids, vec![7, 8]);
         assert_eq!(cfg.codex_model, "gpt-test");
-        assert_eq!(cfg.fastfetch_args, vec!["--pipe"]);
         assert_eq!(cfg.queue_depth, 3);
         assert_eq!(cfg.codex_timeout, Duration::from_secs(9));
         assert_eq!(cfg.chat_state_dir, PathBuf::from("/tmp/gateway/chats"));
@@ -386,6 +331,7 @@ mod tests {
         let cfg = load_gateway_config(&path).unwrap();
 
         assert_eq!(cfg.model, DEFAULT_CODEX_MODEL);
-        assert_eq!(cfg.fastfetch.args, vec!["--pipe"]);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("fastfetch"));
     }
 }

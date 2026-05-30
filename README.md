@@ -33,22 +33,16 @@ export GATEWAY_STATE_DIR="$XDG_STATE_HOME/gateway"
 ```
 
 Gateway creates `$XDG_CONFIG_HOME/gateway/config.json` on startup when it is
-missing. The selected Codex model and fastfetch arguments are read from there:
+missing. The selected Codex model is read from there:
 
 ```json
 {
-  "model": "gpt-5.5",
-  "fastfetch": {
-    "args": [
-      "--logo",
-      "none",
-      "--pipe",
-      "--structure",
-      "OS:Host:Kernel:Uptime:CPU:GPU:Memory:Swap:Disk:Battery:LocalIp"
-    ]
-  }
+  "model": "gpt-5.5"
 }
 ```
+
+Gateway invokes `fastfetch` without overriding arguments so fastfetch uses its
+own XDG config.
 
 ## Cron or launchd jobs
 
