@@ -9,7 +9,13 @@ use std::time::{Duration, Instant};
 pub struct CodexConfig {
     pub bin: PathBuf,
     pub home: PathBuf,
+    pub user_home: PathBuf,
+    pub xdg_config_home: PathBuf,
+    pub xdg_cache_home: PathBuf,
+    pub xdg_data_home: PathBuf,
+    pub xdg_state_home: PathBuf,
     pub workdir: PathBuf,
+    pub path: String,
     pub default_model: String,
 }
 
@@ -93,15 +99,31 @@ pub fn parse_codex_json(output: &str) -> CodexOutput {
 
 pub fn codex_env(cfg: &CodexConfig) -> Vec<(String, String)> {
     vec![
-        ("HOME".to_string(), "/Users/example".to_string()),
+        (
+            "HOME".to_string(),
+            cfg.user_home.to_string_lossy().to_string(),
+        ),
         (
             "CODEX_HOME".to_string(),
             cfg.home.to_string_lossy().to_string(),
         ),
         (
-            "PATH".to_string(),
-            "/Users/example/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin".to_string(),
+            "XDG_CONFIG_HOME".to_string(),
+            cfg.xdg_config_home.to_string_lossy().to_string(),
         ),
+        (
+            "XDG_CACHE_HOME".to_string(),
+            cfg.xdg_cache_home.to_string_lossy().to_string(),
+        ),
+        (
+            "XDG_DATA_HOME".to_string(),
+            cfg.xdg_data_home.to_string_lossy().to_string(),
+        ),
+        (
+            "XDG_STATE_HOME".to_string(),
+            cfg.xdg_state_home.to_string_lossy().to_string(),
+        ),
+        ("PATH".to_string(), cfg.path.clone()),
         ("LANG".to_string(), "en_US.UTF-8".to_string()),
         ("LC_ALL".to_string(), "en_US.UTF-8".to_string()),
     ]
@@ -274,16 +296,25 @@ mod tests {
         let cfg = CodexConfig {
             bin: PathBuf::from("/bin/codex"),
             home: PathBuf::from("/codex-home"),
+            user_home: PathBuf::from("/home/example"),
+            xdg_config_home: PathBuf::from("/xdg/config"),
+            xdg_cache_home: PathBuf::from("/xdg/cache"),
+            xdg_data_home: PathBuf::from("/xdg/data"),
+            xdg_state_home: PathBuf::from("/xdg/state"),
             workdir: PathBuf::from("/work"),
+            path: "/bin:/usr/bin".to_string(),
             default_model: "gpt-5.5".to_string(),
         };
 
         let env = codex_env(&cfg);
 
         assert!(env.contains(&("CODEX_HOME".to_string(), "/codex-home".to_string())));
+        assert!(env.contains(&("HOME".to_string(), "/home/example".to_string())));
+        assert!(env.contains(&("XDG_CONFIG_HOME".to_string(), "/xdg/config".to_string())));
+        assert!(env.contains(&("XDG_CACHE_HOME".to_string(), "/xdg/cache".to_string())));
+        assert!(env.contains(&("XDG_DATA_HOME".to_string(), "/xdg/data".to_string())));
+        assert!(env.contains(&("XDG_STATE_HOME".to_string(), "/xdg/state".to_string())));
         assert!(env.contains(&("LANG".to_string(), "en_US.UTF-8".to_string())));
-        assert!(env
-            .iter()
-            .any(|(key, value)| key == "PATH" && value.contains("/opt/homebrew/bin")));
+        assert!(env.contains(&("PATH".to_string(), "/bin:/usr/bin".to_string())));
     }
 }

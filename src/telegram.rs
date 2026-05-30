@@ -302,7 +302,7 @@ mod tests {
 
     #[test]
     fn command_scope_targets_match_go_gateway() {
-        let targets = command_scope_targets(&[<telegram_chat_id>]);
+        let targets = command_scope_targets(&[42]);
         let summary: Vec<_> = targets
             .iter()
             .map(|target| {
@@ -321,10 +321,10 @@ mod tests {
                 ("all_private_chats", "all_private_chats", true),
                 ("all_group_chats", "all_group_chats", false),
                 ("all_chat_administrators", "all_chat_administrators", false),
-                ("chat:<telegram_chat_id>", "chat", true),
+                ("chat:42", "chat", true),
             ]
         );
-        assert_eq!(targets[4].scope.chat_id, Some(<telegram_chat_id>));
+        assert_eq!(targets[4].scope.chat_id, Some(42));
     }
 
     #[test]
@@ -332,7 +332,7 @@ mod tests {
         let values = command_request_values(
             &BotCommandScope {
                 scope_type: "chat".to_string(),
-                chat_id: Some(<telegram_chat_id>),
+                chat_id: Some(42),
             },
             "en",
         )
@@ -340,7 +340,7 @@ mod tests {
 
         assert!(values.contains(&(
             "scope".to_string(),
-            r#"{"type":"chat","chat_id":<telegram_chat_id>}"#.to_string()
+            r#"{"type":"chat","chat_id":42}"#.to_string()
         )));
         assert!(values.contains(&("language_code".to_string(), "en".to_string())));
     }

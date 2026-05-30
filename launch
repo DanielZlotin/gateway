@@ -1,11 +1,48 @@
 #!/bin/zsh
 set -euo pipefail
 
-source /Users/example/$XDG_CONFIG_HOME/gateway/env
+: "${HOME:?HOME is required}"
+: "${PATH:?PATH is required}"
+: "${XDG_CONFIG_HOME:?XDG_CONFIG_HOME is required}"
+: "${XDG_CACHE_HOME:?XDG_CACHE_HOME is required}"
+: "${XDG_DATA_HOME:?XDG_DATA_HOME is required}"
+: "${XDG_STATE_HOME:?XDG_STATE_HOME is required}"
+
+gateway_env_file="${GATEWAY_ENV_FILE:-$XDG_CONFIG_HOME/gateway/env}"
+if [[ -r "$gateway_env_file" ]]; then
+  source "$gateway_env_file"
+fi
 
 : "${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN is required}"
+: "${GATEWAY_ALLOWED_IDS:?GATEWAY_ALLOWED_IDS is required}"
 
-exec env -i \
-  HOME=/Users/example \
-  TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" \
-  /Users/example/.local/bin/gateway bot
+gateway_env=(
+  HOME="$HOME"
+  PATH="$PATH"
+  XDG_CONFIG_HOME="$XDG_CONFIG_HOME"
+  XDG_CACHE_HOME="$XDG_CACHE_HOME"
+  XDG_DATA_HOME="$XDG_DATA_HOME"
+  XDG_STATE_HOME="$XDG_STATE_HOME"
+  TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN"
+  GATEWAY_ALLOWED_IDS="$GATEWAY_ALLOWED_IDS"
+  GATEWAY_LAUNCHD_TARGET="${GATEWAY_LAUNCHD_TARGET:-gui/$(id -u)/ai.gateway}"
+)
+
+for name in \
+  GATEWAY_CODEX_BIN \
+  GATEWAY_CODEX_HOME \
+  GATEWAY_CODEX_WORKDIR \
+  GATEWAY_CODEX_MODEL \
+  GATEWAY_FASTFETCH_BIN \
+  GATEWAY_STATE_DIR \
+  GATEWAY_LOG_FILE \
+  GATEWAY_POLL_TIMEOUT_SECS \
+  GATEWAY_QUEUE_DEPTH \
+  GATEWAY_CODEX_TIMEOUT_SECS
+do
+  if [[ -n "${(P)name:-}" ]]; then
+    gateway_env+=("$name=${(P)name}")
+  fi
+done
+
+exec env -i "${gateway_env[@]}" "${GATEWAY_BIN:-$XDG_DATA_HOME/gateway/bin/gateway}" bot

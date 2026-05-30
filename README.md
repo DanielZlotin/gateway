@@ -4,10 +4,11 @@ Lean Rust Telegram-to-Codex gateway.
 
 ## Build
 
-```sh
+```zsh
 cargo test
 cargo build --release
-install -m 755 target/release/gateway "$HOME/.local/bin/gateway"
+install -d "$XDG_DATA_HOME/gateway/bin"
+install -m 755 target/release/gateway "$XDG_DATA_HOME/gateway/bin/gateway"
 ```
 
 ## Bot
@@ -17,37 +18,42 @@ install -m 755 target/release/gateway "$HOME/.local/bin/gateway"
 
 Required secret:
 
-```sh
+```zsh
 export TELEGRAM_BOT_TOKEN=...
+export GATEWAY_ALLOWED_IDS=<telegram_chat_id>
 ```
+
+For launchd, put those exports in `$XDG_CONFIG_HOME/gateway/env`.
+The process also expects `HOME`, `PATH`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`,
+`XDG_DATA_HOME`, and `XDG_STATE_HOME`.
 
 Useful overrides:
 
-```sh
-export GATEWAY_ALLOWED_IDS=<telegram_chat_id>
+```zsh
 export GATEWAY_CODEX_MODEL=gpt-5.5
-export GATEWAY_STATE_DIR=/Users/example/.local/state/gateway
+export GATEWAY_STATE_DIR="$XDG_STATE_HOME/gateway"
 ```
 
 ## Cron or launchd jobs
 
 Run a one-shot Codex prompt without touching the chat bot process:
 
-```sh
+```zsh
 gateway run --job daily --prompt "Summarize the current system state"
 ```
 
 Send the result to Telegram:
 
-```sh
+```zsh
 gateway run --job daily --prompt-file /path/to/prompt.txt --telegram-chat <telegram_chat_id>
 ```
 
 ## LaunchAgent
 
-```sh
-mkdir -p "$HOME/.local/share/gateway/logs"
-cp ai.gateway.plist "$HOME/Library/LaunchAgents/ai.gateway.plist"
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/ai.gateway.plist"
+```zsh
+install -d "$XDG_CONFIG_HOME/gateway"
+install -m 755 launch "$XDG_CONFIG_HOME/gateway/launch"
+cp ai.gateway.plist "$XDG_CONFIG_HOME/gateway/ai.gateway.plist"
+launchctl bootstrap "gui/$(id -u)" "$XDG_CONFIG_HOME/gateway/ai.gateway.plist"
 launchctl kickstart -k "gui/$(id -u)/ai.gateway"
 ```

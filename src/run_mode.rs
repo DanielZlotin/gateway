@@ -45,7 +45,13 @@ pub fn run(args: RunArgs, cfg: Config) -> Result<String, String> {
         &CodexConfig {
             bin: cfg.codex_bin.clone(),
             home: cfg.codex_home.clone(),
+            user_home: cfg.user_home.clone(),
+            xdg_config_home: cfg.xdg_config_home.clone(),
+            xdg_cache_home: cfg.xdg_cache_home.clone(),
+            xdg_data_home: cfg.xdg_data_home.clone(),
+            xdg_state_home: cfg.xdg_state_home.clone(),
             workdir: cfg.codex_workdir.clone(),
+            path: cfg.path.clone(),
             default_model: cfg.codex_model.clone(),
         },
         &prompt,
