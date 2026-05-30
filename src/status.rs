@@ -24,7 +24,7 @@ pub fn fastfetch_status(bin: &Path) -> String {
     let output = Command::new(bin).output();
     match output {
         Ok(output) if output.status.success() => {
-            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let text = format_fastfetch_output(&String::from_utf8_lossy(&output.stdout));
             if text.is_empty() {
                 "fastfetch: no output".to_string()
             } else {
@@ -34,6 +34,67 @@ pub fn fastfetch_status(bin: &Path) -> String {
         Ok(output) => format!("fastfetch: exited with {}", output.status),
         Err(err) => format!("fastfetch: {err}"),
     }
+}
+
+pub fn format_fastfetch_output(raw: &str) -> String {
+    let mut lines = Vec::new();
+    for raw_line in strip_ansi(raw).lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('-') || !line.contains(':') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        let Some(emoji) = fastfetch_emoji(key) else {
+            continue;
+        };
+        lines.push(format!("• {emoji} {key}: {value}"));
+    }
+    lines.join("\n")
+}
+
+fn fastfetch_emoji(key: &str) -> Option<&'static str> {
+    match key {
+        "OS" => Some("🖥️"),
+        "Host" => Some("💻"),
+        "Kernel" => Some("⚙️"),
+        "Uptime" => Some("⏱️"),
+        "CPU" => Some("🧠"),
+        "GPU" => Some("🎮"),
+        "Memory" => Some("💾"),
+        "Swap" => Some("🔁"),
+        key if key.starts_with("Disk") => Some("🗄️"),
+        key if key.starts_with("Local IP") => Some("🌐"),
+        key if key.starts_with("Battery") => Some("🔋"),
+        "Power Adapter" => Some("🔌"),
+        _ => None,
+    }
+}
+
+fn strip_ansi(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\x1b' {
+            out.push(ch);
+            continue;
+        }
+        if chars.next() != Some('[') {
+            continue;
+        }
+        for next in chars.by_ref() {
+            if ('@'..='~').contains(&next) {
+                break;
+            }
+        }
+    }
+    out
 }
 
 pub fn typing_interval() -> Duration {
@@ -72,5 +133,17 @@ mod tests {
         assert!(got.contains("Model: gpt-test"));
         assert!(got.contains("OS: test"));
         assert!(!got.contains("Gateway restarted."));
+    }
+
+    #[test]
+    fn fastfetch_output_formats_telegram_bullets() {
+        let raw = "\x1b[34C------------------------------\n\x1b[34COS: macOS Tahoe 26.3\n\x1b[34CHost: MacBook Pro\n\x1b[34CPackages: 126\n\x1b[34CMemory: 8.60 GiB / 64.00 GiB (13%)\n";
+
+        let got = format_fastfetch_output(raw);
+
+        assert_eq!(
+            got,
+            "• 🖥️ OS: macOS Tahoe 26.3\n• 💻 Host: MacBook Pro\n• 💾 Memory: 8.60 GiB / 64.00 GiB (13%)"
+        );
     }
 }
