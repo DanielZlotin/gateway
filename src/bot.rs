@@ -406,13 +406,41 @@ fn run_job(
     }
 }
 
+const FINAL_MESSAGE_EFFECT_ID: &str = "5107584321108051014";
+
 fn send_final_message(
     tg: &TelegramClient,
     job: &Job,
     stream_message_id: i64,
     first: &str,
 ) -> Result<(), String> {
-    tg.edit_message_text(job.chat_id, stream_message_id, first)
+    let _ = tg.delete_message(job.chat_id, stream_message_id);
+    match tg.send_message_with_effect(
+        job.chat_id,
+        first,
+        job.reply_to_message_id,
+        FINAL_MESSAGE_EFFECT_ID,
+    ) {
+        Ok(message) => {
+            if message.effect_id.as_deref() != Some(FINAL_MESSAGE_EFFECT_ID) {
+                eprintln!(
+                    "[gateway] telegram final effect missing chat={} message={} requested_effect={} returned_effect={}",
+                    job.chat_id,
+                    message.message_id,
+                    FINAL_MESSAGE_EFFECT_ID,
+                    message.effect_id.as_deref().unwrap_or("<none>")
+                );
+            }
+            Ok(())
+        }
+        Err(err) => {
+            eprintln!(
+                "[gateway] telegram final effect failed chat={} effect={} error={}",
+                job.chat_id, FINAL_MESSAGE_EFFECT_ID, err
+            );
+            tg.send_message(job.chat_id, first, job.reply_to_message_id)
+        }
+    }
 }
 
 fn single_line(text: &str) -> String {

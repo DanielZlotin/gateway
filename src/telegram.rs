@@ -40,6 +40,8 @@ pub struct Message {
     pub message_id: i64,
     #[serde(default)]
     pub message_thread_id: Option<i64>,
+    #[serde(default)]
+    pub effect_id: Option<String>,
     pub from: Option<User>,
     pub chat: Chat,
     #[serde(default)]
@@ -99,15 +101,7 @@ impl TelegramClient {
         text: &str,
         reply_to_message_id: i64,
     ) -> Result<(), String> {
-        let mut values = vec![
-            ("chat_id", chat_id.to_string()),
-            ("text", text.to_string()),
-            ("disable_web_page_preview", "true".to_string()),
-        ];
-        if reply_to_message_id > 0 {
-            values.push(("reply_to_message_id", reply_to_message_id.to_string()));
-            values.push(("allow_sending_without_reply", "true".to_string()));
-        }
+        let values = send_message_values(chat_id, text, reply_to_message_id, None);
         let _: serde_json::Value = self.post_form("sendMessage", &values)?;
         Ok(())
     }
@@ -118,17 +112,30 @@ impl TelegramClient {
         text: &str,
         reply_to_message_id: i64,
     ) -> Result<i64, String> {
-        let mut values = vec![
-            ("chat_id", chat_id.to_string()),
-            ("text", text.to_string()),
-            ("disable_web_page_preview", "true".to_string()),
-        ];
-        if reply_to_message_id > 0 {
-            values.push(("reply_to_message_id", reply_to_message_id.to_string()));
-            values.push(("allow_sending_without_reply", "true".to_string()));
-        }
+        let values = send_message_values(chat_id, text, reply_to_message_id, None);
         let message: Message = self.post_form("sendMessage", &values)?;
         Ok(message.message_id)
+    }
+
+    pub fn send_message_with_effect(
+        &self,
+        chat_id: i64,
+        text: &str,
+        reply_to_message_id: i64,
+        message_effect_id: &str,
+    ) -> Result<Message, String> {
+        let values =
+            send_message_values(chat_id, text, reply_to_message_id, Some(message_effect_id));
+        self.post_form("sendMessage", &values)
+    }
+
+    pub fn delete_message(&self, chat_id: i64, message_id: i64) -> Result<(), String> {
+        let values = [
+            ("chat_id", chat_id.to_string()),
+            ("message_id", message_id.to_string()),
+        ];
+        let _: bool = self.post_form("deleteMessage", &values)?;
+        Ok(())
     }
 
     pub fn edit_message_text(
@@ -235,6 +242,27 @@ impl TelegramClient {
                 .unwrap_or_else(|| format!("telegram {method} failed")))
         }
     }
+}
+
+fn send_message_values(
+    chat_id: i64,
+    text: &str,
+    reply_to_message_id: i64,
+    message_effect_id: Option<&str>,
+) -> Vec<(&'static str, String)> {
+    let mut values = vec![
+        ("chat_id", chat_id.to_string()),
+        ("text", text.to_string()),
+        ("disable_web_page_preview", "true".to_string()),
+    ];
+    if reply_to_message_id > 0 {
+        values.push(("reply_to_message_id", reply_to_message_id.to_string()));
+        values.push(("allow_sending_without_reply", "true".to_string()));
+    }
+    if let Some(effect_id) = message_effect_id.filter(|value| !value.trim().is_empty()) {
+        values.push(("message_effect_id", effect_id.to_string()));
+    }
+    values
 }
 
 pub fn supported_bot_commands() -> Vec<BotCommand> {
@@ -363,6 +391,14 @@ mod tests {
             ]
         );
         assert_eq!(targets[4].scope.chat_id, Some(42));
+    }
+
+    #[test]
+    fn send_message_values_include_message_effect_id() {
+        let values = send_message_values(42, "done", 7, Some("5107584321108051014"));
+
+        assert!(values.contains(&("message_effect_id", "5107584321108051014".to_string())));
+        assert!(values.contains(&("reply_to_message_id", "7".to_string())));
     }
 
     #[test]
