@@ -11,6 +11,11 @@ fn run() -> Result<(), String> {
     let mode = parse_args_from(std::env::args_os())?;
     match mode {
         Mode::Bot => gateway::bot::run(gateway::config::load()?),
+        Mode::Logs(lines) => {
+            let output = gateway::logs::read_gateway_logs(&gateway::config::current_env(), lines)?;
+            println!("{output}");
+            Ok(())
+        }
         Mode::Paths => {
             println!("{}", gateway::config::load()?.paths_report());
             Ok(())

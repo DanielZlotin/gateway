@@ -65,9 +65,15 @@ pub fn session_label(session_id: &str) -> String {
 }
 
 pub fn log_line_count(text: &str) -> usize {
-    text.split_whitespace()
-        .nth(1)
-        .and_then(|value| value.parse::<usize>().ok())
+    normalize_log_line_count(
+        text.split_whitespace()
+            .nth(1)
+            .and_then(|value| value.parse::<usize>().ok()),
+    )
+}
+
+pub fn normalize_log_line_count(lines: Option<usize>) -> usize {
+    lines
         .filter(|value| *value > 0)
         .map(|value| value.min(200))
         .unwrap_or(DEFAULT_LOG_LINES)
@@ -81,6 +87,16 @@ pub fn tail_log_text(text: &str, lines: usize) -> String {
     let all: Vec<&str> = text.lines().collect();
     let start = all.len().saturating_sub(lines);
     all[start..].join("\n\n")
+}
+
+pub fn tail_log_plain_text(text: &str, lines: usize) -> String {
+    let text = text.trim();
+    if text.is_empty() {
+        return "Gateway log is empty.".to_string();
+    }
+    let all: Vec<&str> = text.lines().collect();
+    let start = all.len().saturating_sub(lines);
+    all[start..].join("\n")
 }
 
 pub fn join_non_empty(parts: &[&str]) -> String {
@@ -156,6 +172,9 @@ mod tests {
         assert_eq!(log_line_count("/log bad"), 10);
         assert_eq!(log_line_count("/log 0"), 10);
         assert_eq!(log_line_count("/log 999"), 200);
+        assert_eq!(normalize_log_line_count(None), 10);
+        assert_eq!(normalize_log_line_count(Some(0)), 10);
+        assert_eq!(normalize_log_line_count(Some(999)), 200);
     }
 
     #[test]

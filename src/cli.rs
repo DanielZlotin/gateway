@@ -1,3 +1,4 @@
+use crate::text::normalize_log_line_count;
 use clap::{Args, Parser, Subcommand};
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -5,6 +6,7 @@ use std::path::PathBuf;
 #[derive(Debug, PartialEq, Eq)]
 pub enum Mode {
     Bot,
+    Logs(usize),
     Paths,
     Run(RunArgs),
     Uninstall,
@@ -29,9 +31,15 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Bot,
+    Logs(LogsCli),
     Paths,
     Run(RunCli),
     Uninstall,
+}
+
+#[derive(Debug, Args)]
+struct LogsCli {
+    lines: Option<usize>,
 }
 
 #[derive(Debug, Args)]
@@ -56,6 +64,7 @@ where
     let cli = Cli::try_parse_from(args).map_err(|err| err.to_string())?;
     Ok(match cli.command {
         None | Some(Command::Bot) => Mode::Bot,
+        Some(Command::Logs(args)) => Mode::Logs(normalize_log_line_count(args.lines)),
         Some(Command::Paths) => Mode::Paths,
         Some(Command::Run(args)) => Mode::Run(RunArgs {
             job: args.job,
@@ -115,6 +124,18 @@ mod tests {
     fn parses_uninstall_mode() {
         let mode = parse_args_from(["gateway", "uninstall"]).unwrap();
         assert_eq!(mode, Mode::Uninstall);
+    }
+
+    #[test]
+    fn parses_logs_mode_with_default_line_count() {
+        let mode = parse_args_from(["gateway", "logs"]).unwrap();
+        assert_eq!(mode, Mode::Logs(10));
+    }
+
+    #[test]
+    fn parses_logs_mode_with_capped_line_count() {
+        let mode = parse_args_from(["gateway", "logs", "999"]).unwrap();
+        assert_eq!(mode, Mode::Logs(200));
     }
 
     #[test]

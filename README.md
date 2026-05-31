@@ -52,8 +52,7 @@ writes `ai.gateway.plist` with the absolute `launch` path into
 `$HOME/Library/LaunchAgents`, then runs launchd `bootout`, `bootstrap`, and
 `kickstart`.
 
-`launch` logs to the state log file and execs `target/release/gateway bot`
-without clearing the environment or sourcing an env file.
+`launch` logs to the state log file and execs `target/release/gateway bot`.
 
 ## Config
 
@@ -97,6 +96,7 @@ runs from overwriting a newer `/new` or `/resume`.
 ```zsh
 gateway
 gateway bot
+gateway logs [lines]
 gateway paths
 gateway uninstall
 gateway run --job daily --prompt "Summarize status"
@@ -118,8 +118,10 @@ stdout and sends Telegram only when the trimmed result is non-empty and not
 exactly `OK` case-insensitively. CLI errors print to stderr and exit `1`.
 
 `gateway paths` prints the resolved config, state, log, session, executable, and
-LaunchAgent paths. `gateway uninstall` runs launchd `bootout` for `ai.gateway`
-and removes `$HOME/Library/LaunchAgents/ai.gateway.plist`.
+LaunchAgent paths. `gateway logs [lines]` prints recent gateway logs to stdout,
+defaults to `10` lines, caps at `200`, and only requires `XDG_STATE_HOME`.
+`gateway uninstall` runs launchd `bootout` for `ai.gateway` and removes
+`$HOME/Library/LaunchAgents/ai.gateway.plist`.
 
 ## Bot
 

@@ -5,6 +5,7 @@ pub mod commands;
 pub mod config;
 pub mod json_file;
 pub mod launchd;
+pub mod logs;
 pub mod run_mode;
 pub mod session;
 pub mod status;
