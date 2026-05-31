@@ -47,10 +47,10 @@ Fixed runtime values:
 ```
 
 `setup` verifies required env, PATH tools (`cargo`, `codex`, `date`,
-`fastfetch`, `id`, `jq`, `launchctl`, `mkdir`), and plist executable
-`/bin/zsh`; builds release; writes `ai.gateway.plist` with the absolute
-`launch` path into `$HOME/Library/LaunchAgents`; then runs launchd `bootout`,
-`bootstrap`, and `kickstart`.
+`fastfetch`, `id`, `jq`, `launchctl`, `mkdir`, `mv`, `rm`), builds release,
+writes `ai.gateway.plist` with the absolute `launch` path into
+`$HOME/Library/LaunchAgents`, then runs launchd `bootout`, `bootstrap`, and
+`kickstart`.
 
 `launch` logs to the state log file and execs `target/release/gateway bot`
 without clearing the environment or sourcing an env file.
@@ -97,6 +97,8 @@ runs from overwriting a newer `/new` or `/resume`.
 ```zsh
 gateway
 gateway bot
+gateway paths
+gateway uninstall
 gateway run --job daily --prompt "Summarize status"
 gateway run --job daily --prompt-file ./prompt.txt
 printf '%s\n' "Summarize status" | gateway run --job daily
@@ -114,6 +116,10 @@ Run flags:
 Prompts are trimmed; empty prompts fail. `gateway run` prints final Codex text to
 stdout and sends Telegram only when the trimmed result is non-empty and not
 exactly `OK` case-insensitively. CLI errors print to stderr and exit `1`.
+
+`gateway paths` prints the resolved config, state, log, session, executable, and
+LaunchAgent paths. `gateway uninstall` runs launchd `bootout` for `ai.gateway`
+and removes `$HOME/Library/LaunchAgents/ai.gateway.plist`.
 
 ## Bot
 

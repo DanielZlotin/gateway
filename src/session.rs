@@ -1,3 +1,4 @@
+use crate::json_file::{save_pretty_json, SaveJsonLabels};
 use crate::text::session_label;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -43,7 +44,7 @@ pub struct SessionStore {
 }
 
 impl SessionStore {
-    pub fn new(chat_dir: PathBuf, cron_dir: PathBuf, default_model: String) -> Self {
+    pub const fn new(chat_dir: PathBuf, cron_dir: PathBuf, default_model: String) -> Self {
         Self {
             chat_dir,
             cron_dir,
@@ -206,13 +207,15 @@ impl SessionStore {
 
     fn save(&self, key: &SessionKey, state: &ChatSession) -> Result<(), String> {
         let path = self.path(key);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|err| format!("create session dir: {err}"))?;
-        }
-        let data = serde_json::to_vec_pretty(state).map_err(|err| err.to_string())?;
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, [data, b"\n".to_vec()].concat()).map_err(|err| err.to_string())?;
-        fs::rename(&tmp, &path).map_err(|err| err.to_string())
+        save_pretty_json(
+            &path,
+            state,
+            SaveJsonLabels {
+                create_dir: "create session dir",
+                write: "write session",
+                replace: "replace session",
+            },
+        )
     }
 }
 

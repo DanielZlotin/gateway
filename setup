@@ -8,6 +8,8 @@ gateway_root="${0:A:h}"
 : "${XDG_CACHE_HOME:?XDG_CACHE_HOME is required}"
 : "${XDG_DATA_HOME:?XDG_DATA_HOME is required}"
 : "${XDG_STATE_HOME:?XDG_STATE_HOME is required}"
+: "${HOME:?HOME is required}"
+: "${PATH:?PATH is required}"
 
 gateway_required_commands=(
   cargo
@@ -18,6 +20,8 @@ gateway_required_commands=(
   jq
   launchctl
   mkdir
+  mv
+  rm
 )
 gateway_missing_commands=()
 
@@ -36,30 +40,13 @@ if (( ${#gateway_missing_commands[@]} )); then
   exit 69
 fi
 
-gateway_required_system_bins=(
-  /bin/zsh
-)
-gateway_missing_system_bins=()
-
-for bin in "${gateway_required_system_bins[@]}"; do
-  if [[ ! -x "$bin" ]]; then
-    gateway_missing_system_bins+=("$bin")
-  fi
-done
-
-if (( ${#gateway_missing_system_bins[@]} )); then
-  print -u2 "setup cannot register ai.gateway because required system executables are missing or not executable."
-  for bin in "${gateway_missing_system_bins[@]}"; do
-    print -u2 "  - $bin"
-  done
-  exit 69
-fi
-
 gateway_label="ai.gateway"
 gateway_domain="gui/$(id -u)"
 gateway_launch="$gateway_root/launch"
 gateway_plist_template="$gateway_root/$gateway_label.plist"
 gateway_plist_dest="$HOME/Library/LaunchAgents/$gateway_label.plist"
+gateway_plist_tmp=
+trap '[[ -z "${gateway_plist_tmp:-}" ]] || rm -f "$gateway_plist_tmp"' EXIT
 
 if [[ ! -x "$gateway_launch" ]]; then
   print -u2 "LaunchAgent launcher is missing or not executable: $gateway_launch"
@@ -74,12 +61,20 @@ fi
 cd "$gateway_root"
 cargo build --release
 
-gateway_launch_xml="$(jq -nr --arg value "$gateway_launch" '$value | @html')"
+gateway_xml_escape() {
+  jq -nr --arg value "$1" '$value | @html'
+}
+
+gateway_launch_xml="$(gateway_xml_escape "$gateway_launch")"
+gateway_plist_tmp="$gateway_plist_dest.$$"
 
 mkdir -p "${gateway_plist_dest:h}"
 while IFS= read -r line || [[ -n "$line" ]]; do
-  print -r -- "${line//__GATEWAY_LAUNCH__/$gateway_launch_xml}"
-done < "$gateway_plist_template" > "$gateway_plist_dest"
+  line="${line//__GATEWAY_LAUNCH__/$gateway_launch_xml}"
+  print -r -- "$line"
+done < "$gateway_plist_template" > "$gateway_plist_tmp"
+mv -f "$gateway_plist_tmp" "$gateway_plist_dest"
+gateway_plist_tmp=
 
 launchctl bootout "$gateway_domain/$gateway_label" 2>/dev/null || true
 launchctl bootstrap "$gateway_domain" "$gateway_plist_dest"

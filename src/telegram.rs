@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,15 +112,10 @@ impl TelegramClient {
         reply_to_message_id: i64,
     ) -> Result<(), String> {
         let values = send_message_values(chat_id, text, reply_to_message_id, None, true);
-        match self.post_form::<serde_json::Value>("sendMessage", &values) {
-            Ok(_) => Ok(()),
-            Err(err) if should_retry_plain_text(&err) => {
-                let values = send_message_values(chat_id, text, reply_to_message_id, None, false);
-                let _: serde_json::Value = self.post_form("sendMessage", &values)?;
-                Ok(())
-            }
-            Err(err) => Err(err),
-        }
+        let plain_values = send_message_values(chat_id, text, reply_to_message_id, None, false);
+        let _: serde_json::Value =
+            self.post_form_with_plain_text_retry("sendMessage", &values, &plain_values)?;
+        Ok(())
     }
 
     pub fn send_message_returning(
@@ -130,15 +125,10 @@ impl TelegramClient {
         reply_to_message_id: i64,
     ) -> Result<i64, String> {
         let values = send_message_values(chat_id, text, reply_to_message_id, None, true);
-        match self.post_form::<Message>("sendMessage", &values) {
-            Ok(message) => Ok(message.message_id),
-            Err(err) if should_retry_plain_text(&err) => {
-                let values = send_message_values(chat_id, text, reply_to_message_id, None, false);
-                let message: Message = self.post_form("sendMessage", &values)?;
-                Ok(message.message_id)
-            }
-            Err(err) => Err(err),
-        }
+        let plain_values = send_message_values(chat_id, text, reply_to_message_id, None, false);
+        let message: Message =
+            self.post_form_with_plain_text_retry("sendMessage", &values, &plain_values)?;
+        Ok(message.message_id)
     }
 
     pub fn send_message_with_effect(
@@ -155,20 +145,14 @@ impl TelegramClient {
             Some(message_effect_id),
             true,
         );
-        match self.post_form::<Message>("sendMessage", &values) {
-            Ok(message) => Ok(message),
-            Err(err) if should_retry_plain_text(&err) => {
-                let values = send_message_values(
-                    chat_id,
-                    text,
-                    reply_to_message_id,
-                    Some(message_effect_id),
-                    false,
-                );
-                self.post_form("sendMessage", &values)
-            }
-            Err(err) => Err(err),
-        }
+        let plain_values = send_message_values(
+            chat_id,
+            text,
+            reply_to_message_id,
+            Some(message_effect_id),
+            false,
+        );
+        self.post_form_with_plain_text_retry("sendMessage", &values, &plain_values)
     }
 
     pub fn delete_message(&self, chat_id: i64, message_id: i64) -> Result<(), String> {
@@ -197,27 +181,11 @@ impl TelegramClient {
         message_id: i64,
         text: &str,
     ) -> Result<(), String> {
-        let values = [
-            ("chat_id", chat_id.to_string()),
-            ("message_id", message_id.to_string()),
-            ("text", text.to_string()),
-            ("disable_web_page_preview", "true".to_string()),
-            ("parse_mode", TELEGRAM_PARSE_MODE.to_string()),
-        ];
-        match self.post_form::<serde_json::Value>("editMessageText", &values) {
-            Ok(_) => Ok(()),
-            Err(err) if should_retry_plain_text(&err) => {
-                let values = [
-                    ("chat_id", chat_id.to_string()),
-                    ("message_id", message_id.to_string()),
-                    ("text", text.to_string()),
-                    ("disable_web_page_preview", "true".to_string()),
-                ];
-                let _: serde_json::Value = self.post_form("editMessageText", &values)?;
-                Ok(())
-            }
-            Err(err) => Err(err),
-        }
+        let values = edit_message_values(chat_id, message_id, text, true);
+        let plain_values = edit_message_values(chat_id, message_id, text, false);
+        let _: serde_json::Value =
+            self.post_form_with_plain_text_retry("editMessageText", &values, &plain_values)?;
+        Ok(())
     }
 
     pub fn send_chat_action(&self, chat_id: i64, action: &str) -> Result<(), String> {
@@ -267,7 +235,7 @@ impl TelegramClient {
         Ok(())
     }
 
-    fn post_form<T: serde::de::DeserializeOwned>(
+    fn post_form<T: DeserializeOwned>(
         &self,
         method: &str,
         values: &[(&str, String)],
@@ -284,7 +252,20 @@ impl TelegramClient {
         )
     }
 
-    fn call_json<T: serde::de::DeserializeOwned>(
+    fn post_form_with_plain_text_retry<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        values: &[(&str, String)],
+        plain_values: &[(&str, String)],
+    ) -> Result<T, String> {
+        match self.post_form(method, values) {
+            Ok(value) => Ok(value),
+            Err(err) if should_retry_plain_text(&err) => self.post_form(method, plain_values),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn call_json<T: DeserializeOwned>(
         &self,
         response: Result<ureq::Response, ureq::Error>,
         method: &str,
@@ -308,6 +289,24 @@ impl TelegramClient {
                 .unwrap_or_else(|| format!("telegram {method} failed")))
         }
     }
+}
+
+fn edit_message_values(
+    chat_id: i64,
+    message_id: i64,
+    text: &str,
+    parse_markdown: bool,
+) -> Vec<(&'static str, String)> {
+    let mut values = vec![
+        ("chat_id", chat_id.to_string()),
+        ("message_id", message_id.to_string()),
+        ("text", text.to_string()),
+        ("disable_web_page_preview", "true".to_string()),
+    ];
+    if parse_markdown {
+        values.push(("parse_mode", TELEGRAM_PARSE_MODE.to_string()));
+    }
+    values
 }
 
 fn send_message_values(

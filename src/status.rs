@@ -168,10 +168,10 @@ pub fn format_fastfetch_output(raw: &str) -> String {
 
 #[cfg(test)]
 fn format_codex_usage_json(raw: &str) -> String {
-    match serde_json::from_str::<CodexUsageResponse>(raw) {
-        Ok(usage) => format_codex_usage(&usage),
-        Err(_) => "Codex: usage response unreadable".to_string(),
-    }
+    serde_json::from_str::<CodexUsageResponse>(raw).map_or_else(
+        |_| "Codex: usage response unreadable".to_string(),
+        |usage| format_codex_usage(&usage),
+    )
 }
 
 fn format_codex_usage(usage: &CodexUsageResponse) -> String {
@@ -340,11 +340,11 @@ fn duration_usage_label(seconds: f64) -> Option<String> {
         Some("weekly".to_string())
     } else if seconds == DAY {
         Some("daily".to_string())
-    } else if seconds > DAY && seconds % DAY == 0 {
+    } else if seconds > DAY && seconds.is_multiple_of(DAY) {
         Some(format!("{}d", seconds / DAY))
-    } else if seconds % HOUR == 0 {
+    } else if seconds.is_multiple_of(HOUR) {
         Some(format!("{}h", seconds / HOUR))
-    } else if seconds % MINUTE == 0 {
+    } else if seconds.is_multiple_of(MINUTE) {
         Some(format!("{}m", seconds / MINUTE))
     } else {
         None
@@ -409,7 +409,7 @@ fn fastfetch_emoji(key: &str) -> Option<&'static str> {
 
 fn strip_ansi(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
+    let mut chars = input.chars();
     while let Some(ch) = chars.next() {
         if ch != '\x1b' {
             out.push(ch);
@@ -427,7 +427,7 @@ fn strip_ansi(input: &str) -> String {
     out
 }
 
-pub fn typing_interval() -> Duration {
+pub const fn typing_interval() -> Duration {
     Duration::from_secs(4)
 }
 

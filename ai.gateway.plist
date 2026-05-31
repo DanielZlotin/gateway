@@ -14,7 +14,11 @@
     <integer>1</integer>
     <key>Umask</key>
     <integer>63</integer>
-    <key>Program</key>
-    <string>__GATEWAY_LAUNCH__</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>/bin/zsh</string>
+      <string>-lc</string>
+      <string>exec __GATEWAY_LAUNCH__</string>
+    </array>
   </dict>
 </plist>

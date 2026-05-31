@@ -183,11 +183,7 @@ printf 'session id: session-cli\n' >&2
 
         assert_eq!(output, "OK");
         assert!(sends.lock().unwrap().is_empty());
-        let store = SessionStore::new(
-            cfg.chat_state_dir,
-            cfg.cron_state_dir,
-            cfg.codex_model.clone(),
-        );
+        let store = SessionStore::new(cfg.chat_state_dir, cfg.cron_state_dir, cfg.codex_model);
         let state = store.load(&SessionKey::Cron("daily".to_string()));
         assert_eq!(state.session_id.as_deref(), Some("session-cli"));
     }
@@ -233,11 +229,7 @@ printf 'session id: session-run\n' >&2
             *sends.lock().unwrap(),
             vec![("token".to_string(), 42, "done".to_string())]
         );
-        let store = SessionStore::new(
-            cfg.chat_state_dir,
-            cfg.cron_state_dir,
-            cfg.codex_model.clone(),
-        );
+        let store = SessionStore::new(cfg.chat_state_dir, cfg.cron_state_dir, cfg.codex_model);
         let state = store.load(&SessionKey::Cron("daily".to_string()));
         assert_eq!(state.session_id.as_deref(), Some("session-run"));
         assert_eq!(state.generation, 1);

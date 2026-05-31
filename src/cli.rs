@@ -5,7 +5,9 @@ use std::path::PathBuf;
 #[derive(Debug, PartialEq, Eq)]
 pub enum Mode {
     Bot,
+    Paths,
     Run(RunArgs),
+    Uninstall,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -27,7 +29,9 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Bot,
+    Paths,
     Run(RunCli),
+    Uninstall,
 }
 
 #[derive(Debug, Args)]
@@ -52,6 +56,7 @@ where
     let cli = Cli::try_parse_from(args).map_err(|err| err.to_string())?;
     Ok(match cli.command {
         None | Some(Command::Bot) => Mode::Bot,
+        Some(Command::Paths) => Mode::Paths,
         Some(Command::Run(args)) => Mode::Run(RunArgs {
             job: args.job,
             prompt: args.prompt,
@@ -59,6 +64,7 @@ where
             model: args.model,
             new_session: args.new,
         }),
+        Some(Command::Uninstall) => Mode::Uninstall,
     })
 }
 
@@ -97,6 +103,18 @@ mod tests {
                 new_session: true,
             })
         );
+    }
+
+    #[test]
+    fn parses_paths_mode() {
+        let mode = parse_args_from(["gateway", "paths"]).unwrap();
+        assert_eq!(mode, Mode::Paths);
+    }
+
+    #[test]
+    fn parses_uninstall_mode() {
+        let mode = parse_args_from(["gateway", "uninstall"]).unwrap();
+        assert_eq!(mode, Mode::Uninstall);
     }
 
     #[test]

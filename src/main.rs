@@ -9,12 +9,19 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let mode = parse_args_from(std::env::args_os())?;
-    let cfg = gateway::config::load()?;
     match mode {
-        Mode::Bot => gateway::bot::run(cfg),
+        Mode::Bot => gateway::bot::run(gateway::config::load()?),
+        Mode::Paths => {
+            println!("{}", gateway::config::load()?.paths_report());
+            Ok(())
+        }
         Mode::Run(args) => {
-            let output = gateway::run_mode::run(args, cfg)?;
+            let output = gateway::run_mode::run(args, gateway::config::load()?)?;
             println!("{output}");
+            Ok(())
+        }
+        Mode::Uninstall => {
+            println!("{}", gateway::launchd::uninstall()?);
             Ok(())
         }
     }

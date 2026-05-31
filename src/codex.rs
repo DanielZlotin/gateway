@@ -457,7 +457,8 @@ printf 'session id: session-123\n' >&2
         let dir = tempdir().unwrap();
         let fake_codex = executable(
             dir.path().join("codex"),
-            r#"#!/bin/sh
+            &[
+                r#"#!/bin/sh
 out=""
 prev=""
 for arg in "$@"; do
@@ -465,8 +466,13 @@ for arg in "$@"; do
   prev="$arg"
 done
 cat >/dev/null
-printf '%s\n' "${GATEWAY_CODEX_ENV_TEST:-missing}" > "$out"
 "#,
+                r#"printf '%s\n' "${"#,
+                r#"GATEWAY_CODEX_ENV_TEST:-missing"#,
+                r#"}" > "$out"
+"#,
+            ]
+            .concat(),
         );
         let cfg = codex_config(&fake_codex, dir.path());
 

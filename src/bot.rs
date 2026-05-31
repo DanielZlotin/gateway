@@ -290,115 +290,164 @@ fn handle_command(
         thread_id: msg.message_thread_id,
     };
     match command {
-        "/log" => {
-            let lines = log_line_count(text);
-            let body = fs::read_to_string(&cfg.gateway_log_file)
-                .map(|log_text| tail_log_text(&log_text, lines))
-                .unwrap_or_else(|_| "No gateway log available.".to_string());
-            send_long_message(tg, msg.chat.id, &body, msg.message_id)
-        }
-        "/new" => match store.reset(&key) {
-            Ok(state) => tg.send_message(
-                msg.chat.id,
-                &format!("New session ready. Model: {}", state.model),
-                msg.message_id,
-            ),
-            Err(err) => tg.send_message(
-                msg.chat.id,
-                &format!("Failed to reset session: {err}"),
-                msg.message_id,
-            ),
-        },
+        "/log" => handle_log_command(cfg, tg, msg, text),
+        "/new" => handle_new_command(tg, store, msg, &key),
         "/restart" => {
             tg.send_message(msg.chat.id, "Restarting gateway.", msg.message_id)?;
             restart_gateway(&cfg.launchd_target);
             Ok(())
         }
-        "/model" => {
-            let model = command_arg(text);
-            if model.is_empty() {
-                let state = store.load(&key);
-                return tg.send_message(msg.chat.id, &status_header(&state), msg.message_id);
-            }
-            match store.set_model(&key, &model) {
-                Ok(state) => {
-                    save_gateway_config(
-                        &cfg.gateway_config_file,
-                        &GatewayConfigFile {
-                            model: state.model.clone(),
-                            timeout_mins: cfg.codex_timeout.as_secs() / 60,
-                        },
-                    )?;
-                    tg.send_message(
-                        msg.chat.id,
-                        &format!(
-                            "Model set to {}\nSession: {}",
-                            state.model,
-                            session_label(state.session_id.as_deref().unwrap_or(""))
-                        ),
-                        msg.message_id,
-                    )
-                }
-                Err(err) => tg.send_message(
-                    msg.chat.id,
-                    &format!("Failed to set model: {err}"),
-                    msg.message_id,
-                ),
-            }
-        }
-        "/resume" => {
-            let target = command_arg(text);
-            if target.is_empty() {
-                let body = format!("Usage: /resume SESSION_OR_NAME\n\n{}", store.list(&key));
-                return send_long_message(tg, msg.chat.id, &body, msg.message_id);
-            }
-            match store.resume(&key, &target) {
-                Ok(state) => tg.send_message(
-                    msg.chat.id,
-                    &format!(
-                        "Resumed session {}\nModel: {}",
-                        session_label(state.session_id.as_deref().unwrap_or("")),
-                        state.model
-                    ),
-                    msg.message_id,
-                ),
-                Err(err) => tg.send_message(msg.chat.id, &err, msg.message_id),
-            }
-        }
-        "/rename" => {
-            let name = command_arg(text);
-            if name.is_empty() {
-                return tg.send_message(msg.chat.id, "Usage: /rename NAME", msg.message_id);
-            }
-            match store.rename_current(&key, &name) {
-                Ok(state) => tg.send_message(
-                    msg.chat.id,
-                    &format!(
-                        "Renamed session {} to \"{name}\".",
-                        session_label(state.session_id.as_deref().unwrap_or(""))
-                    ),
-                    msg.message_id,
-                ),
-                Err(err) => tg.send_message(msg.chat.id, &err, msg.message_id),
-            }
-        }
+        "/model" => handle_model_command(cfg, tg, store, msg, text, &key),
+        "/resume" => handle_resume_command(tg, store, msg, text, &key),
+        "/rename" => handle_rename_command(tg, store, msg, text, &key),
         "/list" => send_long_message(tg, msg.chat.id, &store.list(&key), msg.message_id),
         "/help" | "/commands" => tg.send_message(msg.chat.id, &directive_help(), msg.message_id),
-        "/status" => {
-            let state = store.load(&key);
-            send_long_message(
-                tg,
+        "/status" => handle_status_command(cfg, tg, store, msg, &key),
+        _ => tg.send_message(msg.chat.id, &unknown_directive_message(), msg.message_id),
+    }
+}
+
+fn handle_log_command(
+    cfg: &Config,
+    tg: &impl TelegramApi,
+    msg: &Message,
+    text: &str,
+) -> Result<(), String> {
+    let lines = log_line_count(text);
+    let body = fs::read_to_string(&cfg.gateway_log_file)
+        .map(|log_text| tail_log_text(&log_text, lines))
+        .unwrap_or_else(|_| "No gateway log available.".to_string());
+    send_long_message(tg, msg.chat.id, &body, msg.message_id)
+}
+
+fn handle_new_command(
+    tg: &impl TelegramApi,
+    store: &SessionStore,
+    msg: &Message,
+    key: &SessionKey,
+) -> Result<(), String> {
+    match store.reset(key) {
+        Ok(state) => tg.send_message(
+            msg.chat.id,
+            &format!("New session ready. Model: {}", state.model),
+            msg.message_id,
+        ),
+        Err(err) => tg.send_message(
+            msg.chat.id,
+            &format!("Failed to reset session: {err}"),
+            msg.message_id,
+        ),
+    }
+}
+
+fn handle_model_command(
+    cfg: &Config,
+    tg: &impl TelegramApi,
+    store: &SessionStore,
+    msg: &Message,
+    text: &str,
+    key: &SessionKey,
+) -> Result<(), String> {
+    let model = command_arg(text);
+    if model.is_empty() {
+        let state = store.load(key);
+        return tg.send_message(msg.chat.id, &status_header(&state), msg.message_id);
+    }
+    match store.set_model(key, &model) {
+        Ok(state) => {
+            save_gateway_config(
+                &cfg.gateway_config_file,
+                &GatewayConfigFile {
+                    model: state.model.clone(),
+                    timeout_mins: cfg.codex_timeout.as_secs() / 60,
+                },
+            )?;
+            tg.send_message(
                 msg.chat.id,
-                &format_status_message(
-                    &state,
-                    &codex_status(cfg),
-                    &fastfetch_status(&cfg.fastfetch_bin),
+                &format!(
+                    "Model set to {}\nSession: {}",
+                    state.model,
+                    session_label(state.session_id.as_deref().unwrap_or(""))
                 ),
                 msg.message_id,
             )
         }
-        _ => tg.send_message(msg.chat.id, &unknown_directive_message(), msg.message_id),
+        Err(err) => tg.send_message(
+            msg.chat.id,
+            &format!("Failed to set model: {err}"),
+            msg.message_id,
+        ),
     }
+}
+
+fn handle_resume_command(
+    tg: &impl TelegramApi,
+    store: &SessionStore,
+    msg: &Message,
+    text: &str,
+    key: &SessionKey,
+) -> Result<(), String> {
+    let target = command_arg(text);
+    if target.is_empty() {
+        let body = format!("Usage: /resume SESSION_OR_NAME\n\n{}", store.list(key));
+        return send_long_message(tg, msg.chat.id, &body, msg.message_id);
+    }
+    match store.resume(key, &target) {
+        Ok(state) => tg.send_message(
+            msg.chat.id,
+            &format!(
+                "Resumed session {}\nModel: {}",
+                session_label(state.session_id.as_deref().unwrap_or("")),
+                state.model
+            ),
+            msg.message_id,
+        ),
+        Err(err) => tg.send_message(msg.chat.id, &err, msg.message_id),
+    }
+}
+
+fn handle_rename_command(
+    tg: &impl TelegramApi,
+    store: &SessionStore,
+    msg: &Message,
+    text: &str,
+    key: &SessionKey,
+) -> Result<(), String> {
+    let name = command_arg(text);
+    if name.is_empty() {
+        return tg.send_message(msg.chat.id, "Usage: /rename NAME", msg.message_id);
+    }
+    match store.rename_current(key, &name) {
+        Ok(state) => tg.send_message(
+            msg.chat.id,
+            &format!(
+                "Renamed session {} to \"{name}\".",
+                session_label(state.session_id.as_deref().unwrap_or(""))
+            ),
+            msg.message_id,
+        ),
+        Err(err) => tg.send_message(msg.chat.id, &err, msg.message_id),
+    }
+}
+
+fn handle_status_command(
+    cfg: &Config,
+    tg: &impl TelegramApi,
+    store: &SessionStore,
+    msg: &Message,
+    key: &SessionKey,
+) -> Result<(), String> {
+    let state = store.load(key);
+    send_long_message(
+        tg,
+        msg.chat.id,
+        &format_status_message(
+            &state,
+            &codex_status(cfg),
+            &fastfetch_status(&cfg.fastfetch_bin),
+        ),
+        msg.message_id,
+    )
 }
 
 fn worker_loop(cfg: Config, rx: mpsc::Receiver<Job>) {
@@ -621,7 +670,7 @@ fn restart_gateway(launchd_target: &str) {
         .spawn();
 }
 
-pub fn typing_refresh_interval() -> Duration {
+pub const fn typing_refresh_interval() -> Duration {
     TYPING_REFRESH_INTERVAL
 }
 
@@ -1161,7 +1210,7 @@ exit 2
             json_response(r#"{"ok":true,"result":true}"#),
         ]);
         let server = MiniServer::new(responses);
-        let client = TelegramClient::with_base_url(server.base_url.clone());
+        let client = TelegramClient::with_base_url(server.base_url);
 
         assert!(TelegramApi::get_updates(&client, 0, 0).unwrap().is_empty());
         TelegramApi::sync_my_commands(&client, &[42]).unwrap();
@@ -1305,12 +1354,16 @@ exit 2
             text: &str,
             reply_to_message_id: i64,
         ) -> Result<(), String> {
-            self.state.lock().unwrap().calls.push(Call::Send {
-                chat_id,
-                reply_to: reply_to_message_id,
-                text: text.to_string(),
-            });
-            if let Some(err) = self.state.lock().unwrap().send_error.clone() {
+            let send_error = {
+                let mut state = self.state.lock().unwrap();
+                state.calls.push(Call::Send {
+                    chat_id,
+                    reply_to: reply_to_message_id,
+                    text: text.to_string(),
+                });
+                state.send_error.clone()
+            };
+            if let Some(err) = send_error {
                 return Err(err);
             }
             Ok(())
@@ -1321,14 +1374,17 @@ exit 2
             text: &str,
             reply_to_message_id: i64,
         ) -> Result<i64, String> {
-            let mut state = self.state.lock().unwrap();
-            let message_id = state.next_message_id;
-            state.next_message_id += 1;
-            state.calls.push(Call::SendReturning {
-                chat_id,
-                reply_to: reply_to_message_id,
-                text: text.to_string(),
-            });
+            let message_id = {
+                let mut state = self.state.lock().unwrap();
+                let message_id = state.next_message_id;
+                state.next_message_id += 1;
+                state.calls.push(Call::SendReturning {
+                    chat_id,
+                    reply_to: reply_to_message_id,
+                    text: text.to_string(),
+                });
+                message_id
+            };
             Ok(message_id)
         }
 

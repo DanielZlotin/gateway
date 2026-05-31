@@ -1,8 +1,9 @@
+use crate::json_file::{save_pretty_json, SaveJsonLabels};
+use crate::launchd;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 pub const GATEWAY_TELEGRAM_TOKEN_ENV: &str = "GATEWAY_TELEGRAM_TOKEN";
@@ -60,7 +61,7 @@ pub fn load_from_env(env: &BTreeMap<String, String>) -> Result<Config, String> {
     let state_dir = xdg_state_home.join("gateway");
     let chat_state_dir = state_dir.join("chats");
     let cron_state_dir = state_dir.join("cron");
-    let launchd_target = default_launchd_target()?;
+    let launchd_target = launchd::target()?;
 
     Ok(Config {
         bot_token,
@@ -68,7 +69,7 @@ pub fn load_from_env(env: &BTreeMap<String, String>) -> Result<Config, String> {
         xdg_config_home: xdg_config_home.clone(),
         xdg_cache_home,
         xdg_data_home,
-        xdg_state_home: xdg_state_home.clone(),
+        xdg_state_home,
         gateway_config_file,
         codex_bin: PathBuf::from("codex"),
         codex_workdir: path(env, "GATEWAY_CODEX_WORKDIR", xdg_config_home),
@@ -102,14 +103,15 @@ pub fn load_gateway_config(path: &Path) -> Result<GatewayConfigFile, String> {
 }
 
 pub fn save_gateway_config(path: &Path, cfg: &GatewayConfigFile) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|err| format!("create gateway config dir: {err}"))?;
-    }
-    let data = serde_json::to_vec_pretty(cfg).map_err(|err| err.to_string())?;
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, [data, b"\n".to_vec()].concat())
-        .map_err(|err| format!("write gateway config: {err}"))?;
-    fs::rename(&tmp, path).map_err(|err| format!("replace gateway config: {err}"))
+    save_pretty_json(
+        path,
+        cfg,
+        SaveJsonLabels {
+            create_dir: "create gateway config dir",
+            write: "write gateway config",
+            replace: "replace gateway config",
+        },
+    )
 }
 
 fn required(env: &BTreeMap<String, String>, key: &str) -> Result<String, String> {
@@ -185,7 +187,7 @@ fn default_codex_model() -> String {
     DEFAULT_CODEX_MODEL.to_string()
 }
 
-fn default_timeout_mins() -> u64 {
+const fn default_timeout_mins() -> u64 {
     DEFAULT_CODEX_TIMEOUT_MINS
 }
 
@@ -195,19 +197,31 @@ fn timeout_secs(timeout_mins: u64) -> Result<u64, String> {
         .ok_or_else(|| "timeout_mins is too large".to_string())
 }
 
-fn default_launchd_target() -> Result<String, String> {
-    let output = Command::new("id")
-        .arg("-u")
-        .output()
-        .map_err(|err| format!("run id -u: {err}"))?;
-    if !output.status.success() {
-        return Err(format!("id -u exited with {}", output.status));
+impl Config {
+    pub fn paths_report(&self) -> String {
+        let mut lines: Vec<String> = [
+            ("xdg_config_home", self.xdg_config_home.as_path()),
+            ("xdg_cache_home", self.xdg_cache_home.as_path()),
+            ("xdg_data_home", self.xdg_data_home.as_path()),
+            ("xdg_state_home", self.xdg_state_home.as_path()),
+            ("gateway_config_file", self.gateway_config_file.as_path()),
+            ("codex_bin", self.codex_bin.as_path()),
+            ("codex_workdir", self.codex_workdir.as_path()),
+            ("fastfetch_bin", self.fastfetch_bin.as_path()),
+            ("state_dir", self.state_dir.as_path()),
+            ("chat_state_dir", self.chat_state_dir.as_path()),
+            ("cron_state_dir", self.cron_state_dir.as_path()),
+            ("offset_file", self.offset_file.as_path()),
+            ("gateway_log_file", self.gateway_log_file.as_path()),
+        ]
+        .into_iter()
+        .map(|(name, path)| format!("{name}={}", path.display()))
+        .collect();
+        if let Ok(path) = launchd::plist_path() {
+            lines.push(format!("launch_agent_plist={}", path.display()));
+        }
+        lines.join("\n")
     }
-    let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if uid.is_empty() {
-        return Err("id -u returned empty uid".to_string());
-    }
-    Ok(format!("gui/{uid}/ai.gateway"))
 }
 
 #[cfg(test)]
@@ -265,6 +279,20 @@ mod tests {
         assert_eq!(cfg.codex_model, DEFAULT_CODEX_MODEL);
         assert_eq!(cfg.queue_depth, 8);
         assert_eq!(cfg.codex_timeout, Duration::from_secs(30 * 60));
+    }
+
+    #[test]
+    fn paths_report_lists_runtime_paths() {
+        let (_dir, env) = env_with_token();
+        let cfg = load_from_env(&env).unwrap();
+
+        let report = cfg.paths_report();
+
+        assert!(report.contains("gateway_config_file="));
+        assert!(report.contains("gateway_log_file="));
+        assert!(report.contains("offset_file="));
+        assert!(report.contains("chat_state_dir="));
+        assert!(report.contains("cron_state_dir="));
     }
 
     #[test]
