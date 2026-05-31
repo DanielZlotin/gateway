@@ -53,7 +53,6 @@ pub fn run(args: RunArgs, cfg: Config) -> Result<String, String> {
             workdir: cfg.codex_workdir.clone(),
             path: cfg.path.clone(),
             default_model: cfg.codex_model.clone(),
-            instructions_file: cfg.state_dir.join("AGENTS.md"),
         },
         &prompt,
         state.session_id.as_deref(),

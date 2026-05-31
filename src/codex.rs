@@ -19,7 +19,6 @@ pub struct CodexConfig {
     pub workdir: PathBuf,
     pub path: String,
     pub default_model: String,
-    pub instructions_file: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,13 +27,14 @@ pub struct CodexOutput {
     pub session_id: Option<String>,
 }
 
+const GATEWAY_DEVELOPER_INSTRUCTIONS: &str = include_str!("AGENTS.md");
+
 pub fn codex_args(
     out_path: &Path,
     session_id: Option<&str>,
     model: &str,
     default_model: &str,
     workdir: &Path,
-    instructions_path: &Path,
 ) -> Vec<String> {
     let model = if model.trim().is_empty() {
         default_model
@@ -43,16 +43,17 @@ pub fn codex_args(
     };
     let out = out_path.to_string_lossy().to_string();
     let workdir = workdir.to_string_lossy().to_string();
-    let instructions_config = format!(
-        "model_instructions_file={:?}",
-        instructions_path.to_string_lossy()
+    let developer_instructions_config = format!(
+        "developer_instructions={}",
+        serde_json::to_string(GATEWAY_DEVELOPER_INSTRUCTIONS)
+            .expect("gateway developer instructions should serialize")
     );
     if let Some(session_id) = session_id.filter(|value| !value.trim().is_empty()) {
         return strings([
             "exec",
             "resume",
             "-c",
-            &instructions_config,
+            &developer_instructions_config,
             "--skip-git-repo-check",
             "--dangerously-bypass-approvals-and-sandbox",
             "-m",
@@ -69,7 +70,7 @@ pub fn codex_args(
         "--color",
         "never",
         "-c",
-        &instructions_config,
+        &developer_instructions_config,
         "--cd",
         &workdir,
         "--skip-git-repo-check",
@@ -160,7 +161,6 @@ pub fn run_codex_stream(
     mut on_stdout: impl FnMut(&str),
 ) -> Result<CodexOutput, String> {
     fs::create_dir_all(state_dir).map_err(|err| format!("create state dir: {err}"))?;
-    write_main_agents_md(&cfg.instructions_file)?;
     let out_file = tempfile::NamedTempFile::new_in(state_dir).map_err(|err| err.to_string())?;
     let out_path = out_file.path().to_path_buf();
     let args = codex_args(
@@ -169,7 +169,6 @@ pub fn run_codex_stream(
         model,
         &cfg.default_model,
         &cfg.workdir,
-        &cfg.instructions_file,
     );
 
     let mut child = Command::new(&cfg.bin)
@@ -278,13 +277,6 @@ fn parse_session_id(stderr: &str) -> Option<String> {
     })
 }
 
-fn write_main_agents_md(path: &Path) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|err| format!("create instructions dir: {err}"))?;
-    }
-    fs::write(path, include_str!("AGENTS.md")).map_err(|err| format!("write AGENTS.md: {err}"))
-}
-
 fn final_text_from_outputs(out_path: &Path, stdout: &[u8], stderr: &[u8]) -> String {
     let parsed = parse_codex_json(&String::from_utf8_lossy(stdout));
     let final_text = fs::read_to_string(out_path).unwrap_or_default();
@@ -332,14 +324,14 @@ mod tests {
             "",
             "gpt-5.5",
             Path::new("/work"),
-            Path::new("/state/AGENTS.md"),
         );
         let joined = args.join(" ");
 
         assert!(joined.contains("--dangerously-bypass-approvals-and-sandbox"));
         assert!(joined.contains("--color never"));
         assert!(joined.contains("--cd /work"));
-        assert!(joined.contains("-c model_instructions_file=\"/state/AGENTS.md\""));
+        assert!(!joined.contains("model_instructions_file"));
+        assert!(joined.contains("-c developer_instructions=\"Always use emojis,"));
         assert!(!joined.contains("--ask-for-approval"));
         assert!(!joined.contains("--sandbox"));
     }
@@ -352,11 +344,10 @@ mod tests {
             "gpt-test",
             "gpt-5.5",
             Path::new("/work"),
-            Path::new("/state/AGENTS.md"),
         );
         assert_eq!(
             args.join(" "),
-            "exec resume -c model_instructions_file=\"/state/AGENTS.md\" --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m gpt-test --output-last-message /tmp/out session-123 -"
+            "exec resume -c developer_instructions=\"Always use emojis, especially at the start of sentences, bullets, and similar list items.\\n\" --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m gpt-test --output-last-message /tmp/out session-123 -"
         );
     }
 
@@ -388,7 +379,6 @@ mod tests {
             workdir: PathBuf::from("/work"),
             path: "/bin:/usr/bin".to_string(),
             default_model: "gpt-5.5".to_string(),
-            instructions_file: PathBuf::from("/state/AGENTS.md"),
         };
 
         let env = codex_env(&cfg);
