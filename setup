@@ -4,12 +4,25 @@ set -euo pipefail
 gateway_root="${0:A:h}"
 : "${GATEWAY_TELEGRAM_TOKEN:?GATEWAY_TELEGRAM_TOKEN is required}"
 : "${GATEWAY_TELEGRAM_CHAT_IDS:?GATEWAY_TELEGRAM_CHAT_IDS is required}"
-: "${XDG_CONFIG_HOME:?XDG_CONFIG_HOME is required}"
-: "${XDG_CACHE_HOME:?XDG_CACHE_HOME is required}"
-: "${XDG_DATA_HOME:?XDG_DATA_HOME is required}"
-: "${XDG_STATE_HOME:?XDG_STATE_HOME is required}"
 : "${HOME:?HOME is required}"
 : "${PATH:?PATH is required}"
+
+gateway_export_xdg_default() {
+  local gateway_var_name="$1"
+  local gateway_default_path="$2"
+  local gateway_value="${(P)gateway_var_name:-}"
+
+  if [[ -z "${gateway_value//[[:space:]]/}" ]]; then
+    typeset -gx "$gateway_var_name=$gateway_default_path"
+  else
+    typeset -gx "$gateway_var_name=$gateway_value"
+  fi
+}
+
+gateway_export_xdg_default XDG_CONFIG_HOME "$HOME/.config"
+gateway_export_xdg_default XDG_CACHE_HOME "$HOME/.cache"
+gateway_export_xdg_default XDG_DATA_HOME "$HOME/.local/share"
+gateway_export_xdg_default XDG_STATE_HOME "$HOME/.local/state"
 
 gateway_required_commands=(
   cargo

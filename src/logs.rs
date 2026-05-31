@@ -11,11 +11,7 @@ pub fn read_gateway_logs(env: &BTreeMap<String, String>, lines: usize) -> Result
 }
 
 fn gateway_log_file(env: &BTreeMap<String, String>) -> Result<PathBuf, String> {
-    env.get("XDG_STATE_HOME")
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .map(|value| PathBuf::from(value).join("gateway/logs/gateway.log"))
-        .ok_or_else(|| "XDG_STATE_HOME is required".to_string())
+    crate::config::resolve_xdg_state_home(env).map(|path| path.join("gateway/logs/gateway.log"))
 }
 
 #[cfg(test)]
@@ -52,8 +48,26 @@ mod tests {
     }
 
     #[test]
-    fn read_gateway_logs_requires_xdg_state_home() {
+    fn read_gateway_logs_uses_xdg_state_default_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_file = dir
+            .path()
+            .join("home/.local/state/gateway/logs/gateway.log");
+        std::fs::create_dir_all(log_file.parent().unwrap()).unwrap();
+        std::fs::write(&log_file, "one\ntwo\n").unwrap();
+        let env = BTreeMap::from([(
+            "HOME".to_string(),
+            dir.path().join("home").to_string_lossy().to_string(),
+        )]);
+
+        let text = read_gateway_logs(&env, 10).unwrap();
+
+        assert_eq!(text, "one\ntwo");
+    }
+
+    #[test]
+    fn read_gateway_logs_requires_home_when_xdg_state_home_is_missing() {
         let err = read_gateway_logs(&BTreeMap::new(), 10).unwrap_err();
-        assert_eq!(err, "XDG_STATE_HOME is required");
+        assert_eq!(err, "HOME is required to default XDG_STATE_HOME");
     }
 }

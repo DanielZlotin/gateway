@@ -19,10 +19,6 @@ cargo build --release
 ```zsh
 export GATEWAY_TELEGRAM_TOKEN=...
 export GATEWAY_TELEGRAM_CHAT_IDS=123456789,-1001234567890
-export XDG_CONFIG_HOME=...
-export XDG_CACHE_HOME=...
-export XDG_DATA_HOME=...
-export XDG_STATE_HOME=...
 ```
 
 `GATEWAY_TELEGRAM_CHAT_IDS` is comma-separated, trimmed, integer-parsed, sorted,
@@ -31,10 +27,14 @@ and deduplicated.
 ⚙️ Optional:
 
 1. 📁 `GATEWAY_CODEX_WORKDIR`: Codex working directory.
+2. 📁 `XDG_CONFIG_HOME`: defaults to `$HOME/.config`.
+3. 📁 `XDG_CACHE_HOME`: defaults to `$HOME/.cache`.
+4. 📁 `XDG_DATA_HOME`: defaults to `$HOME/.local/share`.
+5. 📁 `XDG_STATE_HOME`: defaults to `$HOME/.local/state`.
 
 📌 Fixed runtime values:
 
-1. 📁 state root: `$XDG_STATE_HOME/gateway`
+1. 📁 state root: resolved `XDG_STATE_HOME` plus `/gateway`
 2. 📜 log file: `logs/gateway.log`
 3. ⏱️ Telegram poll timeout: `50` seconds
 4. 🚦 bot job queue depth: `8`
@@ -46,9 +46,9 @@ and deduplicated.
 ./setup
 ```
 
-`setup` verifies required env, PATH tools (`cargo`, `codex`, `date`,
-`fastfetch`, `id`, `jq`, `launchctl`, `mkdir`, `mv`, `rm`), builds release,
-writes `ai.gateway.plist` with the absolute `launch` path into
+`setup` verifies required env, applies XDG defaults, checks PATH tools (`cargo`,
+`codex`, `date`, `fastfetch`, `id`, `jq`, `launchctl`, `mkdir`, `mv`, `rm`),
+builds release, writes `ai.gateway.plist` with the absolute `launch` path into
 `$HOME/Library/LaunchAgents`, then runs launchd `bootout`, `bootstrap`, and
 `kickstart`.
 
@@ -56,7 +56,8 @@ writes `ai.gateway.plist` with the absolute `launch` path into
 
 ## ⚙️ Config
 
-Gateway creates and normalizes `$XDG_CONFIG_HOME/gateway/config.json`:
+Gateway creates and normalizes `gateway/config.json` under the resolved
+`XDG_CONFIG_HOME`:
 
 ```json
 {
@@ -119,7 +120,7 @@ exactly `OK` case-insensitively. CLI errors print to stderr and exit `1`.
 
 `gateway paths` prints the resolved config, state, log, session, executable, and
 LaunchAgent paths. `gateway logs [lines]` prints recent gateway logs to stdout,
-defaults to `10` lines, caps at `200`, and only requires `XDG_STATE_HOME`.
+defaults to `10` lines, caps at `200`, and uses the resolved `XDG_STATE_HOME`.
 `gateway uninstall` runs launchd `bootout` for `ai.gateway` and removes
 `$HOME/Library/LaunchAgents/ai.gateway.plist`.
 
@@ -222,7 +223,7 @@ codex --search exec resume -c developer_instructions=<SYSTEM.md> --skip-git-repo
 📡 Startup status and `/status` include:
 
 1. 🌉 Gateway header: model and current session label, or `none`.
-2. 🧠 Codex usage: reads `$XDG_CONFIG_HOME/codex/auth.json`, calls
+2. 🧠 Codex usage: reads `codex/auth.json` under the resolved `XDG_CONFIG_HOME`, calls
    `https://chatgpt.com/backend-api/wham/usage`, and reports primary/secondary
    usage percentage left without exposing tokens.
 3. 🖥️ Fastfetch: runs `fastfetch --config - --pipe` with bundled config on stdin,
@@ -234,4 +235,5 @@ codex --search exec resume -c developer_instructions=<SYSTEM.md> --skip-git-repo
 script. The LaunchAgent uses `RunAtLoad`, `KeepAlive`, `ThrottleInterval = 1`,
 and `Umask = 63`. The install location remains
 `$HOME/Library/LaunchAgents` because that is macOS launchd convention; Gateway
-config, state, cache, and data paths are XDG-only.
+config, state, cache, and data paths use explicit XDG env vars or their standard
+home-relative defaults.

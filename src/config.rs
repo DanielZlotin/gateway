@@ -52,10 +52,10 @@ pub fn load() -> Result<Config, String> {
 
 pub fn load_from_env(env: &BTreeMap<String, String>) -> Result<Config, String> {
     let bot_token = required(env, GATEWAY_TELEGRAM_TOKEN_ENV)?;
-    let xdg_config_home = required_path(env, "XDG_CONFIG_HOME")?;
-    let xdg_cache_home = required_path(env, "XDG_CACHE_HOME")?;
-    let xdg_data_home = required_path(env, "XDG_DATA_HOME")?;
-    let xdg_state_home = required_path(env, "XDG_STATE_HOME")?;
+    let xdg_config_home = resolve_xdg_config_home(env)?;
+    let xdg_cache_home = resolve_xdg_cache_home(env)?;
+    let xdg_data_home = resolve_xdg_data_home(env)?;
+    let xdg_state_home = resolve_xdg_state_home(env)?;
     let gateway_config_file = xdg_config_home.join("gateway/config.json");
     let gateway_config = load_gateway_config(&gateway_config_file)?;
     let state_dir = xdg_state_home.join("gateway");
@@ -126,8 +126,34 @@ fn path(env: &BTreeMap<String, String>, key: &str, default: PathBuf) -> PathBuf 
     optional_path(env, key).unwrap_or(default)
 }
 
-fn required_path(env: &BTreeMap<String, String>, key: &str) -> Result<PathBuf, String> {
-    required(env, key).map(PathBuf::from)
+pub fn resolve_xdg_config_home(env: &BTreeMap<String, String>) -> Result<PathBuf, String> {
+    resolve_xdg_home(env, "XDG_CONFIG_HOME", ".config")
+}
+
+pub fn resolve_xdg_cache_home(env: &BTreeMap<String, String>) -> Result<PathBuf, String> {
+    resolve_xdg_home(env, "XDG_CACHE_HOME", ".cache")
+}
+
+pub fn resolve_xdg_data_home(env: &BTreeMap<String, String>) -> Result<PathBuf, String> {
+    resolve_xdg_home(env, "XDG_DATA_HOME", ".local/share")
+}
+
+pub fn resolve_xdg_state_home(env: &BTreeMap<String, String>) -> Result<PathBuf, String> {
+    resolve_xdg_home(env, "XDG_STATE_HOME", ".local/state")
+}
+
+fn resolve_xdg_home(
+    env: &BTreeMap<String, String>,
+    key: &str,
+    default_relative_path: &str,
+) -> Result<PathBuf, String> {
+    if let Some(path) = optional_path(env, key) {
+        return Ok(path);
+    }
+
+    optional_path(env, "HOME")
+        .map(|home| home.join(default_relative_path))
+        .ok_or_else(|| format!("HOME is required to default {key}"))
 }
 
 fn optional(env: &BTreeMap<String, String>, key: &str) -> Option<String> {
@@ -296,23 +322,38 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_or_blank_xdg_dirs() {
-        for key in [
-            "XDG_CONFIG_HOME",
-            "XDG_CACHE_HOME",
-            "XDG_DATA_HOME",
-            "XDG_STATE_HOME",
-        ] {
-            let (_dir, mut env) = env_with_token();
-            env.remove(key);
-            let err = load_from_env(&env).unwrap_err();
-            assert!(err.contains(key), "missing {key}: {err}");
+    fn uses_xdg_defaults_when_xdg_dirs_are_missing_or_blank() {
+        let (dir, mut env) = env_with_token();
+        let home = dir.path().join("home");
+        env.insert("HOME".to_string(), home.to_string_lossy().to_string());
+        env.remove("XDG_CONFIG_HOME");
+        env.insert("XDG_CACHE_HOME".to_string(), " \t ".to_string());
+        env.remove("XDG_DATA_HOME");
+        env.insert("XDG_STATE_HOME".to_string(), "".to_string());
 
-            let (_dir, mut env) = env_with_token();
-            env.insert(key.to_string(), " \t ".to_string());
-            let err = load_from_env(&env).unwrap_err();
-            assert!(err.contains(key), "blank {key}: {err}");
-        }
+        let cfg = load_from_env(&env).unwrap();
+
+        assert_eq!(cfg.xdg_config_home, home.join(".config"));
+        assert_eq!(cfg.xdg_cache_home, home.join(".cache"));
+        assert_eq!(cfg.xdg_data_home, home.join(".local/share"));
+        assert_eq!(cfg.xdg_state_home, home.join(".local/state"));
+        assert_eq!(
+            cfg.gateway_config_file,
+            home.join(".config/gateway/config.json")
+        );
+        assert_eq!(cfg.state_dir, home.join(".local/state/gateway"));
+    }
+
+    #[test]
+    fn missing_xdg_dirs_require_home_for_defaults() {
+        let (_dir, mut env) = env_with_token();
+        env.remove("HOME");
+        env.remove("XDG_CONFIG_HOME");
+
+        let err = load_from_env(&env).unwrap_err();
+
+        assert!(err.contains("HOME"));
+        assert!(err.contains("XDG_CONFIG_HOME"));
     }
 
     #[test]
