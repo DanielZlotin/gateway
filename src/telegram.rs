@@ -72,6 +72,8 @@ pub struct TelegramClient {
     agent: ureq::Agent,
 }
 
+const TELEGRAM_PARSE_MODE: &str = "Markdown";
+
 impl TelegramClient {
     pub fn new(token: &str) -> Self {
         let agent = ureq::AgentBuilder::new()
@@ -101,9 +103,16 @@ impl TelegramClient {
         text: &str,
         reply_to_message_id: i64,
     ) -> Result<(), String> {
-        let values = send_message_values(chat_id, text, reply_to_message_id, None);
-        let _: serde_json::Value = self.post_form("sendMessage", &values)?;
-        Ok(())
+        let values = send_message_values(chat_id, text, reply_to_message_id, None, true);
+        match self.post_form::<serde_json::Value>("sendMessage", &values) {
+            Ok(_) => Ok(()),
+            Err(err) if should_retry_plain_text(&err) => {
+                let values = send_message_values(chat_id, text, reply_to_message_id, None, false);
+                let _: serde_json::Value = self.post_form("sendMessage", &values)?;
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
     }
 
     pub fn send_message_returning(
@@ -112,9 +121,16 @@ impl TelegramClient {
         text: &str,
         reply_to_message_id: i64,
     ) -> Result<i64, String> {
-        let values = send_message_values(chat_id, text, reply_to_message_id, None);
-        let message: Message = self.post_form("sendMessage", &values)?;
-        Ok(message.message_id)
+        let values = send_message_values(chat_id, text, reply_to_message_id, None, true);
+        match self.post_form::<Message>("sendMessage", &values) {
+            Ok(message) => Ok(message.message_id),
+            Err(err) if should_retry_plain_text(&err) => {
+                let values = send_message_values(chat_id, text, reply_to_message_id, None, false);
+                let message: Message = self.post_form("sendMessage", &values)?;
+                Ok(message.message_id)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     pub fn send_message_with_effect(
@@ -124,9 +140,27 @@ impl TelegramClient {
         reply_to_message_id: i64,
         message_effect_id: &str,
     ) -> Result<Message, String> {
-        let values =
-            send_message_values(chat_id, text, reply_to_message_id, Some(message_effect_id));
-        self.post_form("sendMessage", &values)
+        let values = send_message_values(
+            chat_id,
+            text,
+            reply_to_message_id,
+            Some(message_effect_id),
+            true,
+        );
+        match self.post_form::<Message>("sendMessage", &values) {
+            Ok(message) => Ok(message),
+            Err(err) if should_retry_plain_text(&err) => {
+                let values = send_message_values(
+                    chat_id,
+                    text,
+                    reply_to_message_id,
+                    Some(message_effect_id),
+                    false,
+                );
+                self.post_form("sendMessage", &values)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     pub fn delete_message(&self, chat_id: i64, message_id: i64) -> Result<(), String> {
@@ -149,9 +183,22 @@ impl TelegramClient {
             ("message_id", message_id.to_string()),
             ("text", text.to_string()),
             ("disable_web_page_preview", "true".to_string()),
+            ("parse_mode", TELEGRAM_PARSE_MODE.to_string()),
         ];
-        let _: serde_json::Value = self.post_form("editMessageText", &values)?;
-        Ok(())
+        match self.post_form::<serde_json::Value>("editMessageText", &values) {
+            Ok(_) => Ok(()),
+            Err(err) if should_retry_plain_text(&err) => {
+                let values = [
+                    ("chat_id", chat_id.to_string()),
+                    ("message_id", message_id.to_string()),
+                    ("text", text.to_string()),
+                    ("disable_web_page_preview", "true".to_string()),
+                ];
+                let _: serde_json::Value = self.post_form("editMessageText", &values)?;
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
     }
 
     pub fn send_chat_action(&self, chat_id: i64, action: &str) -> Result<(), String> {
@@ -249,12 +296,16 @@ fn send_message_values(
     text: &str,
     reply_to_message_id: i64,
     message_effect_id: Option<&str>,
+    parse_markdown: bool,
 ) -> Vec<(&'static str, String)> {
     let mut values = vec![
         ("chat_id", chat_id.to_string()),
         ("text", text.to_string()),
         ("disable_web_page_preview", "true".to_string()),
     ];
+    if parse_markdown {
+        values.push(("parse_mode", TELEGRAM_PARSE_MODE.to_string()));
+    }
     if reply_to_message_id > 0 {
         values.push(("reply_to_message_id", reply_to_message_id.to_string()));
         values.push(("allow_sending_without_reply", "true".to_string()));
@@ -263,6 +314,14 @@ fn send_message_values(
         values.push(("message_effect_id", effect_id.to_string()));
     }
     values
+}
+
+fn should_retry_plain_text(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("can't parse entities")
+        || lower.contains("can't find end")
+        || lower.contains("entity")
+        || lower.contains("parse_mode")
 }
 
 pub fn supported_bot_commands() -> Vec<BotCommand> {
@@ -395,10 +454,24 @@ mod tests {
 
     #[test]
     fn send_message_values_include_message_effect_id() {
-        let values = send_message_values(42, "done", 7, Some("5107584321108051014"));
+        let values = send_message_values(42, "done", 7, Some("5107584321108051014"), true);
 
         assert!(values.contains(&("message_effect_id", "5107584321108051014".to_string())));
         assert!(values.contains(&("reply_to_message_id", "7".to_string())));
+        assert!(values.contains(&("parse_mode", TELEGRAM_PARSE_MODE.to_string())));
+    }
+
+    #[test]
+    fn send_message_values_can_disable_markdown_parse_mode() {
+        let values = send_message_values(42, "*done*", 0, None, false);
+
+        assert!(!values.iter().any(|(key, _)| *key == "parse_mode"));
+    }
+
+    #[test]
+    fn markdown_parse_errors_retry_as_plain_text() {
+        assert!(should_retry_plain_text("Bad Request: can't parse entities"));
+        assert!(!should_retry_plain_text("Network Error"));
     }
 
     #[test]

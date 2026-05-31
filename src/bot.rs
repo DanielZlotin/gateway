@@ -140,8 +140,7 @@ fn handle_message(
     tx: &mpsc::SyncSender<Job>,
     msg: Message,
 ) -> Result<(), String> {
-    let from_id = msg.from.as_ref().map(|user| user.id);
-    if !is_allowed(&cfg.allowed_ids, msg.chat.id, from_id) {
+    if !is_allowed(&cfg.allowed_ids, msg.chat.id) {
         return Ok(());
     }
     let text = match message_text(&msg.text, &msg.caption) {

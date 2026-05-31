@@ -22,8 +22,8 @@ pub fn unknown_directive_message() -> String {
     format!("Unknown directive. Defined directives: {DIRECTIVES}")
 }
 
-pub fn is_allowed(allowed_ids: &[i64], chat_id: i64, from_id: Option<i64>) -> bool {
-    allowed_ids.contains(&chat_id) || from_id.is_some_and(|id| allowed_ids.contains(&id))
+pub fn is_allowed(allowed_ids: &[i64], chat_id: i64) -> bool {
+    allowed_ids.contains(&chat_id)
 }
 
 #[cfg(test)]
@@ -58,9 +58,8 @@ mod tests {
     }
 
     #[test]
-    fn is_allowed_accepts_chat_or_sender() {
-        assert!(is_allowed(&[42], 42, None));
-        assert!(is_allowed(&[42], 7, Some(42)));
-        assert!(!is_allowed(&[42], 7, Some(8)));
+    fn is_allowed_accepts_only_allowed_chat_id() {
+        assert!(is_allowed(&[42], 42));
+        assert!(!is_allowed(&[42], 7));
     }
 }

@@ -15,7 +15,6 @@ pub struct RunArgs {
     pub prompt_file: Option<PathBuf>,
     pub model: Option<String>,
     pub new_session: bool,
-    pub telegram_chat: Option<i64>,
 }
 
 #[derive(Debug, Parser)]
@@ -43,8 +42,6 @@ struct RunCli {
     model: Option<String>,
     #[arg(long)]
     new: bool,
-    #[arg(long)]
-    telegram_chat: Option<i64>,
 }
 
 pub fn parse_args_from<I, T>(args: I) -> Result<Mode, String>
@@ -61,7 +58,6 @@ where
             prompt_file: args.prompt_file,
             model: args.model,
             new_session: args.new,
-            telegram_chat: args.telegram_chat,
         }),
     })
 }
@@ -77,7 +73,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_run_mode_with_prompt_and_delivery_chat() {
+    fn parses_run_mode_with_prompt() {
         let mode = parse_args_from([
             "gateway",
             "run",
@@ -88,8 +84,6 @@ mod tests {
             "--model",
             "gpt-test",
             "--new",
-            "--telegram-chat",
-            "42",
         ])
         .unwrap();
 
@@ -101,7 +95,6 @@ mod tests {
                 prompt_file: None,
                 model: Some("gpt-test".to_string()),
                 new_session: true,
-                telegram_chat: Some(42),
             })
         );
     }

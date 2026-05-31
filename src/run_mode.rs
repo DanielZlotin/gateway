@@ -63,10 +63,10 @@ pub fn run(args: RunArgs, cfg: Config) -> Result<String, String> {
     if let Some(session_id) = output.session_id.as_deref() {
         store.save_run(&key, state.generation, session_id)?;
     }
-    if let Some(chat_id) = args.telegram_chat {
-        let tg = TelegramClient::new(&cfg.bot_token);
+    let tg = TelegramClient::new(&cfg.bot_token);
+    for chat_id in &cfg.allowed_ids {
         for part in split_telegram_message(&output.final_text) {
-            tg.send_message(chat_id, &part, 0)?;
+            tg.send_message(*chat_id, &part, 0)?;
         }
     }
     Ok(output.final_text)
@@ -86,7 +86,6 @@ mod tests {
             prompt_file: None,
             model: None,
             new_session: false,
-            telegram_chat: None,
         }
     }
 

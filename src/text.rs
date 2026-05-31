@@ -1,4 +1,5 @@
 pub const TELEGRAM_MESSAGE_LIMIT: usize = 3900;
+pub const DEFAULT_LOG_LINES: usize = 10;
 
 pub fn split_telegram_message(text: &str) -> Vec<String> {
     let mut rest = text.trim().to_string();
@@ -69,7 +70,7 @@ pub fn log_line_count(text: &str) -> usize {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
         .map(|value| value.min(200))
-        .unwrap_or(80)
+        .unwrap_or(DEFAULT_LOG_LINES)
 }
 
 pub fn tail_log_text(text: &str, lines: usize) -> String {
@@ -79,7 +80,7 @@ pub fn tail_log_text(text: &str, lines: usize) -> String {
     }
     let all: Vec<&str> = text.lines().collect();
     let start = all.len().saturating_sub(lines);
-    all[start..].join("\n")
+    all[start..].join("\n\n")
 }
 
 pub fn join_non_empty(parts: &[&str]) -> String {
@@ -141,16 +142,16 @@ mod tests {
 
     #[test]
     fn log_line_count_defaults_and_caps() {
-        assert_eq!(log_line_count("/log"), 80);
+        assert_eq!(log_line_count("/log"), 10);
         assert_eq!(log_line_count("/log 10"), 10);
-        assert_eq!(log_line_count("/log bad"), 80);
-        assert_eq!(log_line_count("/log 0"), 80);
+        assert_eq!(log_line_count("/log bad"), 10);
+        assert_eq!(log_line_count("/log 0"), 10);
         assert_eq!(log_line_count("/log 999"), 200);
     }
 
     #[test]
     fn tail_log_text_returns_last_lines() {
-        assert_eq!(tail_log_text("one\ntwo\nthree\n", 2), "two\nthree");
+        assert_eq!(tail_log_text("one\ntwo\nthree\n", 2), "two\n\nthree");
         assert_eq!(tail_log_text("", 2), "Gateway log is empty.");
     }
 

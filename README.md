@@ -47,16 +47,11 @@ own XDG config.
 
 ## Cron or launchd jobs
 
-Run a one-shot Codex prompt without touching the chat bot process:
+Run a one-shot Codex prompt without touching the chat bot process. The result is
+sent to `GATEWAY_ALLOWED_IDS`.
 
 ```zsh
 gateway run --job daily --prompt "Summarize the current system state"
-```
-
-Send the result to Telegram:
-
-```zsh
-gateway run --job daily --prompt-file /path/to/prompt.txt --telegram-chat <telegram_chat_id>
 ```
 
 ## LaunchAgent
