@@ -57,7 +57,7 @@ const FASTFETCH_CONFIG: &str = r#"{
 
 pub fn status_header(state: &ChatSession) -> String {
     format!(
-        "Model: {}\nSession: {}",
+        "🤖 Model: {}\n🧵 Session: {}",
         state.model,
         session_label(state.session_id.as_deref().unwrap_or(""))
     )
@@ -79,14 +79,14 @@ pub fn codex_status(cfg: &Config) -> String {
         .and_then(|auth| fetch_codex_usage_backend(&auth, CODEX_USAGE_URL, CODEX_USAGE_TIMEOUT))
     {
         Ok(usage) => format_codex_usage(&usage),
-        Err(err) => format!("Codex: {err}"),
+        Err(err) => format!("🧠 Codex: {err}"),
     }
 }
 
 pub fn fastfetch_status(bin: &Path) -> String {
     match run_fastfetch(bin, FASTFETCH_TIMEOUT) {
         Ok((raw, timed_out)) => format_fastfetch_status(&raw, timed_out),
-        Err(err) => format!("fastfetch: {err}"),
+        Err(err) => format!("🖥️ fastfetch: {err}"),
     }
 }
 
@@ -95,8 +95,8 @@ fn format_fastfetch_status(raw: &str, timed_out: bool) -> String {
     match (text.is_empty(), timed_out) {
         (false, false) => text,
         (false, true) => format!("{text}\n• ⏳ Fastfetch: timed out; showing partial output"),
-        (true, true) => "fastfetch: timed out".to_string(),
-        (true, false) => "fastfetch: no output".to_string(),
+        (true, true) => "🖥️ fastfetch: timed out".to_string(),
+        (true, false) => "🖥️ fastfetch: no output".to_string(),
     }
 }
 
@@ -169,14 +169,14 @@ pub fn format_fastfetch_output(raw: &str) -> String {
 #[cfg(test)]
 fn format_codex_usage_json(raw: &str) -> String {
     serde_json::from_str::<CodexUsageResponse>(raw).map_or_else(
-        |_| "Codex: usage response unreadable".to_string(),
+        |_| "🧠 Codex: usage response unreadable".to_string(),
         |usage| format_codex_usage(&usage),
     )
 }
 
 fn format_codex_usage(usage: &CodexUsageResponse) -> String {
     let Some(rate_limit) = usage.rate_limit.as_ref() else {
-        return "Codex: usage unavailable".to_string();
+        return "🧠 Codex: usage unavailable".to_string();
     };
     let mut parts = Vec::new();
     if let Some(window) = rate_limit.primary_window.as_ref() {
@@ -193,9 +193,9 @@ fn format_codex_usage(usage: &CodexUsageResponse) -> String {
         }
     }
     if parts.is_empty() {
-        "Codex: usage unavailable".to_string()
+        "🧠 Codex: usage unavailable".to_string()
     } else {
-        format!("Codex: {}", parts.join(" · "))
+        format!("🧠 Codex: {}", parts.join(" · "))
     }
 }
 
@@ -450,8 +450,8 @@ mod tests {
 
         let got = status_header(&state);
 
-        assert!(got.contains("Model: gpt-test"));
-        assert!(got.contains("Session: 12345678"));
+        assert!(got.contains("🤖 Model: gpt-test"));
+        assert!(got.contains("🧵 Session: 12345678"));
         assert!(!got.contains("/commands"));
     }
 
@@ -463,10 +463,10 @@ mod tests {
             ..ChatSession::default()
         };
 
-        let got = format_status_message(&state, "Codex: ok", "OS: test");
+        let got = format_status_message(&state, "🧠 Codex: ok", "OS: test");
 
-        assert!(got.contains("Model: gpt-test"));
-        assert!(got.contains("Codex: ok\n\nOS: test"));
+        assert!(got.contains("🤖 Model: gpt-test"));
+        assert!(got.contains("🧠 Codex: ok\n\nOS: test"));
         assert!(got.contains("OS: test"));
         assert!(!got.contains("Gateway restarted."));
     }
@@ -488,7 +488,7 @@ mod tests {
 
         let got = format_codex_usage_json(raw);
 
-        assert_eq!(got, "Codex: 5h 88% left · weekly 99% left");
+        assert_eq!(got, "🧠 Codex: 5h 88% left · weekly 99% left");
     }
 
     #[test]
@@ -510,15 +510,15 @@ mod tests {
 
         let got = format_codex_usage_json(raw);
 
-        assert_eq!(got, "Codex: 5h 80% left · weekly 25% left");
+        assert_eq!(got, "🧠 Codex: 5h 80% left · weekly 25% left");
     }
 
     #[test]
     fn codex_usage_json_reports_unavailable_when_backendapi_has_no_windows() {
-        assert_eq!(format_codex_usage_json("{}"), "Codex: usage unavailable");
+        assert_eq!(format_codex_usage_json("{}"), "🧠 Codex: usage unavailable");
         assert_eq!(
             format_codex_usage_json("not json"),
-            "Codex: usage response unreadable"
+            "🧠 Codex: usage response unreadable"
         );
     }
 
@@ -536,8 +536,11 @@ mod tests {
 
     #[test]
     fn fastfetch_status_formats_timeout_states() {
-        assert_eq!(format_fastfetch_status("", true), "fastfetch: timed out");
-        assert_eq!(format_fastfetch_status("", false), "fastfetch: no output");
+        assert_eq!(format_fastfetch_status("", true), "🖥️ fastfetch: timed out");
+        assert_eq!(
+            format_fastfetch_status("", false),
+            "🖥️ fastfetch: no output"
+        );
         assert_eq!(
             format_fastfetch_status("OS: macOS\n", true),
             "• 🖥️ OS: macOS\n• ⏳ Fastfetch: timed out; showing partial output"
@@ -675,7 +678,7 @@ exit 2
 
         assert_eq!(
             format_codex_usage(&usage),
-            "Codex: 5h 60% left · weekly 95% left"
+            "🧠 Codex: 5h 60% left · weekly 95% left"
         );
         assert!(request.starts_with("get /backend-api/wham/usage http/1.1\r\n"));
         assert!(request.contains("authorization: bearer token_value\r\n"));
@@ -689,7 +692,7 @@ exit 2
     #[test]
     fn fastfetch_status_reports_start_errors_and_known_keys() {
         let missing = fastfetch_status(Path::new("/definitely/missing/fastfetch"));
-        assert!(missing.contains("fastfetch:"));
+        assert!(missing.contains("🖥️ fastfetch:"));
 
         let raw = [
             "Kernel: Darwin",

@@ -222,7 +222,7 @@ pub fn message_text(text: &str, caption: &str) -> Result<String, String> {
     if !caption.is_empty() {
         return Ok(caption.to_string());
     }
-    Err("Text messages only.".to_string())
+    Err("📝 Text messages only.".to_string())
 }
 
 fn advance_offset(current: i64, update_id: i64) -> i64 {
@@ -268,7 +268,7 @@ fn handle_message(
     if queued.is_err() {
         tg.send_message(
             msg.chat.id,
-            "Codex queue is full. Try again after the current requests finish.",
+            "🚦 Codex queue is full. Try again after the current requests finish.",
             msg.message_id,
         )?;
     } else {
@@ -293,7 +293,7 @@ fn handle_command(
         "/log" => handle_log_command(cfg, tg, msg, text),
         "/new" => handle_new_command(tg, store, msg, &key),
         "/restart" => {
-            tg.send_message(msg.chat.id, "Restarting gateway.", msg.message_id)?;
+            tg.send_message(msg.chat.id, "🔄 Restarting gateway.", msg.message_id)?;
             restart_gateway(&cfg.launchd_target);
             Ok(())
         }
@@ -316,7 +316,7 @@ fn handle_log_command(
     let lines = log_line_count(text);
     let body = fs::read_to_string(&cfg.gateway_log_file)
         .map(|log_text| tail_log_text(&log_text, lines))
-        .unwrap_or_else(|_| "No gateway log available.".to_string());
+        .unwrap_or_else(|_| "📭 No gateway log available.".to_string());
     send_long_message(tg, msg.chat.id, &body, msg.message_id)
 }
 
@@ -329,12 +329,12 @@ fn handle_new_command(
     match store.reset(key) {
         Ok(state) => tg.send_message(
             msg.chat.id,
-            &format!("New session ready. Model: {}", state.model),
+            &format!("🆕 New session ready. 🤖 Model: {}", state.model),
             msg.message_id,
         ),
         Err(err) => tg.send_message(
             msg.chat.id,
-            &format!("Failed to reset session: {err}"),
+            &format!("⚠️ Failed to reset session: {err}"),
             msg.message_id,
         ),
     }
@@ -365,7 +365,7 @@ fn handle_model_command(
             tg.send_message(
                 msg.chat.id,
                 &format!(
-                    "Model set to {}\nSession: {}",
+                    "🤖 Model set to {}\n🧵 Session: {}",
                     state.model,
                     session_label(state.session_id.as_deref().unwrap_or(""))
                 ),
@@ -374,7 +374,7 @@ fn handle_model_command(
         }
         Err(err) => tg.send_message(
             msg.chat.id,
-            &format!("Failed to set model: {err}"),
+            &format!("⚠️ Failed to set model: {err}"),
             msg.message_id,
         ),
     }
@@ -389,14 +389,14 @@ fn handle_resume_command(
 ) -> Result<(), String> {
     let target = command_arg(text);
     if target.is_empty() {
-        let body = format!("Usage: /resume SESSION_OR_NAME\n\n{}", store.list(key));
+        let body = format!("🧭 Usage: /resume SESSION_OR_NAME\n\n{}", store.list(key));
         return send_long_message(tg, msg.chat.id, &body, msg.message_id);
     }
     match store.resume(key, &target) {
         Ok(state) => tg.send_message(
             msg.chat.id,
             &format!(
-                "Resumed session {}\nModel: {}",
+                "↩️ Resumed session {}\n🤖 Model: {}",
                 session_label(state.session_id.as_deref().unwrap_or("")),
                 state.model
             ),
@@ -415,13 +415,13 @@ fn handle_rename_command(
 ) -> Result<(), String> {
     let name = command_arg(text);
     if name.is_empty() {
-        return tg.send_message(msg.chat.id, "Usage: /rename NAME", msg.message_id);
+        return tg.send_message(msg.chat.id, "🧭 Usage: /rename NAME", msg.message_id);
     }
     match store.rename_current(key, &name) {
         Ok(state) => tg.send_message(
             msg.chat.id,
             &format!(
-                "Renamed session {} to \"{name}\".",
+                "🏷️ Renamed session {} to \"{name}\".",
                 session_label(state.session_id.as_deref().unwrap_or(""))
             ),
             msg.message_id,
@@ -523,7 +523,7 @@ fn run_job(
             send_long_message(
                 tg,
                 job.chat_id,
-                &format!("Codex failed:\n{err}"),
+                &format!("⚠️ Codex failed:\n{err}"),
                 job.reply_to_message_id,
             )?;
             return Ok(());
@@ -615,7 +615,7 @@ fn start_typing_loop<T: TelegramApi>(tg: &T, chat_id: i64) -> TypingLoop {
 
 fn empty_final_text(text: &str) -> String {
     if text.trim().is_empty() {
-        "Codex finished with no final text.".to_string()
+        "📭 Codex finished with no final text.".to_string()
     } else {
         text.to_string()
     }
@@ -732,7 +732,7 @@ mod tests {
     fn message_text_prefers_text_then_caption() {
         assert_eq!(message_text(" hello ", "caption").unwrap(), "hello");
         assert_eq!(message_text("", " caption ").unwrap(), "caption");
-        assert_eq!(message_text("", "").unwrap_err(), "Text messages only.");
+        assert_eq!(message_text("", "").unwrap_err(), "📝 Text messages only.");
     }
 
     #[test]
@@ -750,7 +750,7 @@ mod tests {
         );
         assert_eq!(
             final_delivery(""),
-            FinalDelivery::Message("Codex finished with no final text.".to_string())
+            FinalDelivery::Message("📭 Codex finished with no final text.".to_string())
         );
     }
 
@@ -774,7 +774,7 @@ mod tests {
         assert_eq!(read_offset(&cfg.offset_file), 5);
         assert!(tg.calls().contains(&Call::Sync(vec![42])));
         assert!(tg.calls().iter().any(|call| {
-            matches!(call, Call::Send { chat_id: 42, reply_to: 0, text } if text.contains("Model: gpt-test"))
+            matches!(call, Call::Send { chat_id: 42, reply_to: 0, text } if text.contains("🤖 Model: gpt-test"))
         }));
         assert!(tg.calls().contains(&Call::GetUpdates {
             offset: 0,
@@ -846,7 +846,7 @@ mod tests {
 
         handle_message(&cfg, &tg, &store, &tx, message(42, 2, "  ")).unwrap();
         assert!(tg.calls().iter().any(|call| {
-            matches!(call, Call::Send { text, reply_to: 2, .. } if text == "Text messages only.")
+            matches!(call, Call::Send { text, reply_to: 2, .. } if text == "📝 Text messages only.")
         }));
 
         handle_message(&cfg, &tg, &store, &tx, message(42, 3, "run this")).unwrap();
@@ -862,7 +862,7 @@ mod tests {
         let (full_tx, _full_rx) = mpsc::sync_channel(0);
         handle_message(&cfg, &tg, &store, &full_tx, message(42, 4, "queued")).unwrap();
         assert!(tg.calls().iter().any(|call| {
-            matches!(call, Call::Send { text, reply_to: 4, .. } if text.contains("queue is full"))
+            matches!(call, Call::Send { text, reply_to: 4, .. } if text.contains("🚦 Codex queue is full"))
         }));
     }
 
@@ -932,25 +932,31 @@ mod tests {
         handle_command(&cfg, &tg, &store, &msg, "/wat", "/wat").unwrap();
 
         let sent = tg.sent_text();
-        assert!(sent.iter().any(|text| text == "No gateway log available."));
+        assert!(sent
+            .iter()
+            .any(|text| text == "📭 No gateway log available."));
         assert!(sent.iter().any(|text| text.contains("two\n\nthree")));
-        assert!(sent.iter().any(|text| text.contains("New session ready")));
-        assert!(sent.iter().any(|text| text.contains("Model: gpt-test")));
         assert!(sent
             .iter()
-            .any(|text| text.contains("Model set to gpt-next")));
-        assert!(sent.iter().any(|text| text.contains("Usage: /resume")));
+            .any(|text| text.contains("🆕 New session ready")));
+        assert!(sent.iter().any(|text| text.contains("🤖 Model: gpt-test")));
         assert!(sent
             .iter()
-            .any(|text| text.contains("No saved session matches")));
-        assert!(sent.iter().any(|text| text.contains("Resumed session")));
-        assert!(sent.iter().any(|text| text.contains("Usage: /rename")));
-        assert!(sent.iter().any(|text| text.contains("Renamed session")));
-        assert!(sent.iter().any(|text| text.contains("Saved sessions:")));
+            .any(|text| text.contains("🤖 Model set to gpt-next")));
+        assert!(sent.iter().any(|text| text.contains("🧭 Usage: /resume")));
+        assert!(sent
+            .iter()
+            .any(|text| text.contains("🔎 No saved session matches")));
+        assert!(sent.iter().any(|text| text.contains("↩️ Resumed session")));
+        assert!(sent.iter().any(|text| text.contains("🧭 Usage: /rename")));
+        assert!(sent.iter().any(|text| text.contains("🏷️ Renamed session")));
+        assert!(sent.iter().any(|text| text.contains("💾 Saved sessions:")));
         assert!(sent.iter().any(|text| text.contains("/status")));
-        assert!(sent.iter().any(|text| text.contains("Codex:")));
-        assert!(sent.iter().any(|text| text == "Restarting gateway."));
-        assert!(sent.iter().any(|text| text.contains("Unknown directive")));
+        assert!(sent.iter().any(|text| text.contains("🧠 Codex:")));
+        assert!(sent.iter().any(|text| text == "🔄 Restarting gateway."));
+        assert!(sent
+            .iter()
+            .any(|text| text.contains("❓ Unknown directive")));
     }
 
     #[test]
@@ -975,7 +981,7 @@ mod tests {
         let sent = tg.sent_text();
         assert!(sent
             .iter()
-            .any(|text| text.contains("Failed to reset session")));
+            .any(|text| text.contains("⚠️ Failed to reset session")));
         assert!(sent.iter().any(|text| text.contains("Failed to set model")));
         assert!(sent.iter().any(|text| text.contains("No current session")));
 
@@ -1156,7 +1162,7 @@ exit 2
         assert!(tg
             .sent_text()
             .iter()
-            .any(|text| text.contains("Codex failed:\nboom")));
+            .any(|text| text.contains("⚠️ Codex failed:\nboom")));
     }
 
     #[test]

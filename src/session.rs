@@ -88,7 +88,7 @@ impl SessionStore {
     pub fn resume(&self, key: &SessionKey, target: &str) -> Result<ChatSession, String> {
         let mut state = self.load(key);
         let found = find_session(&state.sessions, target)
-            .ok_or_else(|| format!("No saved session matches \"{target}\"."))?;
+            .ok_or_else(|| format!("🔎 No saved session matches \"{target}\"."))?;
         state.session_id = Some(found.id);
         if !found.model.is_empty() {
             state.model = found.model;
@@ -102,7 +102,7 @@ impl SessionStore {
     pub fn rename_current(&self, key: &SessionKey, name: &str) -> Result<ChatSession, String> {
         let mut state = self.load(key);
         let id = state.session_id.clone().ok_or_else(|| {
-            "No current session to rename. Send a normal message first.".to_string()
+            "🏷️ No current session to rename. Send a normal message first.".to_string()
         })?;
         state.updated_at = now_string();
         state.sessions = upsert_session(
@@ -148,14 +148,14 @@ impl SessionStore {
     pub fn list(&self, key: &SessionKey) -> String {
         let state = self.load(key);
         if state.sessions.is_empty() {
-            return "No saved sessions yet. Send a normal message to create one.".to_string();
+            return "📭 No saved sessions yet. Send a normal message to create one.".to_string();
         }
-        let mut lines = vec!["Saved sessions:".to_string()];
+        let mut lines = vec!["💾 Saved sessions:".to_string()];
         for item in state.sessions {
             let marker = if Some(item.id.as_str()) == state.session_id.as_deref() {
-                "*"
+                "⭐"
             } else {
-                " "
+                "▫️"
             };
             let name = item.name.as_deref().unwrap_or("(unnamed)");
             let model = if item.model.is_empty() {
@@ -427,7 +427,7 @@ mod tests {
 
         assert_eq!(
             store.list(&key),
-            "No saved sessions yet. Send a normal message to create one."
+            "📭 No saved sessions yet. Send a normal message to create one."
         );
         assert!(store.save_run(&key, 0, "session-current").unwrap());
         let mut state = store.load(&key);
@@ -441,9 +441,9 @@ mod tests {
 
         let list = store.list(&key);
 
-        assert!(list.contains("Saved sessions:"));
-        assert!(list.contains("* session- gpt-default (unnamed)"));
-        assert!(list.contains("  session- gpt-default (unnamed)"));
+        assert!(list.contains("💾 Saved sessions:"));
+        assert!(list.contains("⭐ session- gpt-default (unnamed)"));
+        assert!(list.contains("▫️ session- gpt-default (unnamed)"));
         assert!(dir.path().join("cron/daily_report.json").exists());
     }
 

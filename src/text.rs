@@ -82,7 +82,7 @@ pub fn normalize_log_line_count(lines: Option<usize>) -> usize {
 pub fn tail_log_text(text: &str, lines: usize) -> String {
     let text = text.trim();
     if text.is_empty() {
-        return "Gateway log is empty.".to_string();
+        return "📭 Gateway log is empty.".to_string();
     }
     let all: Vec<&str> = text.lines().collect();
     let start = all.len().saturating_sub(lines);
@@ -180,7 +180,7 @@ mod tests {
     #[test]
     fn tail_log_text_returns_last_lines() {
         assert_eq!(tail_log_text("one\ntwo\nthree\n", 2), "two\n\nthree");
-        assert_eq!(tail_log_text("", 2), "Gateway log is empty.");
+        assert_eq!(tail_log_text("", 2), "📭 Gateway log is empty.");
     }
 
     #[test]

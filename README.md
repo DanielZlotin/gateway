@@ -1,20 +1,20 @@
-# Gateway
+# 🌉 Gateway
 
-Lean Rust Telegram-to-Codex gateway.
+⚡ Lean Rust Telegram-to-Codex gateway.
 
-1. `gateway` or `gateway bot` long-polls Telegram and answers allowed chats.
-2. `gateway run` executes one Codex prompt for cron/scripts and can notify Telegram.
+1. 🤖 `gateway` or `gateway bot` long-polls Telegram and answers allowed chats.
+2. 🕰️ `gateway run` executes one Codex prompt for cron/scripts and can notify Telegram.
 
-## Build
+## 🛠️ Build
 
 ```zsh
 cargo test
 cargo build --release
 ```
 
-## Environment
+## 🌱 Environment
 
-Required:
+🔐 Required:
 
 ```zsh
 export GATEWAY_TELEGRAM_TOKEN=...
@@ -28,19 +28,19 @@ export XDG_STATE_HOME=...
 `GATEWAY_TELEGRAM_CHAT_IDS` is comma-separated, trimmed, integer-parsed, sorted,
 and deduplicated.
 
-Optional:
+⚙️ Optional:
 
-1. `GATEWAY_CODEX_WORKDIR`: Codex working directory.
+1. 📁 `GATEWAY_CODEX_WORKDIR`: Codex working directory.
 
-Fixed runtime values:
+📌 Fixed runtime values:
 
-1. state root: `$XDG_STATE_HOME/gateway`
-2. log file: `logs/gateway.log`
-3. Telegram poll timeout: `50` seconds
-4. bot job queue depth: `8`
-5. launchd target: `gui/<current uid>/ai.gateway`
+1. 📁 state root: `$XDG_STATE_HOME/gateway`
+2. 📜 log file: `logs/gateway.log`
+3. ⏱️ Telegram poll timeout: `50` seconds
+4. 🚦 bot job queue depth: `8`
+5. 🚀 launchd target: `gui/<current uid>/ai.gateway`
 
-## Setup
+## 🚀 Setup
 
 ```zsh
 ./setup
@@ -54,7 +54,7 @@ writes `ai.gateway.plist` with the absolute `launch` path into
 
 `launch` logs to the state log file and execs `target/release/gateway bot`.
 
-## Config
+## ⚙️ Config
 
 Gateway creates and normalizes `$XDG_CONFIG_HOME/gateway/config.json`:
 
@@ -65,17 +65,17 @@ Gateway creates and normalizes `$XDG_CONFIG_HOME/gateway/config.json`:
 }
 ```
 
-Rules:
+📋 Rules:
 
-1. Blank `model` resets to `gpt-5.5`.
-2. `timeout_mins: 0` resets to `30`.
-3. Overflowing `timeout_mins` fails config load.
-4. `/model NAME` updates the current chat model and persists `model` without
+1. 🤖 Blank `model` resets to `gpt-5.5`.
+2. ⏱️ `timeout_mins: 0` resets to `30`.
+3. ⚠️ Overflowing `timeout_mins` fails config load.
+4. 💾 `/model NAME` updates the current chat model and persists `model` without
    changing `timeout_mins`.
 
-## State
+## 💾 State
 
-Files under the state root:
+📁 Files under the state root:
 
 ```text
 telegram.offset
@@ -91,7 +91,7 @@ model, generation, updated time, and saved sessions. Saved sessions store ID,
 optional name, model, and updated time. Generation checks prevent stale Codex
 runs from overwriting a newer `/new` or `/resume`.
 
-## CLI
+## 🧰 CLI
 
 ```zsh
 gateway
@@ -104,14 +104,14 @@ gateway run --job daily --prompt-file ./prompt.txt
 printf '%s\n' "Summarize status" | gateway run --job daily
 ```
 
-Run flags:
+🏃 Run flags:
 
-1. `--job NAME`: required session namespace.
-2. `--prompt TEXT`: first prompt source.
-3. `--prompt-file PATH`: second prompt source.
-4. stdin: third prompt source.
-5. `--model NAME`: model override for the run.
-6. `--new`: reset the run session before execution.
+1. 🧵 `--job NAME`: required session namespace.
+2. 💬 `--prompt TEXT`: first prompt source.
+3. 📄 `--prompt-file PATH`: second prompt source.
+4. ⌨️ stdin: third prompt source.
+5. 🤖 `--model NAME`: model override for the run.
+6. 🆕 `--new`: reset the run session before execution.
 
 Prompts are trimmed; empty prompts fail. `gateway run` prints final Codex text to
 stdout and sends Telegram only when the trimmed result is non-empty and not
@@ -123,112 +123,112 @@ defaults to `10` lines, caps at `200`, and only requires `XDG_STATE_HOME`.
 `gateway uninstall` runs launchd `bootout` for `ai.gateway` and removes
 `$HOME/Library/LaunchAgents/ai.gateway.plist`.
 
-## Bot
+## 🤖 Bot
 
-Startup:
+🚀 Startup:
 
-1. Creates state, chat, and cron directories.
-2. Syncs Telegram commands for default/private/allowed-chat scopes and clears
+1. 📁 Creates state, chat, and cron directories.
+2. 🧭 Syncs Telegram commands for default/private/allowed-chat scopes and clears
    broader group/admin scopes.
-3. Sends status to each allowed chat.
-4. On first poll, skips existing Telegram backlog and stores the next offset.
+3. 📊 Sends status to each allowed chat.
+4. ⏭️ On first poll, skips existing Telegram backlog and stores the next offset.
 
-Messages:
+💬 Messages:
 
-1. Non-allowed chats are ignored.
-2. Text and captions are accepted; blank/non-text input gets `Text messages only.`.
-3. Commands run immediately.
-4. Normal prompts enter one Codex worker queue; a full queue gets a queue-full reply.
-5. A running job sends a thinking message, refreshes Telegram typing, streams
+1. 🚫 Non-allowed chats are ignored.
+2. 📝 Text and captions are accepted; blank/non-text input gets `📝 Text messages only.`.
+3. ⚡ Commands run immediately.
+4. 🚦 Normal prompts enter one Codex worker queue; a full queue gets a queue-full reply.
+5. 🫧 A running job sends a thinking message, refreshes Telegram typing, streams
    Codex stdout by editing that message, then delivers the final result.
 
-Final delivery:
+📬 Final delivery:
 
-1. Empty final text becomes `Codex finished with no final text.`.
-2. Trimmed `OK` deletes the thinking message and reacts thumbs-up to the request.
-3. Other final text tries Telegram effect `5107584321108051014`, then falls back
+1. 📭 Empty final text becomes `📭 Codex finished with no final text.`.
+2. 👍 Trimmed `OK` deletes the thinking message and reacts thumbs-up to the request.
+3. ✨ Other final text tries Telegram effect `5107584321108051014`, then falls back
    to a normal message.
-4. Long messages split under `3900` chars, preferring a recent newline.
-5. Codex failures are sent as `Codex failed:` plus collected error text.
+4. ✂️ Long messages split under `3900` chars, preferring a recent newline.
+5. ⚠️ Codex failures are sent as `⚠️ Codex failed:` plus collected error text.
 
-## Commands
+## 🧭 Commands
 
-Commands are case-insensitive and may include a bot suffix such as
+🔤 Commands are case-insensitive and may include a bot suffix such as
 `/status@MyBot`.
 
 ```text
-/commands - show supported gateway directives
-/help - alias for /commands
-/status - show Codex, gateway, and system status
-/log [lines] - send recent gateway logs
-/new - start a fresh Codex session
-/restart - restart the gateway service
-/model [name] - show or set the Codex model
-/resume SESSION_OR_NAME - resume a saved session
-/rename NAME - rename the current session
-/list - list saved sessions
+🧭 /commands - show supported gateway directives
+❔ /help - alias for /commands
+📊 /status - show Codex, gateway, and system status
+📜 /log [lines] - send recent gateway logs
+🆕 /new - start a fresh Codex session
+🔄 /restart - restart the gateway service
+🤖 /model [name] - show or set the Codex model
+↩️ /resume SESSION_OR_NAME - resume a saved session
+🏷️ /rename NAME - rename the current session
+💾 /list - list saved sessions
 ```
 
-Details:
+📋 Details:
 
-1. `/status` sends model/session, Codex usage, then fastfetch.
-2. `/log` defaults to `10` lines and caps at `200`.
-3. `/new` clears current session ID and increments generation.
-4. `/restart` spawns `/bin/launchctl kickstart -k <target>`.
-5. `/model` with no argument shows status; with an argument updates state/config.
-6. `/resume` matches full ID, first 8 chars, or saved name.
-7. `/rename` requires a current session.
-8. `/list` marks the current saved session with `*`.
-9. Unknown commands return the defined directive list.
+1. 📊 `/status` sends model/session, Codex usage, then fastfetch.
+2. 📜 `/log` defaults to `10` lines and caps at `200`.
+3. 🆕 `/new` clears current session ID and increments generation.
+4. 🔄 `/restart` spawns `/bin/launchctl kickstart -k <target>`.
+5. 🤖 `/model` with no argument shows status; with an argument updates state/config.
+6. ↩️ `/resume` matches full ID, first 8 chars, or saved name.
+7. 🏷️ `/rename` requires a current session.
+8. 💾 `/list` marks the current saved session with `⭐`.
+9. ❓ Unknown commands return the defined directive list.
 
-## Codex
+## 🧠 Codex
 
 Gateway injects `src/SYSTEM.md` as `developer_instructions`, enables live search,
 passes prompts on stdin, and lets Codex inherit Gateway's environment.
 
-New sessions:
+🆕 New sessions:
 
 ```text
 codex --search exec --color never -c developer_instructions=<SYSTEM.md> --cd <workdir> --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m <model> --output-last-message <tmpfile> -
 ```
 
-Resumed sessions:
+↩️ Resumed sessions:
 
 ```text
 codex --search exec resume -c developer_instructions=<SYSTEM.md> --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m <model> --output-last-message <tmpfile> <session_id> -
 ```
 
-Output rules:
+📤 Output rules:
 
-1. Final text comes from `--output-last-message`, falling back to trimmed stdout.
-2. Raw stdout chunks drive streaming previews.
-3. Session IDs come from stderr lines prefixed `session id:`.
-4. Timeouts kill Codex and include output-file text, parsed stdout
+1. 📬 Final text comes from `--output-last-message`, falling back to trimmed stdout.
+2. 🫧 Raw stdout chunks drive streaming previews.
+3. 🧵 Session IDs come from stderr lines prefixed `session id:`.
+4. ⏱️ Timeouts kill Codex and include output-file text, parsed stdout
    `agent_message` text, and stderr when available.
-5. `src/SYSTEM.md` requires concise Telegram-safe replies and blocks secrets or
+5. 🔐 `src/SYSTEM.md` requires concise Telegram-safe replies and blocks secrets or
    private data from being sent.
 
-## Telegram
+## 📲 Telegram
 
-1. `getUpdates` requests only `message` updates.
-2. Messages use Markdown parse mode and disable web previews.
-3. Markdown parse failures retry as plain text.
-4. Request errors redact the bot token.
-5. Gateway can send, edit, delete, type, set reactions, and send final effects.
-6. Bot commands are registered for default language, `en`, and `he`.
+1. 📥 `getUpdates` requests only `message` updates.
+2. 📝 Messages use Markdown parse mode and disable web previews.
+3. 🔁 Markdown parse failures retry as plain text.
+4. 🔐 Request errors redact the bot token.
+5. 🛠️ Gateway can send, edit, delete, type, set reactions, and send final effects.
+6. 🌐 Bot commands are registered for default language, `en`, and `he`.
 
-## Status
+## 📊 Status
 
-Startup status and `/status` include:
+📡 Startup status and `/status` include:
 
-1. Gateway header: model and current session label, or `none`.
-2. Codex usage: reads `$XDG_CONFIG_HOME/codex/auth.json`, calls
+1. 🌉 Gateway header: model and current session label, or `none`.
+2. 🧠 Codex usage: reads `$XDG_CONFIG_HOME/codex/auth.json`, calls
    `https://chatgpt.com/backend-api/wham/usage`, and reports primary/secondary
    usage percentage left without exposing tokens.
-3. Fastfetch: runs `fastfetch --config - --pipe` with bundled config on stdin,
+3. 🖥️ Fastfetch: runs `fastfetch --config - --pipe` with bundled config on stdin,
    kills it after `5` seconds, and sends partial output with a timeout note.
 
-## LaunchAgent
+## 🚀 LaunchAgent
 
 `setup` installs `ai.gateway.plist` with an absolute path to the repo's `launch`
 script. The LaunchAgent uses `RunAtLoad`, `KeepAlive`, `ThrottleInterval = 1`,

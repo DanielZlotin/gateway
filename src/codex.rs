@@ -310,7 +310,7 @@ mod tests {
         assert!(joined.contains("--color never"));
         assert!(joined.contains("--cd /work"));
         assert!(!joined.contains("model_instructions_file"));
-        assert!(joined.contains("-c developer_instructions=\"# Gateway Runtime Instructions"));
+        assert!(joined.contains("-c developer_instructions=\"# 🌉 Gateway Runtime Instructions"));
         assert!(!joined.contains("--ask-for-approval"));
         assert!(!joined.contains("--sandbox"));
     }
@@ -330,7 +330,7 @@ mod tests {
         assert_eq!(args[1], "exec");
         assert_eq!(args[2], "resume");
         assert!(joined.starts_with("--search exec resume -c developer_instructions=\""));
-        assert!(joined.contains("# Gateway Runtime Instructions"));
+        assert!(joined.contains("# 🌉 Gateway Runtime Instructions"));
         assert!(joined.contains("--skip-git-repo-check"));
         assert!(joined.contains("--dangerously-bypass-approvals-and-sandbox"));
         assert!(joined.contains("-m gpt-test"));

@@ -359,16 +359,16 @@ fn should_retry_plain_text(err: &str) -> bool {
 
 pub fn supported_bot_commands() -> Vec<BotCommand> {
     [
-        ("commands", "Show supported gateway directives."),
-        ("help", "Alias for /commands."),
-        ("status", "Show Codex, gateway, and system status."),
-        ("log", "Send recent gateway logs."),
-        ("new", "Start a fresh Codex session."),
-        ("restart", "Restart the gateway service."),
-        ("model", "Show or set the Codex model."),
-        ("resume", "Resume a saved session."),
-        ("rename", "Rename the current session."),
-        ("list", "List saved sessions."),
+        ("commands", "🧭 Show supported gateway directives."),
+        ("help", "❔ Alias for /commands."),
+        ("status", "📊 Show Codex, gateway, and system status."),
+        ("log", "📜 Send recent gateway logs."),
+        ("new", "🆕 Start a fresh Codex session."),
+        ("restart", "🔄 Restart the gateway service."),
+        ("model", "🤖 Show or set the Codex model."),
+        ("resume", "↩️ Resume a saved session."),
+        ("rename", "🏷️ Rename the current session."),
+        ("list", "💾 List saved sessions."),
     ]
     .into_iter()
     .map(|(command, description)| BotCommand {
@@ -460,6 +460,9 @@ mod tests {
                 "list"
             ]
         );
+        assert!(commands
+            .iter()
+            .any(|command| command.command == "status" && command.description.starts_with("📊 ")));
     }
 
     #[test]
