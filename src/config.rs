@@ -2,25 +2,23 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
-pub const TELEGRAM_BOT_TOKEN_ENV: &str = "TELEGRAM_BOT_TOKEN";
+pub const GATEWAY_TELEGRAM_TOKEN_ENV: &str = "GATEWAY_TELEGRAM_TOKEN";
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.5";
-pub const DEFAULT_CODEX_TIMEOUT_SECS: u64 = 15 * 60;
+pub const DEFAULT_CODEX_TIMEOUT_MINS: u64 = 30;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub bot_token: String,
-    pub allowed_ids: Vec<i64>,
-    pub user_home: PathBuf,
-    pub path: String,
+    pub telegram_chat_ids: Vec<i64>,
     pub xdg_config_home: PathBuf,
     pub xdg_cache_home: PathBuf,
     pub xdg_data_home: PathBuf,
     pub xdg_state_home: PathBuf,
     pub gateway_config_file: PathBuf,
     pub codex_bin: PathBuf,
-    pub codex_home: PathBuf,
     pub codex_workdir: PathBuf,
     pub codex_model: String,
     pub fastfetch_bin: PathBuf,
@@ -39,6 +37,8 @@ pub struct Config {
 pub struct GatewayConfigFile {
     #[serde(default = "default_codex_model")]
     pub model: String,
+    #[serde(default = "default_timeout_mins")]
+    pub timeout_mins: u64,
 }
 
 pub fn current_env() -> BTreeMap<String, String> {
@@ -50,59 +50,39 @@ pub fn load() -> Result<Config, String> {
 }
 
 pub fn load_from_env(env: &BTreeMap<String, String>) -> Result<Config, String> {
-    let bot_token = required(env, TELEGRAM_BOT_TOKEN_ENV)?;
-    let user_home = required_path(env, "HOME")?;
-    let path_value = required(env, "PATH")?;
+    let bot_token = required(env, GATEWAY_TELEGRAM_TOKEN_ENV)?;
     let xdg_config_home = required_path(env, "XDG_CONFIG_HOME")?;
     let xdg_cache_home = required_path(env, "XDG_CACHE_HOME")?;
     let xdg_data_home = required_path(env, "XDG_DATA_HOME")?;
     let xdg_state_home = required_path(env, "XDG_STATE_HOME")?;
-    let gateway_config_file = path(
-        env,
-        "GATEWAY_CONFIG_FILE",
-        xdg_config_home.join("gateway/config.json"),
-    );
+    let gateway_config_file = xdg_config_home.join("gateway/config.json");
     let gateway_config = load_gateway_config(&gateway_config_file)?;
-    let state_dir = path(env, "GATEWAY_STATE_DIR", xdg_state_home.join("gateway"));
+    let state_dir = xdg_state_home.join("gateway");
     let chat_state_dir = state_dir.join("chats");
     let cron_state_dir = state_dir.join("cron");
+    let launchd_target = default_launchd_target()?;
 
     Ok(Config {
         bot_token,
-        allowed_ids: allowed_ids(env)?,
-        user_home,
-        path: path_value,
+        telegram_chat_ids: telegram_chat_ids(env)?,
         xdg_config_home: xdg_config_home.clone(),
         xdg_cache_home,
         xdg_data_home,
         xdg_state_home: xdg_state_home.clone(),
         gateway_config_file,
-        codex_bin: path(
-            env,
-            "GATEWAY_CODEX_BIN",
-            PathBuf::from("/opt/homebrew/bin/codex"),
-        ),
-        codex_home: path(env, "GATEWAY_CODEX_HOME", xdg_config_home.join("codex")),
+        codex_bin: PathBuf::from("codex"),
         codex_workdir: path(env, "GATEWAY_CODEX_WORKDIR", xdg_config_home),
         codex_model: gateway_config.model,
-        fastfetch_bin: path(
-            env,
-            "GATEWAY_FASTFETCH_BIN",
-            PathBuf::from("/opt/homebrew/bin/fastfetch"),
-        ),
+        fastfetch_bin: PathBuf::from("fastfetch"),
         state_dir: state_dir.clone(),
         chat_state_dir,
         cron_state_dir,
         offset_file: state_dir.join("telegram.offset"),
-        gateway_log_file: path(env, "GATEWAY_LOG_FILE", state_dir.join("logs/gateway.log")),
-        launchd_target: value(env, "GATEWAY_LAUNCHD_TARGET", "ai.gateway"),
-        poll_timeout_sec: number(env, "GATEWAY_POLL_TIMEOUT_SECS", 50)?,
-        queue_depth: number(env, "GATEWAY_QUEUE_DEPTH", 8)?,
-        codex_timeout: Duration::from_secs(number(
-            env,
-            "GATEWAY_CODEX_TIMEOUT_SECS",
-            DEFAULT_CODEX_TIMEOUT_SECS,
-        )?),
+        gateway_log_file: state_dir.join("logs/gateway.log"),
+        launchd_target,
+        poll_timeout_sec: 50,
+        queue_depth: 8,
+        codex_timeout: Duration::from_secs(timeout_secs(gateway_config.timeout_mins)?),
     })
 }
 
@@ -140,44 +120,27 @@ fn required(env: &BTreeMap<String, String>, key: &str) -> Result<String, String>
         .ok_or_else(|| format!("{key} is required"))
 }
 
-fn value(env: &BTreeMap<String, String>, key: &str, default: &str) -> String {
-    env.get(key)
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .unwrap_or(default)
-        .to_string()
+fn path(env: &BTreeMap<String, String>, key: &str, default: PathBuf) -> PathBuf {
+    optional_path(env, key).unwrap_or(default)
 }
 
 fn required_path(env: &BTreeMap<String, String>, key: &str) -> Result<PathBuf, String> {
     required(env, key).map(PathBuf::from)
 }
 
-fn path(env: &BTreeMap<String, String>, key: &str, default: PathBuf) -> PathBuf {
+fn optional(env: &BTreeMap<String, String>, key: &str) -> Option<String> {
     env.get(key)
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or(default)
+        .map(ToOwned::to_owned)
 }
 
-fn number<T>(env: &BTreeMap<String, String>, key: &str, default: T) -> Result<T, String>
-where
-    T: std::str::FromStr + Copy,
-{
-    match env
-        .get(key)
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-    {
-        Some(value) => value
-            .parse::<T>()
-            .map_err(|_| format!("{key} must be a number")),
-        None => Ok(default),
-    }
+fn optional_path(env: &BTreeMap<String, String>, key: &str) -> Option<PathBuf> {
+    optional(env, key).map(PathBuf::from)
 }
 
-fn allowed_ids(env: &BTreeMap<String, String>) -> Result<Vec<i64>, String> {
-    let raw = required(env, "GATEWAY_ALLOWED_IDS")?;
+fn telegram_chat_ids(env: &BTreeMap<String, String>) -> Result<Vec<i64>, String> {
+    let raw = required(env, "GATEWAY_TELEGRAM_CHAT_IDS")?;
     let mut ids = Vec::new();
     for part in raw
         .split(',')
@@ -185,11 +148,11 @@ fn allowed_ids(env: &BTreeMap<String, String>) -> Result<Vec<i64>, String> {
         .filter(|part| !part.is_empty())
     {
         ids.push(part.parse::<i64>().map_err(|_| {
-            "GATEWAY_ALLOWED_IDS must contain comma-separated integers".to_string()
+            "GATEWAY_TELEGRAM_CHAT_IDS must contain comma-separated integers".to_string()
         })?);
     }
     if ids.is_empty() {
-        return Err("GATEWAY_ALLOWED_IDS must include at least one id".to_string());
+        return Err("GATEWAY_TELEGRAM_CHAT_IDS must include at least one id".to_string());
     }
     ids.sort_unstable();
     ids.dedup();
@@ -200,6 +163,7 @@ impl Default for GatewayConfigFile {
     fn default() -> Self {
         Self {
             model: default_codex_model(),
+            timeout_mins: default_timeout_mins(),
         }
     }
 }
@@ -211,11 +175,39 @@ impl GatewayConfigFile {
         } else {
             self.model = self.model.trim().to_string();
         }
+        if self.timeout_mins == 0 {
+            self.timeout_mins = default_timeout_mins();
+        }
     }
 }
 
 fn default_codex_model() -> String {
     DEFAULT_CODEX_MODEL.to_string()
+}
+
+fn default_timeout_mins() -> u64 {
+    DEFAULT_CODEX_TIMEOUT_MINS
+}
+
+fn timeout_secs(timeout_mins: u64) -> Result<u64, String> {
+    timeout_mins
+        .checked_mul(60)
+        .ok_or_else(|| "timeout_mins is too large".to_string())
+}
+
+fn default_launchd_target() -> Result<String, String> {
+    let output = Command::new("id")
+        .arg("-u")
+        .output()
+        .map_err(|err| format!("run id -u: {err}"))?;
+    if !output.status.success() {
+        return Err(format!("id -u exited with {}", output.status));
+    }
+    let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if uid.is_empty() {
+        return Err("id -u returned empty uid".to_string());
+    }
+    Ok(format!("gui/{uid}/ai.gateway"))
 }
 
 #[cfg(test)]
@@ -226,10 +218,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let env = BTreeMap::from([
-            (TELEGRAM_BOT_TOKEN_ENV.to_string(), "token".to_string()),
-            ("GATEWAY_ALLOWED_IDS".to_string(), "42".to_string()),
-            ("HOME".to_string(), "/home/example".to_string()),
-            ("PATH".to_string(), "/bin:/usr/bin".to_string()),
+            (GATEWAY_TELEGRAM_TOKEN_ENV.to_string(), "token".to_string()),
+            ("GATEWAY_TELEGRAM_CHAT_IDS".to_string(), "42".to_string()),
             (
                 "XDG_CONFIG_HOME".to_string(),
                 root.join("config").to_string_lossy().to_string(),
@@ -256,15 +246,12 @@ mod tests {
         let cfg = load_from_env(&env).unwrap();
 
         assert_eq!(cfg.bot_token, "token");
-        assert_eq!(cfg.allowed_ids, vec![42]);
-        assert_eq!(cfg.user_home, PathBuf::from("/home/example"));
-        assert_eq!(cfg.path, "/bin:/usr/bin");
+        assert_eq!(cfg.telegram_chat_ids, vec![42]);
         assert!(cfg.xdg_config_home.ends_with("config"));
         assert!(cfg.xdg_cache_home.ends_with("cache"));
         assert!(cfg.xdg_data_home.ends_with("data"));
         assert!(cfg.xdg_state_home.ends_with("state"));
-        assert_eq!(cfg.codex_bin, PathBuf::from("/opt/homebrew/bin/codex"));
-        assert_eq!(cfg.codex_home, cfg.xdg_config_home.join("codex"));
+        assert_eq!(cfg.codex_bin, PathBuf::from("codex"));
         assert_eq!(cfg.codex_workdir, cfg.xdg_config_home);
         assert_eq!(cfg.state_dir, cfg.xdg_state_home.join("gateway"));
         assert_eq!(cfg.gateway_log_file, cfg.state_dir.join("logs/gateway.log"));
@@ -273,56 +260,83 @@ mod tests {
             cfg.xdg_config_home.join("gateway/config.json")
         );
         assert!(cfg.gateway_config_file.exists());
-        assert_eq!(cfg.launchd_target, "ai.gateway");
+        assert!(cfg.launchd_target.starts_with("gui/"));
+        assert!(cfg.launchd_target.ends_with("/ai.gateway"));
         assert_eq!(cfg.codex_model, DEFAULT_CODEX_MODEL);
         assert_eq!(cfg.queue_depth, 8);
-        assert_eq!(
-            cfg.codex_timeout,
-            Duration::from_secs(DEFAULT_CODEX_TIMEOUT_SECS)
+        assert_eq!(cfg.codex_timeout, Duration::from_secs(30 * 60));
+    }
+
+    #[test]
+    fn rejects_missing_or_blank_xdg_dirs() {
+        for key in [
+            "XDG_CONFIG_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+        ] {
+            let (_dir, mut env) = env_with_token();
+            env.remove(key);
+            let err = load_from_env(&env).unwrap_err();
+            assert!(err.contains(key), "missing {key}: {err}");
+
+            let (_dir, mut env) = env_with_token();
+            env.insert(key.to_string(), " \t ".to_string());
+            let err = load_from_env(&env).unwrap_err();
+            assert!(err.contains(key), "blank {key}: {err}");
+        }
+    }
+
+    #[test]
+    fn loads_gateway_telegram_token() {
+        let (_dir, mut env) = env_with_token();
+        env.remove(GATEWAY_TELEGRAM_TOKEN_ENV);
+        env.insert(
+            "GATEWAY_TELEGRAM_TOKEN".to_string(),
+            "gateway-token".to_string(),
         );
+
+        let cfg = load_from_env(&env).unwrap();
+
+        assert_eq!(cfg.bot_token, "gateway-token");
     }
 
     #[test]
     fn rejects_missing_bot_token() {
         let err = load_from_env(&BTreeMap::new()).unwrap_err();
-        assert!(err.contains(TELEGRAM_BOT_TOKEN_ENV));
+        assert!(err.contains(GATEWAY_TELEGRAM_TOKEN_ENV));
     }
 
     #[test]
-    fn rejects_missing_allowed_ids() {
+    fn rejects_missing_telegram_chat_ids() {
         let (_dir, mut env) = env_with_token();
-        env.remove("GATEWAY_ALLOWED_IDS");
+        env.remove("GATEWAY_TELEGRAM_CHAT_IDS");
 
         let err = load_from_env(&env).unwrap_err();
 
-        assert!(err.contains("GATEWAY_ALLOWED_IDS"));
+        assert!(err.contains("GATEWAY_TELEGRAM_CHAT_IDS"));
     }
 
     #[test]
-    fn parses_overrides() {
+    fn parses_supported_overrides() {
         let (_dir, mut env) = env_with_token();
-        env.insert("GATEWAY_ALLOWED_IDS".to_string(), "7,8".to_string());
-        env.insert("GATEWAY_QUEUE_DEPTH".to_string(), "3".to_string());
-        env.insert("GATEWAY_CODEX_TIMEOUT_SECS".to_string(), "9".to_string());
-        env.insert("GATEWAY_STATE_DIR".to_string(), "/tmp/gateway".to_string());
+        env.insert("GATEWAY_TELEGRAM_CHAT_IDS".to_string(), "7,8".to_string());
         let cfg_path =
             PathBuf::from(env.get("XDG_CONFIG_HOME").unwrap()).join("gateway/config.json");
-        save_gateway_config(
-            &cfg_path,
-            &GatewayConfigFile {
-                model: "gpt-test".to_string(),
-            },
-        )
-        .unwrap();
+        fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
+        fs::write(&cfg_path, r#"{"model":"gpt-test","timeout_mins":9}"#).unwrap();
 
         let cfg = load_from_env(&env).unwrap();
 
-        assert_eq!(cfg.allowed_ids, vec![7, 8]);
+        assert_eq!(cfg.telegram_chat_ids, vec![7, 8]);
         assert_eq!(cfg.codex_model, "gpt-test");
-        assert_eq!(cfg.queue_depth, 3);
-        assert_eq!(cfg.codex_timeout, Duration::from_secs(9));
-        assert_eq!(cfg.chat_state_dir, PathBuf::from("/tmp/gateway/chats"));
-        assert_eq!(cfg.cron_state_dir, PathBuf::from("/tmp/gateway/cron"));
+        assert_eq!(cfg.queue_depth, 8);
+        assert_eq!(cfg.codex_timeout, Duration::from_secs(9 * 60));
+        assert_eq!(cfg.state_dir, cfg.xdg_state_home.join("gateway"));
+        assert_eq!(cfg.gateway_log_file, cfg.state_dir.join("logs/gateway.log"));
+        assert_eq!(cfg.poll_timeout_sec, 50);
+        assert!(cfg.launchd_target.starts_with("gui/"));
+        assert!(cfg.launchd_target.ends_with("/ai.gateway"));
     }
 
     #[test]
@@ -341,5 +355,87 @@ mod tests {
         assert_eq!(cfg.model, DEFAULT_CODEX_MODEL);
         let text = fs::read_to_string(&path).unwrap();
         assert!(!text.contains("fastfetch"));
+        assert!(text.contains("\"timeout_mins\": 30"));
+    }
+
+    #[test]
+    fn rejects_invalid_telegram_chat_ids() {
+        let (_dir, mut env) = env_with_token();
+        env.insert("GATEWAY_TELEGRAM_CHAT_IDS".to_string(), "7,bad".to_string());
+        let err = load_from_env(&env).unwrap_err();
+        assert!(err.contains("comma-separated integers"));
+
+        let (_dir, mut env) = env_with_token();
+        env.insert("GATEWAY_TELEGRAM_CHAT_IDS".to_string(), " , ".to_string());
+        let err = load_from_env(&env).unwrap_err();
+        assert!(err.contains("at least one id"));
+    }
+
+    #[test]
+    fn telegram_chat_ids_are_trimmed_sorted_and_deduplicated() {
+        let (_dir, mut env) = env_with_token();
+        env.insert(
+            "GATEWAY_TELEGRAM_CHAT_IDS".to_string(),
+            " 9, 7,9 ".to_string(),
+        );
+
+        let cfg = load_from_env(&env).unwrap();
+
+        assert_eq!(cfg.telegram_chat_ids, vec![7, 9]);
+    }
+
+    #[test]
+    fn gateway_config_defaults_missing_fields_and_rejects_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gateway/config.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "{}").unwrap();
+
+        let cfg = load_gateway_config(&path).unwrap();
+
+        assert_eq!(cfg, GatewayConfigFile::default());
+
+        fs::write(&path, "{").unwrap();
+        let err = load_gateway_config(&path).unwrap_err();
+        assert!(err.contains("parse gateway config"));
+    }
+
+    #[test]
+    fn zero_timeout_is_normalized_and_overflow_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gateway/config.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"model":"gpt-test","timeout_mins":0}"#).unwrap();
+        let cfg = load_gateway_config(&path).unwrap();
+        assert_eq!(cfg.timeout_mins, DEFAULT_CODEX_TIMEOUT_MINS);
+
+        let (_dir, env) = env_with_token();
+        let path = PathBuf::from(env.get("XDG_CONFIG_HOME").unwrap()).join("gateway/config.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, format!(r#"{{"timeout_mins":{}}}"#, u64::MAX)).unwrap();
+        let err = load_from_env(&env).unwrap_err();
+        assert!(err.contains("timeout_mins is too large"));
+    }
+
+    #[test]
+    fn current_env_reads_process_environment() {
+        let env = current_env();
+
+        assert!(!env.is_empty());
+    }
+
+    #[test]
+    fn save_gateway_config_reports_parent_creation_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked_parent = dir.path().join("blocked");
+        fs::write(&blocked_parent, "file").unwrap();
+
+        let err = save_gateway_config(
+            &blocked_parent.join("config.json"),
+            &GatewayConfigFile::default(),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("create gateway config dir"));
     }
 }

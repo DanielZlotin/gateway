@@ -92,6 +92,10 @@ pub fn join_non_empty(parts: &[&str]) -> String {
         .join("\n\n")
 }
 
+pub fn is_ok_response(text: &str) -> bool {
+    text.trim().eq_ignore_ascii_case("OK")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,6 +109,11 @@ mod tests {
         assert!(parts
             .iter()
             .all(|part| part.chars().count() <= TELEGRAM_MESSAGE_LIMIT));
+    }
+
+    #[test]
+    fn split_telegram_message_returns_empty_part_for_empty_text() {
+        assert_eq!(split_telegram_message(" \n\t "), vec![String::new()]);
     }
 
     #[test]
@@ -161,5 +170,14 @@ mod tests {
             join_non_empty(&[" hello ", "", " world "]),
             "hello\n\nworld"
         );
+    }
+
+    #[test]
+    fn is_ok_response_trims_and_ignores_case() {
+        assert!(is_ok_response("OK"));
+        assert!(is_ok_response(" ok\n"));
+        assert!(is_ok_response("oK"));
+        assert!(!is_ok_response(""));
+        assert!(!is_ok_response("OK done"));
     }
 }

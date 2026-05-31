@@ -6,7 +6,7 @@ pub fn directive_help() -> String {
         "Supported directives:",
         "/commands - show supported gateway directives",
         "/help - alias for /commands",
-        "/status - show gateway status and system snapshot",
+        "/status - show Codex, gateway, and system status",
         "/log [lines] - send recent gateway logs",
         "/new - start a fresh Codex session",
         "/restart - restart the gateway service",
@@ -22,8 +22,8 @@ pub fn unknown_directive_message() -> String {
     format!("Unknown directive. Defined directives: {DIRECTIVES}")
 }
 
-pub fn is_allowed(allowed_ids: &[i64], chat_id: i64) -> bool {
-    allowed_ids.contains(&chat_id)
+pub fn is_allowed(telegram_chat_ids: &[i64], chat_id: i64) -> bool {
+    telegram_chat_ids.contains(&chat_id)
 }
 
 #[cfg(test)]

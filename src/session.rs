@@ -338,4 +338,189 @@ mod tests {
         assert!(store.save_run(&key, 1, "fresh").unwrap());
         assert_eq!(store.load(&key).session_id.as_deref(), Some("fresh"));
     }
+
+    #[test]
+    fn set_model_updates_current_saved_session_and_trims_model() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::new(
+            dir.path().join("chats"),
+            dir.path().join("cron"),
+            "gpt-default".to_string(),
+        );
+        let key = SessionKey::Chat {
+            chat_id: 7,
+            thread_id: Some(99),
+        };
+
+        assert!(store.save_run(&key, 0, "session-12345678").unwrap());
+        let state = store.set_model(&key, " gpt-new ").unwrap();
+
+        assert_eq!(state.model, "gpt-new");
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[0].id, "session-12345678");
+        assert_eq!(state.sessions[0].model, "gpt-new");
+        assert!(store
+            .load(&key)
+            .sessions
+            .iter()
+            .any(|session| session.model == "gpt-new"));
+    }
+
+    #[test]
+    fn resume_finds_saved_session_and_reports_missing_targets() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::new(
+            dir.path().join("chats"),
+            dir.path().join("cron"),
+            "gpt-default".to_string(),
+        );
+        let key = SessionKey::Cron("daily/report".to_string());
+
+        assert!(store
+            .save_run(&key, 0, "019e778b-2c3f-7231-bda6-c40f27bbba21")
+            .unwrap());
+        let renamed = store.rename_current(&key, "daily").unwrap();
+        assert_eq!(renamed.sessions[0].name.as_deref(), Some("daily"));
+
+        let resumed = store.resume(&key, "daily").unwrap();
+        assert_eq!(
+            resumed.session_id.as_deref(),
+            Some("019e778b-2c3f-7231-bda6-c40f27bbba21")
+        );
+        assert_eq!(resumed.generation, 1);
+        assert!(store
+            .resume(&key, "missing")
+            .unwrap_err()
+            .contains("No saved session"));
+    }
+
+    #[test]
+    fn rename_current_requires_current_session() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::new(
+            dir.path().join("chats"),
+            dir.path().join("cron"),
+            "gpt-default".to_string(),
+        );
+        let key = SessionKey::Chat {
+            chat_id: 7,
+            thread_id: None,
+        };
+
+        let err = store.rename_current(&key, "name").unwrap_err();
+
+        assert!(err.contains("No current session"));
+    }
+
+    #[test]
+    fn list_formats_current_and_default_model_sessions() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::new(
+            dir.path().join("chats"),
+            dir.path().join("cron"),
+            "gpt-default".to_string(),
+        );
+        let key = SessionKey::Cron("daily/report".to_string());
+
+        assert_eq!(
+            store.list(&key),
+            "No saved sessions yet. Send a normal message to create one."
+        );
+        assert!(store.save_run(&key, 0, "session-current").unwrap());
+        let mut state = store.load(&key);
+        state.sessions.push(SavedSession {
+            id: "session-older".to_string(),
+            name: None,
+            model: String::new(),
+            updated_at: String::new(),
+        });
+        store.save(&key, &state).unwrap();
+
+        let list = store.list(&key);
+
+        assert!(list.contains("Saved sessions:"));
+        assert!(list.contains("* session- gpt-default (unnamed)"));
+        assert!(list.contains("  session- gpt-default (unnamed)"));
+        assert!(dir.path().join("cron/daily_report.json").exists());
+    }
+
+    #[test]
+    fn load_recovers_legacy_session_and_default_model() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::new(
+            dir.path().join("chats"),
+            dir.path().join("cron"),
+            "gpt-default".to_string(),
+        );
+        let path = dir.path().join("chats/7-main.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"session_id":"legacy","model":" "}"#).unwrap();
+        let key = SessionKey::Chat {
+            chat_id: 7,
+            thread_id: None,
+        };
+
+        let state = store.load(&key);
+
+        assert_eq!(state.model, "gpt-default");
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[0].id, "legacy");
+        assert_eq!(state.sessions[0].model, "gpt-default");
+    }
+
+    #[test]
+    fn upsert_ignores_empty_ids_and_fills_default_model() {
+        let existing = vec![SavedSession {
+            id: "existing".to_string(),
+            name: None,
+            model: "gpt-old".to_string(),
+            updated_at: String::new(),
+        }];
+
+        let unchanged = upsert_session(
+            existing.clone(),
+            SavedSession {
+                id: " ".to_string(),
+                name: None,
+                model: String::new(),
+                updated_at: String::new(),
+            },
+            "gpt-default",
+        );
+        let inserted = upsert_session(
+            existing,
+            SavedSession {
+                id: " new ".to_string(),
+                name: Some("named".to_string()),
+                model: " ".to_string(),
+                updated_at: String::new(),
+            },
+            "gpt-default",
+        );
+
+        assert_eq!(unchanged.len(), 1);
+        assert_eq!(inserted[0].id, "new");
+        assert_eq!(inserted[0].model, "gpt-default");
+        assert_eq!(inserted.len(), 2);
+    }
+
+    #[test]
+    fn save_reports_session_directory_creation_errors() {
+        let dir = tempdir().unwrap();
+        let blocked = dir.path().join("blocked");
+        std::fs::write(&blocked, "file").unwrap();
+        let store = SessionStore::new(
+            blocked.join("chats"),
+            dir.path().join("cron"),
+            "gpt-default".to_string(),
+        );
+        let key = SessionKey::Chat {
+            chat_id: 7,
+            thread_id: None,
+        };
+
+        let err = store.reset(&key).unwrap_err();
+
+        assert!(err.contains("create session dir"));
+    }
 }

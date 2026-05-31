@@ -2,20 +2,112 @@ use crate::codex::{run_codex_stream, CodexConfig};
 use crate::commands::{directive_help, is_allowed, unknown_directive_message};
 use crate::config::{save_gateway_config, Config, GatewayConfigFile};
 use crate::session::{SessionKey, SessionStore};
-use crate::status::{fastfetch_status, format_status_message, status_header};
+use crate::status::{codex_status, fastfetch_status, format_status_message, status_header};
 use crate::telegram::{Message, TelegramClient, Update};
 use crate::text::{
-    command_arg, log_line_count, parse_command, session_label, split_telegram_message,
-    tail_log_text,
+    command_arg, is_ok_response, log_line_count, parse_command, session_label,
+    split_telegram_message, tail_log_text,
 };
 use std::fs;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const TYPING_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
+
+trait TelegramApi: Clone + Send + 'static {
+    fn get_updates(&self, offset: i64, timeout_sec: u64) -> Result<Vec<Update>, String>;
+    fn sync_my_commands(&self, chat_ids: &[i64]) -> Result<(), String>;
+    fn send_message(
+        &self,
+        chat_id: i64,
+        text: &str,
+        reply_to_message_id: i64,
+    ) -> Result<(), String>;
+    fn send_message_returning(
+        &self,
+        chat_id: i64,
+        text: &str,
+        reply_to_message_id: i64,
+    ) -> Result<i64, String>;
+    fn send_message_with_effect(
+        &self,
+        chat_id: i64,
+        text: &str,
+        reply_to_message_id: i64,
+        message_effect_id: &str,
+    ) -> Result<Message, String>;
+    fn delete_message(&self, chat_id: i64, message_id: i64) -> Result<(), String>;
+    fn set_message_reaction(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        emoji: &str,
+    ) -> Result<(), String>;
+    fn edit_message_text(&self, chat_id: i64, message_id: i64, text: &str) -> Result<(), String>;
+    fn send_chat_action(&self, chat_id: i64, action: &str) -> Result<(), String>;
+}
+
+impl TelegramApi for TelegramClient {
+    fn get_updates(&self, offset: i64, timeout_sec: u64) -> Result<Vec<Update>, String> {
+        self.get_updates(offset, timeout_sec)
+    }
+
+    fn sync_my_commands(&self, chat_ids: &[i64]) -> Result<(), String> {
+        self.sync_my_commands(chat_ids)
+    }
+
+    fn send_message(
+        &self,
+        chat_id: i64,
+        text: &str,
+        reply_to_message_id: i64,
+    ) -> Result<(), String> {
+        self.send_message(chat_id, text, reply_to_message_id)
+    }
+
+    fn send_message_returning(
+        &self,
+        chat_id: i64,
+        text: &str,
+        reply_to_message_id: i64,
+    ) -> Result<i64, String> {
+        self.send_message_returning(chat_id, text, reply_to_message_id)
+    }
+
+    fn send_message_with_effect(
+        &self,
+        chat_id: i64,
+        text: &str,
+        reply_to_message_id: i64,
+        message_effect_id: &str,
+    ) -> Result<Message, String> {
+        self.send_message_with_effect(chat_id, text, reply_to_message_id, message_effect_id)
+    }
+
+    fn delete_message(&self, chat_id: i64, message_id: i64) -> Result<(), String> {
+        self.delete_message(chat_id, message_id)
+    }
+
+    fn set_message_reaction(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        emoji: &str,
+    ) -> Result<(), String> {
+        self.set_message_reaction(chat_id, message_id, emoji)
+    }
+
+    fn edit_message_text(&self, chat_id: i64, message_id: i64, text: &str) -> Result<(), String> {
+        self.edit_message_text(chat_id, message_id, text)
+    }
+
+    fn send_chat_action(&self, chat_id: i64, action: &str) -> Result<(), String> {
+        self.send_chat_action(chat_id, action)
+    }
+}
 
 #[derive(Debug, Clone)]
 struct Job {
@@ -30,6 +122,12 @@ struct TypingLoop {
     handle: Option<JoinHandle<()>>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum FinalDelivery {
+    Reaction,
+    Message(String),
+}
+
 impl Drop for TypingLoop {
     fn drop(&mut self) {
         if let Some(stop) = self.stop.take() {
@@ -42,20 +140,26 @@ impl Drop for TypingLoop {
 }
 
 pub fn run(cfg: Config) -> Result<(), String> {
+    let tg = TelegramClient::new(&cfg.bot_token);
+    run_with_client(cfg, tg)
+}
+
+fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
     fs::create_dir_all(&cfg.state_dir).map_err(|err| format!("create state dir: {err}"))?;
     fs::create_dir_all(&cfg.chat_state_dir)
         .map_err(|err| format!("create chat state dir: {err}"))?;
     fs::create_dir_all(&cfg.cron_state_dir)
         .map_err(|err| format!("create cron state dir: {err}"))?;
 
-    let tg = TelegramClient::new(&cfg.bot_token);
-    tg.sync_my_commands(&cfg.allowed_ids)?;
+    tg.sync_my_commands(&cfg.telegram_chat_ids)?;
     let store = SessionStore::new(
         cfg.chat_state_dir.clone(),
         cfg.cron_state_dir.clone(),
         cfg.codex_model.clone(),
     );
-    for chat_id in &cfg.allowed_ids {
+    let status_codex = codex_status(&cfg);
+    let status_fetch = fastfetch_status(&cfg.fastfetch_bin);
+    for chat_id in &cfg.telegram_chat_ids {
         let state = store.load(&SessionKey::Chat {
             chat_id: *chat_id,
             thread_id: None,
@@ -63,7 +167,7 @@ pub fn run(cfg: Config) -> Result<(), String> {
         send_long_message(
             &tg,
             *chat_id,
-            &format_status_message(&state, &fastfetch_status(&cfg.fastfetch_bin)),
+            &format_status_message(&state, &status_codex, &status_fetch),
             0,
         )?;
     }
@@ -135,12 +239,12 @@ fn skip_offset(updates: &[Update]) -> i64 {
 
 fn handle_message(
     cfg: &Config,
-    tg: &TelegramClient,
+    tg: &impl TelegramApi,
     store: &SessionStore,
     tx: &mpsc::SyncSender<Job>,
     msg: Message,
 ) -> Result<(), String> {
-    if !is_allowed(&cfg.allowed_ids, msg.chat.id) {
+    if !is_allowed(&cfg.telegram_chat_ids, msg.chat.id) {
         return Ok(());
     }
     let text = match message_text(&msg.text, &msg.caption) {
@@ -175,7 +279,7 @@ fn handle_message(
 
 fn handle_command(
     cfg: &Config,
-    tg: &TelegramClient,
+    tg: &impl TelegramApi,
     store: &SessionStore,
     msg: &Message,
     text: &str,
@@ -222,6 +326,7 @@ fn handle_command(
                         &cfg.gateway_config_file,
                         &GatewayConfigFile {
                             model: state.model.clone(),
+                            timeout_mins: cfg.codex_timeout.as_secs() / 60,
                         },
                     )?;
                     tg.send_message(
@@ -284,7 +389,11 @@ fn handle_command(
             send_long_message(
                 tg,
                 msg.chat.id,
-                &format_status_message(&state, &fastfetch_status(&cfg.fastfetch_bin)),
+                &format_status_message(
+                    &state,
+                    &codex_status(cfg),
+                    &fastfetch_status(&cfg.fastfetch_bin),
+                ),
                 msg.message_id,
             )
         }
@@ -308,7 +417,7 @@ fn worker_loop(cfg: Config, rx: mpsc::Receiver<Job>) {
 
 fn run_job(
     cfg: &Config,
-    tg: &TelegramClient,
+    tg: &impl TelegramApi,
     store: &SessionStore,
     job: Job,
 ) -> Result<(), String> {
@@ -331,21 +440,10 @@ fn run_job(
         tg.send_message_returning(job.chat_id, "🫧 Thinking…", job.reply_to_message_id)?;
     let mut streamed = String::new();
     let mut last_edit = Instant::now();
-    let output = match {
+    let codex_result = {
         let _typing = start_typing_loop(tg, job.chat_id);
         run_codex_stream(
-            &CodexConfig {
-                bin: cfg.codex_bin.clone(),
-                home: cfg.codex_home.clone(),
-                user_home: cfg.user_home.clone(),
-                xdg_config_home: cfg.xdg_config_home.clone(),
-                xdg_cache_home: cfg.xdg_cache_home.clone(),
-                xdg_data_home: cfg.xdg_data_home.clone(),
-                xdg_state_home: cfg.xdg_state_home.clone(),
-                workdir: cfg.codex_workdir.clone(),
-                path: cfg.path.clone(),
-                default_model: cfg.codex_model.clone(),
-            },
+            &CodexConfig::from(cfg),
             &job.prompt,
             state.session_id.as_deref(),
             &state.model,
@@ -363,7 +461,8 @@ fn run_job(
                 }
             },
         )
-    } {
+    };
+    let output = match codex_result {
         Ok(output) => output,
         Err(err) => {
             eprintln!(
@@ -391,23 +490,28 @@ fn run_job(
         output.final_text.chars().count(),
         session_label(output.session_id.as_deref().unwrap_or(""))
     );
-    let final_text = empty_final_text(&output.final_text);
-    let parts = split_telegram_message(&final_text);
-    if let Some(first) = parts.first() {
-        send_final_message(tg, &job, stream_message_id, first)?;
-        for part in parts.iter().skip(1) {
-            tg.send_message(job.chat_id, part, 0)?;
+    match final_delivery(&output.final_text) {
+        FinalDelivery::Reaction => {
+            let _ = tg.delete_message(job.chat_id, stream_message_id);
+            tg.set_message_reaction(job.chat_id, job.reply_to_message_id, "👍")
         }
-        Ok(())
-    } else {
-        Ok(())
+        FinalDelivery::Message(final_text) => {
+            let parts = split_telegram_message(&final_text);
+            if let Some(first) = parts.first() {
+                send_final_message(tg, &job, stream_message_id, first)?;
+                for part in parts.iter().skip(1) {
+                    tg.send_message(job.chat_id, part, 0)?;
+                }
+            }
+            Ok(())
+        }
     }
 }
 
 const FINAL_MESSAGE_EFFECT_ID: &str = "5107584321108051014";
 
 fn send_final_message(
-    tg: &TelegramClient,
+    tg: &impl TelegramApi,
     job: &Job,
     stream_message_id: i64,
     first: &str,
@@ -445,7 +549,7 @@ fn single_line(text: &str) -> String {
     text.lines().collect::<Vec<_>>().join(" | ")
 }
 
-fn start_typing_loop(tg: &TelegramClient, chat_id: i64) -> TypingLoop {
+fn start_typing_loop<T: TelegramApi>(tg: &T, chat_id: i64) -> TypingLoop {
     let tg = tg.clone();
     let (stop, stopped) = mpsc::channel();
     let handle = thread::spawn(move || loop {
@@ -465,6 +569,14 @@ fn empty_final_text(text: &str) -> String {
         "Codex finished with no final text.".to_string()
     } else {
         text.to_string()
+    }
+}
+
+fn final_delivery(text: &str) -> FinalDelivery {
+    if is_ok_response(text) {
+        FinalDelivery::Reaction
+    } else {
+        FinalDelivery::Message(empty_final_text(text))
     }
 }
 
@@ -489,7 +601,7 @@ fn stream_preview(text: &str) -> String {
 }
 
 fn send_long_message(
-    tg: &TelegramClient,
+    tg: &impl TelegramApi,
     chat_id: i64,
     text: &str,
     reply_to_message_id: i64,
@@ -504,6 +616,8 @@ fn send_long_message(
 fn restart_gateway(launchd_target: &str) {
     let _ = Command::new("/bin/launchctl")
         .args(["kickstart", "-k", launchd_target])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn();
 }
 
@@ -514,6 +628,14 @@ pub fn typing_refresh_interval() -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telegram::Chat;
+    use std::collections::VecDeque;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+    use std::thread::{self, JoinHandle};
     use tempfile::tempdir;
 
     #[test]
@@ -567,5 +689,871 @@ mod tests {
     #[test]
     fn typing_refreshes_before_telegram_expires() {
         assert!(typing_refresh_interval() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn ok_final_text_uses_reaction_instead_of_message() {
+        assert_eq!(final_delivery("OK"), FinalDelivery::Reaction);
+        assert_eq!(final_delivery(" ok\n"), FinalDelivery::Reaction);
+        assert_eq!(
+            final_delivery("done"),
+            FinalDelivery::Message("done".to_string())
+        );
+        assert_eq!(
+            final_delivery(""),
+            FinalDelivery::Message("Codex finished with no final text.".to_string())
+        );
+    }
+
+    #[test]
+    fn run_with_client_initializes_state_sends_status_and_persists_initial_offset() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let tg = FakeTelegram::new();
+        tg.push_update(Ok(vec![Update {
+            update_id: 4,
+            message: None,
+        }]));
+        tg.push_update(Err("stop".to_string()));
+
+        let err = run_with_client(cfg.clone(), tg.clone()).unwrap_err();
+
+        assert_eq!(err, "stop");
+        assert!(cfg.state_dir.exists());
+        assert!(cfg.chat_state_dir.exists());
+        assert!(cfg.cron_state_dir.exists());
+        assert_eq!(read_offset(&cfg.offset_file), 5);
+        assert!(tg.calls().contains(&Call::Sync(vec![42])));
+        assert!(tg.calls().iter().any(|call| {
+            matches!(call, Call::Send { chat_id: 42, reply_to: 0, text } if text.contains("Model: gpt-test"))
+        }));
+        assert!(tg.calls().contains(&Call::GetUpdates {
+            offset: 0,
+            timeout: 0
+        }));
+        assert!(tg.calls().contains(&Call::GetUpdates {
+            offset: 5,
+            timeout: 50
+        }));
+    }
+
+    #[test]
+    fn public_run_reports_state_dir_creation_errors() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        fs::create_dir_all(cfg.state_dir.parent().unwrap()).unwrap();
+        fs::write(&cfg.state_dir, "not a dir").unwrap();
+
+        let err = run(cfg).unwrap_err();
+
+        assert!(err.contains("create state dir"));
+    }
+
+    #[test]
+    fn run_with_client_handles_polled_command_messages() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let tg = FakeTelegram::new();
+        tg.push_update(Ok(Vec::new()));
+        tg.push_update(Ok(vec![Update {
+            update_id: 10,
+            message: Some(message(42, 11, "/help")),
+        }]));
+        tg.push_update(Err("stop".to_string()));
+
+        let err = run_with_client(cfg.clone(), tg.clone()).unwrap_err();
+
+        assert_eq!(err, "stop");
+        assert_eq!(read_offset(&cfg.offset_file), 11);
+        assert!(tg.sent_text().iter().any(|text| text.contains("/status")));
+    }
+
+    #[test]
+    fn run_with_client_propagates_startup_send_errors() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let tg = FakeTelegram::new();
+        tg.fail_sends("send failed");
+
+        let err = run_with_client(cfg, tg).unwrap_err();
+
+        assert_eq!(err, "send failed");
+    }
+
+    #[test]
+    fn handle_message_authorizes_validates_queues_and_reports_full_queue() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.cron_state_dir.clone(),
+            cfg.codex_model.clone(),
+        );
+        let tg = FakeTelegram::new();
+        let (tx, rx) = mpsc::sync_channel(1);
+
+        handle_message(&cfg, &tg, &store, &tx, message(9, 1, "ignored")).unwrap();
+        assert!(tg.calls().is_empty());
+
+        handle_message(&cfg, &tg, &store, &tx, message(42, 2, "  ")).unwrap();
+        assert!(tg.calls().iter().any(|call| {
+            matches!(call, Call::Send { text, reply_to: 2, .. } if text == "Text messages only.")
+        }));
+
+        handle_message(&cfg, &tg, &store, &tx, message(42, 3, "run this")).unwrap();
+        let job = rx.recv().unwrap();
+        assert_eq!(job.chat_id, 42);
+        assert_eq!(job.reply_to_message_id, 3);
+        assert_eq!(job.prompt, "run this");
+        assert!(tg.calls().contains(&Call::Action {
+            chat_id: 42,
+            action: "typing".to_string()
+        }));
+
+        let (full_tx, _full_rx) = mpsc::sync_channel(0);
+        handle_message(&cfg, &tg, &store, &full_tx, message(42, 4, "queued")).unwrap();
+        assert!(tg.calls().iter().any(|call| {
+            matches!(call, Call::Send { text, reply_to: 4, .. } if text.contains("queue is full"))
+        }));
+    }
+
+    #[test]
+    fn handle_message_propagates_queue_full_send_errors() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.cron_state_dir.clone(),
+            cfg.codex_model.clone(),
+        );
+        let tg = FakeTelegram::new();
+        tg.fail_sends("send failed");
+        let (full_tx, _full_rx) = mpsc::sync_channel(0);
+
+        let err =
+            handle_message(&cfg, &tg, &store, &full_tx, message(42, 4, "queued")).unwrap_err();
+
+        assert_eq!(err, "send failed");
+    }
+
+    #[test]
+    fn handle_command_covers_directive_responses() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.cron_state_dir.clone(),
+            cfg.codex_model.clone(),
+        );
+        let tg = FakeTelegram::new();
+        let msg = message(42, 10, "/commands");
+        let key = SessionKey::Chat {
+            chat_id: 42,
+            thread_id: None,
+        };
+
+        handle_command(&cfg, &tg, &store, &msg, "/log", "/log").unwrap();
+        fs::create_dir_all(cfg.gateway_log_file.parent().unwrap()).unwrap();
+        fs::write(&cfg.gateway_log_file, "one\ntwo\nthree\n").unwrap();
+        handle_command(&cfg, &tg, &store, &msg, "/log 2", "/log").unwrap();
+        handle_command(&cfg, &tg, &store, &msg, "/new", "/new").unwrap();
+        handle_command(&cfg, &tg, &store, &msg, "/model", "/model").unwrap();
+        handle_command(&cfg, &tg, &store, &msg, "/model gpt-next", "/model").unwrap();
+        handle_command(&cfg, &tg, &store, &msg, "/resume", "/resume").unwrap();
+        handle_command(&cfg, &tg, &store, &msg, "/resume missing", "/resume").unwrap();
+        store
+            .save_run(&key, store.load(&key).generation, "session-12345678")
+            .unwrap();
+        handle_command(
+            &cfg,
+            &tg,
+            &store,
+            &msg,
+            "/resume session-12345678",
+            "/resume",
+        )
+        .unwrap();
+        handle_command(&cfg, &tg, &store, &msg, "/rename", "/rename").unwrap();
+        handle_command(&cfg, &tg, &store, &msg, "/rename work", "/rename").unwrap();
+        handle_command(&cfg, &tg, &store, &msg, "/list", "/list").unwrap();
+        handle_command(&cfg, &tg, &store, &msg, "/help", "/help").unwrap();
+        handle_command(&cfg, &tg, &store, &msg, "/commands", "/commands").unwrap();
+        handle_command(&cfg, &tg, &store, &msg, "/status", "/status").unwrap();
+        handle_command(&cfg, &tg, &store, &msg, "/restart", "/restart").unwrap();
+        handle_command(&cfg, &tg, &store, &msg, "/wat", "/wat").unwrap();
+
+        let sent = tg.sent_text();
+        assert!(sent.iter().any(|text| text == "No gateway log available."));
+        assert!(sent.iter().any(|text| text.contains("two\n\nthree")));
+        assert!(sent.iter().any(|text| text.contains("New session ready")));
+        assert!(sent.iter().any(|text| text.contains("Model: gpt-test")));
+        assert!(sent
+            .iter()
+            .any(|text| text.contains("Model set to gpt-next")));
+        assert!(sent.iter().any(|text| text.contains("Usage: /resume")));
+        assert!(sent
+            .iter()
+            .any(|text| text.contains("No saved session matches")));
+        assert!(sent.iter().any(|text| text.contains("Resumed session")));
+        assert!(sent.iter().any(|text| text.contains("Usage: /rename")));
+        assert!(sent.iter().any(|text| text.contains("Renamed session")));
+        assert!(sent.iter().any(|text| text.contains("Saved sessions:")));
+        assert!(sent.iter().any(|text| text.contains("/status")));
+        assert!(sent.iter().any(|text| text.contains("Codex:")));
+        assert!(sent.iter().any(|text| text == "Restarting gateway."));
+        assert!(sent.iter().any(|text| text.contains("Unknown directive")));
+    }
+
+    #[test]
+    fn handle_command_reports_session_and_config_write_errors() {
+        let dir = tempdir().unwrap();
+        let mut cfg = test_config(dir.path());
+        let blocked = dir.path().join("blocked");
+        fs::write(&blocked, "file").unwrap();
+        cfg.chat_state_dir = blocked.join("chats");
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.cron_state_dir.clone(),
+            cfg.codex_model.clone(),
+        );
+        let tg = FakeTelegram::new();
+        let msg = message(42, 10, "/new");
+
+        handle_command(&cfg, &tg, &store, &msg, "/new", "/new").unwrap();
+        handle_command(&cfg, &tg, &store, &msg, "/model gpt-fail", "/model").unwrap();
+        handle_command(&cfg, &tg, &store, &msg, "/rename work", "/rename").unwrap();
+
+        let sent = tg.sent_text();
+        assert!(sent
+            .iter()
+            .any(|text| text.contains("Failed to reset session")));
+        assert!(sent.iter().any(|text| text.contains("Failed to set model")));
+        assert!(sent.iter().any(|text| text.contains("No current session")));
+
+        let mut cfg = test_config(dir.path());
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.cron_state_dir.clone(),
+            cfg.codex_model.clone(),
+        );
+        let key = SessionKey::Chat {
+            chat_id: 42,
+            thread_id: None,
+        };
+        store.save_run(&key, 0, "session-123").unwrap();
+        cfg.gateway_config_file = blocked.join("config.json");
+        let err = handle_command(&cfg, &tg, &store, &msg, "/model gpt-fail", "/model").unwrap_err();
+        assert!(err.contains("create gateway config dir"));
+    }
+
+    #[test]
+    fn run_job_saves_sessions_and_uses_reaction_for_ok_results() {
+        let dir = tempdir().unwrap();
+        let mut cfg = test_config(dir.path());
+        cfg.codex_bin = executable(
+            dir.path().join("codex-ok"),
+            r#"#!/bin/sh
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--output-last-message" ]; then out="$arg"; fi
+  prev="$arg"
+done
+cat >/dev/null
+printf 'OK\n' > "$out"
+printf 'session id: session-ok\n' >&2
+"#,
+        );
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.cron_state_dir.clone(),
+            cfg.codex_model.clone(),
+        );
+        let tg = FakeTelegram::new();
+
+        run_job(&cfg, &tg, &store, job("make it so")).unwrap();
+
+        let calls = tg.calls();
+        assert!(calls.contains(&Call::SendReturning {
+            chat_id: 42,
+            reply_to: 7,
+            text: "🫧 Thinking…".to_string()
+        }));
+        assert!(calls.contains(&Call::Delete {
+            chat_id: 42,
+            message_id: 100
+        }));
+        assert!(calls.contains(&Call::Reaction {
+            chat_id: 42,
+            message_id: 7,
+            emoji: "👍".to_string()
+        }));
+        assert_eq!(
+            store
+                .load(&SessionKey::Chat {
+                    chat_id: 42,
+                    thread_id: None,
+                })
+                .session_id
+                .as_deref(),
+            Some("session-ok")
+        );
+    }
+
+    #[test]
+    fn run_job_sends_final_message_and_falls_back_without_effect() {
+        let dir = tempdir().unwrap();
+        let mut cfg = test_config(dir.path());
+        cfg.codex_bin = executable(
+            dir.path().join("codex-final"),
+            r#"#!/bin/sh
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--output-last-message" ]; then out="$arg"; fi
+  prev="$arg"
+done
+cat >/dev/null
+printf 'final text\n' > "$out"
+"#,
+        );
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.cron_state_dir.clone(),
+            cfg.codex_model.clone(),
+        );
+        let tg = FakeTelegram::new();
+        tg.push_effect(Ok(message_with_effect(200, None)));
+
+        run_job(&cfg, &tg, &store, job("answer")).unwrap();
+
+        assert!(tg.calls().contains(&Call::Effect {
+            chat_id: 42,
+            reply_to: 7,
+            effect_id: FINAL_MESSAGE_EFFECT_ID.to_string(),
+            text: "final text".to_string()
+        }));
+
+        let tg = FakeTelegram::new();
+        tg.push_effect(Err("effect failed".to_string()));
+        run_job(&cfg, &tg, &store, job("answer")).unwrap();
+
+        assert!(tg.sent_text().contains(&"final text".to_string()));
+    }
+
+    #[test]
+    fn run_job_edits_stream_preview_and_sends_split_final_parts() {
+        let dir = tempdir().unwrap();
+        let mut cfg = test_config(dir.path());
+        let final_text = "a".repeat(crate::text::TELEGRAM_MESSAGE_LIMIT + 20);
+        cfg.codex_bin = executable(
+            dir.path().join("codex-streams"),
+            &format!(
+                r#"#!/bin/sh
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--output-last-message" ]; then out="$arg"; fi
+  prev="$arg"
+done
+cat >/dev/null
+printf 'first\n'
+sleep 2
+printf 'second\n'
+printf '%s\n' '{}' > "$out"
+"#,
+                final_text
+            ),
+        );
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.cron_state_dir.clone(),
+            cfg.codex_model.clone(),
+        );
+        let tg = FakeTelegram::new();
+
+        run_job(&cfg, &tg, &store, job("stream")).unwrap();
+
+        assert!(tg
+            .calls()
+            .iter()
+            .any(|call| matches!(call, Call::Edit { .. })));
+        assert!(tg
+            .calls()
+            .iter()
+            .any(|call| matches!(call, Call::Send { reply_to: 0, .. })));
+    }
+
+    #[test]
+    fn run_job_reports_codex_failures() {
+        let dir = tempdir().unwrap();
+        let mut cfg = test_config(dir.path());
+        cfg.codex_bin = executable(
+            dir.path().join("codex-fails"),
+            r#"#!/bin/sh
+printf 'boom\n' >&2
+exit 2
+"#,
+        );
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.cron_state_dir.clone(),
+            cfg.codex_model.clone(),
+        );
+        let tg = FakeTelegram::new();
+
+        run_job(&cfg, &tg, &store, job("fail")).unwrap();
+
+        assert!(tg
+            .sent_text()
+            .iter()
+            .any(|text| text.contains("Codex failed:\nboom")));
+    }
+
+    #[test]
+    fn run_job_propagates_codex_failure_delivery_errors() {
+        let dir = tempdir().unwrap();
+        let mut cfg = test_config(dir.path());
+        cfg.codex_bin = executable(
+            dir.path().join("codex-fails"),
+            r#"#!/bin/sh
+printf 'boom\n' >&2
+exit 2
+"#,
+        );
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.cron_state_dir.clone(),
+            cfg.codex_model.clone(),
+        );
+        let tg = FakeTelegram::new();
+        tg.fail_sends("send failed");
+
+        let err = run_job(&cfg, &tg, &store, job("fail")).unwrap_err();
+
+        assert_eq!(err, "send failed");
+    }
+
+    #[test]
+    fn stream_preview_handles_empty_short_and_long_text() {
+        assert_eq!(stream_preview(" \n"), "⏳ Codex is thinking…");
+        assert_eq!(stream_preview(" hello "), "hello");
+
+        let long = format!("{}tail", "a".repeat(3900));
+        let preview = stream_preview(&long);
+
+        assert!(preview.starts_with("…\n"));
+        assert!(preview.ends_with("tail"));
+        assert!(preview.chars().count() <= 3802);
+    }
+
+    #[test]
+    fn telegram_client_trait_impl_delegates_to_inherent_methods() {
+        let mut responses = vec![json_response(r#"{"ok":true,"result":[]}"#)];
+        responses.extend((0..24).map(|_| json_response(r#"{"ok":true,"result":true}"#)));
+        responses.extend([
+            json_response(r#"{"ok":true,"result":{}}"#),
+            json_response(telegram_message_json(101, None).as_str()),
+            json_response(telegram_message_json(102, Some(FINAL_MESSAGE_EFFECT_ID)).as_str()),
+            json_response(r#"{"ok":true,"result":true}"#),
+            json_response(r#"{"ok":true,"result":true}"#),
+            json_response(r#"{"ok":true,"result":{}}"#),
+            json_response(r#"{"ok":true,"result":true}"#),
+        ]);
+        let server = MiniServer::new(responses);
+        let client = TelegramClient::with_base_url(server.base_url.clone());
+
+        assert!(TelegramApi::get_updates(&client, 0, 0).unwrap().is_empty());
+        TelegramApi::sync_my_commands(&client, &[42]).unwrap();
+        TelegramApi::send_message(&client, 42, "hello", 7).unwrap();
+        assert_eq!(
+            TelegramApi::send_message_returning(&client, 42, "hello", 7).unwrap(),
+            101
+        );
+        assert_eq!(
+            TelegramApi::send_message_with_effect(&client, 42, "done", 7, FINAL_MESSAGE_EFFECT_ID)
+                .unwrap()
+                .message_id,
+            102
+        );
+        TelegramApi::delete_message(&client, 42, 100).unwrap();
+        TelegramApi::set_message_reaction(&client, 42, 7, "👍").unwrap();
+        TelegramApi::edit_message_text(&client, 42, 100, "edit").unwrap();
+        TelegramApi::send_chat_action(&client, 42, "typing").unwrap();
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Call {
+        Sync(Vec<i64>),
+        GetUpdates {
+            offset: i64,
+            timeout: u64,
+        },
+        Send {
+            chat_id: i64,
+            reply_to: i64,
+            text: String,
+        },
+        SendReturning {
+            chat_id: i64,
+            reply_to: i64,
+            text: String,
+        },
+        Effect {
+            chat_id: i64,
+            reply_to: i64,
+            effect_id: String,
+            text: String,
+        },
+        Delete {
+            chat_id: i64,
+            message_id: i64,
+        },
+        Reaction {
+            chat_id: i64,
+            message_id: i64,
+            emoji: String,
+        },
+        Edit {
+            chat_id: i64,
+            message_id: i64,
+            text: String,
+        },
+        Action {
+            chat_id: i64,
+            action: String,
+        },
+    }
+
+    #[derive(Default)]
+    struct FakeState {
+        calls: Vec<Call>,
+        updates: VecDeque<Result<Vec<Update>, String>>,
+        effects: VecDeque<Result<Message, String>>,
+        send_error: Option<String>,
+        next_message_id: i64,
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeTelegram {
+        state: Arc<Mutex<FakeState>>,
+    }
+
+    impl FakeTelegram {
+        fn new() -> Self {
+            let state = FakeState {
+                next_message_id: 100,
+                ..FakeState::default()
+            };
+            Self {
+                state: Arc::new(Mutex::new(state)),
+            }
+        }
+
+        fn push_update(&self, update: Result<Vec<Update>, String>) {
+            self.state.lock().unwrap().updates.push_back(update);
+        }
+
+        fn push_effect(&self, effect: Result<Message, String>) {
+            self.state.lock().unwrap().effects.push_back(effect);
+        }
+
+        fn fail_sends(&self, err: &str) {
+            self.state.lock().unwrap().send_error = Some(err.to_string());
+        }
+
+        fn calls(&self) -> Vec<Call> {
+            self.state.lock().unwrap().calls.clone()
+        }
+
+        fn sent_text(&self) -> Vec<String> {
+            self.calls()
+                .into_iter()
+                .filter_map(|call| match call {
+                    Call::Send { text, .. } => Some(text),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    impl TelegramApi for FakeTelegram {
+        fn get_updates(&self, offset: i64, timeout_sec: u64) -> Result<Vec<Update>, String> {
+            let mut state = self.state.lock().unwrap();
+            state.calls.push(Call::GetUpdates {
+                offset,
+                timeout: timeout_sec,
+            });
+            state
+                .updates
+                .pop_front()
+                .unwrap_or_else(|| Err("stop".to_string()))
+        }
+
+        fn sync_my_commands(&self, chat_ids: &[i64]) -> Result<(), String> {
+            self.state
+                .lock()
+                .unwrap()
+                .calls
+                .push(Call::Sync(chat_ids.to_vec()));
+            Ok(())
+        }
+
+        fn send_message(
+            &self,
+            chat_id: i64,
+            text: &str,
+            reply_to_message_id: i64,
+        ) -> Result<(), String> {
+            self.state.lock().unwrap().calls.push(Call::Send {
+                chat_id,
+                reply_to: reply_to_message_id,
+                text: text.to_string(),
+            });
+            if let Some(err) = self.state.lock().unwrap().send_error.clone() {
+                return Err(err);
+            }
+            Ok(())
+        }
+        fn send_message_returning(
+            &self,
+            chat_id: i64,
+            text: &str,
+            reply_to_message_id: i64,
+        ) -> Result<i64, String> {
+            let mut state = self.state.lock().unwrap();
+            let message_id = state.next_message_id;
+            state.next_message_id += 1;
+            state.calls.push(Call::SendReturning {
+                chat_id,
+                reply_to: reply_to_message_id,
+                text: text.to_string(),
+            });
+            Ok(message_id)
+        }
+
+        fn send_message_with_effect(
+            &self,
+            chat_id: i64,
+            text: &str,
+            reply_to_message_id: i64,
+            message_effect_id: &str,
+        ) -> Result<Message, String> {
+            let mut state = self.state.lock().unwrap();
+            state.calls.push(Call::Effect {
+                chat_id,
+                reply_to: reply_to_message_id,
+                effect_id: message_effect_id.to_string(),
+                text: text.to_string(),
+            });
+            state
+                .effects
+                .pop_front()
+                .unwrap_or_else(|| Ok(message_with_effect(200, Some(message_effect_id))))
+        }
+
+        fn delete_message(&self, chat_id: i64, message_id: i64) -> Result<(), String> {
+            self.state.lock().unwrap().calls.push(Call::Delete {
+                chat_id,
+                message_id,
+            });
+            Ok(())
+        }
+
+        fn set_message_reaction(
+            &self,
+            chat_id: i64,
+            message_id: i64,
+            emoji: &str,
+        ) -> Result<(), String> {
+            self.state.lock().unwrap().calls.push(Call::Reaction {
+                chat_id,
+                message_id,
+                emoji: emoji.to_string(),
+            });
+            Ok(())
+        }
+
+        fn edit_message_text(
+            &self,
+            chat_id: i64,
+            message_id: i64,
+            text: &str,
+        ) -> Result<(), String> {
+            self.state.lock().unwrap().calls.push(Call::Edit {
+                chat_id,
+                message_id,
+                text: text.to_string(),
+            });
+            Ok(())
+        }
+
+        fn send_chat_action(&self, chat_id: i64, action: &str) -> Result<(), String> {
+            self.state.lock().unwrap().calls.push(Call::Action {
+                chat_id,
+                action: action.to_string(),
+            });
+            Ok(())
+        }
+    }
+
+    fn test_config(root: &Path) -> Config {
+        let codex = executable(
+            root.join("codex"),
+            r#"#!/bin/sh
+if [ "$1" = "doctor" ]; then
+  printf '{"overallStatus":"ok","codexVersion":"test","checks":{"auth.credentials":{"status":"ok"},"network.provider_reachability":{"status":"ok"}}}\n'
+  exit 0
+fi
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--output-last-message" ]; then out="$arg"; fi
+  prev="$arg"
+done
+cat >/dev/null
+printf 'OK\n' > "$out"
+"#,
+        );
+        let fastfetch = executable(
+            root.join("fastfetch"),
+            r#"#!/bin/sh
+cat >/dev/null
+printf 'OS: test\n'
+"#,
+        );
+        Config {
+            bot_token: "token".to_string(),
+            telegram_chat_ids: vec![42],
+            xdg_config_home: root.join("config"),
+            xdg_cache_home: root.join("cache"),
+            xdg_data_home: root.join("data"),
+            xdg_state_home: root.join("state"),
+            gateway_config_file: root.join("config/gateway/config.json"),
+            codex_bin: codex,
+            codex_workdir: root.to_path_buf(),
+            codex_model: "gpt-test".to_string(),
+            fastfetch_bin: fastfetch,
+            state_dir: root.join("state/gateway"),
+            chat_state_dir: root.join("state/gateway/chats"),
+            cron_state_dir: root.join("state/gateway/cron"),
+            offset_file: root.join("state/gateway/telegram.offset"),
+            gateway_log_file: root.join("state/gateway/logs/gateway.log"),
+            launchd_target: "gui/0/ai.gateway-test".to_string(),
+            poll_timeout_sec: 50,
+            queue_depth: 8,
+            codex_timeout: Duration::from_secs(5),
+        }
+    }
+
+    fn message(chat_id: i64, message_id: i64, text: &str) -> Message {
+        Message {
+            message_id,
+            message_thread_id: None,
+            effect_id: None,
+            from: None,
+            chat: Chat {
+                id: chat_id,
+                kind: "private".to_string(),
+                username: String::new(),
+            },
+            text: text.to_string(),
+            caption: String::new(),
+        }
+    }
+
+    fn job(prompt: &str) -> Job {
+        Job {
+            chat_id: 42,
+            thread_id: None,
+            reply_to_message_id: 7,
+            prompt: prompt.to_string(),
+        }
+    }
+
+    fn message_with_effect(message_id: i64, effect_id: Option<&str>) -> Message {
+        Message {
+            message_id,
+            message_thread_id: None,
+            effect_id: effect_id.map(ToOwned::to_owned),
+            from: None,
+            chat: Chat {
+                id: 42,
+                kind: "private".to_string(),
+                username: String::new(),
+            },
+            text: String::new(),
+            caption: String::new(),
+        }
+    }
+
+    fn executable(path: PathBuf, body: &str) -> PathBuf {
+        fs::write(&path, body).unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).unwrap();
+        path
+    }
+
+    struct MiniServer {
+        base_url: String,
+        _handle: JoinHandle<()>,
+    }
+
+    impl MiniServer {
+        fn new(responses: Vec<String>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let base_url = format!("http://{}/botsecret", listener.local_addr().unwrap());
+            let handle = thread::spawn(move || {
+                for response in responses {
+                    let (stream, _) = listener.accept().unwrap();
+                    drain_request_and_respond(stream, &response);
+                }
+            });
+            Self {
+                base_url,
+                _handle: handle,
+            }
+        }
+    }
+
+    fn drain_request_and_respond(mut stream: TcpStream, response: &str) {
+        let mut content_length = 0;
+        {
+            let mut reader = BufReader::new(&mut stream);
+            let mut first = String::new();
+            reader.read_line(&mut first).unwrap();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let line = line.trim_end();
+                if line.is_empty() {
+                    break;
+                }
+                if let Some(value) = line.strip_prefix("Content-Length:") {
+                    content_length = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body).unwrap();
+        }
+        stream.write_all(response.as_bytes()).unwrap();
+    }
+
+    fn json_response(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+    }
+
+    fn telegram_message_json(message_id: i64, effect_id: Option<&str>) -> String {
+        let effect = effect_id
+            .map(|id| format!(r#","effect_id":"{id}""#))
+            .unwrap_or_default();
+        format!(
+            r#"{{"ok":true,"result":{{"message_id":{message_id}{effect},"from":null,"chat":{{"id":42,"type":"private"}},"text":"sent","caption":""}}}}"#
+        )
     }
 }
