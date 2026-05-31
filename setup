@@ -1,0 +1,88 @@
+#!/bin/zsh
+set -euo pipefail
+
+gateway_root="${0:A:h}"
+: "${GATEWAY_TELEGRAM_TOKEN:?GATEWAY_TELEGRAM_TOKEN is required}"
+: "${GATEWAY_TELEGRAM_CHAT_IDS:?GATEWAY_TELEGRAM_CHAT_IDS is required}"
+: "${XDG_CONFIG_HOME:?XDG_CONFIG_HOME is required}"
+: "${XDG_CACHE_HOME:?XDG_CACHE_HOME is required}"
+: "${XDG_DATA_HOME:?XDG_DATA_HOME is required}"
+: "${XDG_STATE_HOME:?XDG_STATE_HOME is required}"
+
+gateway_required_commands=(
+  cargo
+  codex
+  date
+  fastfetch
+  id
+  jq
+  launchctl
+  mkdir
+)
+gateway_missing_commands=()
+
+for name in "${gateway_required_commands[@]}"; do
+  if ! command -v "$name" >/dev/null 2>&1; then
+    gateway_missing_commands+=("$name")
+  fi
+done
+
+if (( ${#gateway_missing_commands[@]} )); then
+  print -u2 "setup cannot register ai.gateway because required commands are missing from PATH."
+  print -u2 "Install these commands or fix PATH before running setup:"
+  for name in "${gateway_missing_commands[@]}"; do
+    print -u2 "  - $name"
+  done
+  exit 69
+fi
+
+gateway_required_system_bins=(
+  /bin/zsh
+)
+gateway_missing_system_bins=()
+
+for bin in "${gateway_required_system_bins[@]}"; do
+  if [[ ! -x "$bin" ]]; then
+    gateway_missing_system_bins+=("$bin")
+  fi
+done
+
+if (( ${#gateway_missing_system_bins[@]} )); then
+  print -u2 "setup cannot register ai.gateway because required system executables are missing or not executable."
+  for bin in "${gateway_missing_system_bins[@]}"; do
+    print -u2 "  - $bin"
+  done
+  exit 69
+fi
+
+gateway_label="ai.gateway"
+gateway_domain="gui/$(id -u)"
+gateway_launch="$gateway_root/launch"
+gateway_plist_template="$gateway_root/$gateway_label.plist"
+gateway_plist_dest="$HOME/Library/LaunchAgents/$gateway_label.plist"
+
+if [[ ! -x "$gateway_launch" ]]; then
+  print -u2 "LaunchAgent launcher is missing or not executable: $gateway_launch"
+  exit 66
+fi
+
+if [[ ! -f "$gateway_plist_template" ]]; then
+  print -u2 "LaunchAgent plist template is missing: $gateway_plist_template"
+  exit 66
+fi
+
+cd "$gateway_root"
+cargo build --release
+
+gateway_launch_xml="$(jq -nr --arg value "$gateway_launch" '$value | @html')"
+
+mkdir -p "${gateway_plist_dest:h}"
+while IFS= read -r line || [[ -n "$line" ]]; do
+  print -r -- "${line//__GATEWAY_LAUNCH__/$gateway_launch_xml}"
+done < "$gateway_plist_template" > "$gateway_plist_dest"
+
+launchctl bootout "$gateway_domain/$gateway_label" 2>/dev/null || true
+launchctl bootstrap "$gateway_domain" "$gateway_plist_dest"
+launchctl kickstart -k "$gateway_domain/$gateway_label"
+
+print -- "registered and started $gateway_label from $gateway_plist_dest"

@@ -1,60 +1,17 @@
 #!/bin/zsh
 set -euo pipefail
 
-: "${HOME:?HOME is required}"
-: "${PATH:?PATH is required}"
-: "${XDG_CONFIG_HOME:?XDG_CONFIG_HOME is required}"
-: "${XDG_CACHE_HOME:?XDG_CACHE_HOME is required}"
-: "${XDG_DATA_HOME:?XDG_DATA_HOME is required}"
-: "${XDG_STATE_HOME:?XDG_STATE_HOME is required}"
-
-gateway_env_file="${GATEWAY_ENV_FILE:-$XDG_CONFIG_HOME/.sys/.env}"
-if [[ -r "$gateway_env_file" ]]; then
-  source "$gateway_env_file"
-fi
-
 gateway_root="${0:A:h}"
 gateway_bin="$gateway_root/target/release/gateway"
-gateway_log_file="${GATEWAY_LOG_FILE:-$XDG_STATE_HOME/gateway/logs/gateway.log}"
-
-: "${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN is required}"
-: "${GATEWAY_ALLOWED_IDS:?GATEWAY_ALLOWED_IDS is required}"
+: "${XDG_STATE_HOME:?XDG_STATE_HOME is required}"
+gateway_log_file="$XDG_STATE_HOME/gateway/logs/gateway.log"
 if [[ ! -x "$gateway_bin" ]]; then
   print -u2 "gateway binary is missing or not executable: $gateway_bin"
   print -u2 "run: cd ${(q)gateway_root} && cargo build --release"
   exit 127
 fi
 
-gateway_env=(
-  HOME="$HOME"
-  PATH="$PATH"
-  XDG_CONFIG_HOME="$XDG_CONFIG_HOME"
-  XDG_CACHE_HOME="$XDG_CACHE_HOME"
-  XDG_DATA_HOME="$XDG_DATA_HOME"
-  XDG_STATE_HOME="$XDG_STATE_HOME"
-  TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN"
-  GATEWAY_ALLOWED_IDS="$GATEWAY_ALLOWED_IDS"
-  GATEWAY_LOG_FILE="$gateway_log_file"
-  GATEWAY_LAUNCHD_TARGET="${GATEWAY_LAUNCHD_TARGET:-gui/$(id -u)/ai.gateway}"
-)
-
-for name in \
-  GATEWAY_CODEX_BIN \
-  GATEWAY_CODEX_HOME \
-  GATEWAY_CODEX_WORKDIR \
-  GATEWAY_CONFIG_FILE \
-  GATEWAY_FASTFETCH_BIN \
-  GATEWAY_STATE_DIR \
-  GATEWAY_POLL_TIMEOUT_SECS \
-  GATEWAY_QUEUE_DEPTH \
-  GATEWAY_CODEX_TIMEOUT_SECS
-do
-  if [[ -n "${(P)name:-}" ]]; then
-    gateway_env+=("$name=${(P)name}")
-  fi
-done
-
 mkdir -p "${gateway_log_file:h}"
 exec >>"$gateway_log_file" 2>&1
 print -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] starting gateway"
-exec env -i "${gateway_env[@]}" "$gateway_bin" bot
+exec "$gateway_bin" bot

@@ -14,11 +14,7 @@
     <integer>1</integer>
     <key>Umask</key>
     <integer>63</integer>
-    <key>ProgramArguments</key>
-    <array>
-      <string>/bin/zsh</string>
-      <string>-lc</string>
-      <string>plist_path="$(/bin/launchctl print "gui/$(/usr/bin/id -u)/ai.gateway" 2>/dev/null | /usr/bin/sed -n 's/^[[:space:]]*path = //p' | /usr/bin/head -n 1)"; [[ -n "$plist_path" ]] || plist_path="$HOME/Library/LaunchAgents/ai.gateway.plist"; exec "${plist_path:A:h}/launch"</string>
-    </array>
+    <key>Program</key>
+    <string>__GATEWAY_LAUNCH__</string>
   </dict>
 </plist>

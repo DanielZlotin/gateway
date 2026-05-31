@@ -47,10 +47,10 @@ Fixed runtime values:
 ```
 
 `setup` verifies required env, PATH tools (`cargo`, `codex`, `date`,
-`fastfetch`, `id`, `launchctl`, `ln`, `mkdir`), plist executables (`/bin/zsh`,
-`/bin/launchctl`, `/usr/bin/head`, `/usr/bin/id`, `/usr/bin/sed`), builds
-release, links `ai.gateway.plist` into `$HOME/Library/LaunchAgents`, then runs
-launchd `bootout`, `bootstrap`, and `kickstart`.
+`fastfetch`, `id`, `jq`, `launchctl`, `mkdir`), and plist executable
+`/bin/zsh`; builds release; writes `ai.gateway.plist` with the absolute
+`launch` path into `$HOME/Library/LaunchAgents`; then runs launchd `bootout`,
+`bootstrap`, and `kickstart`.
 
 `launch` logs to the state log file and execs `target/release/gateway bot`
 without clearing the environment or sourcing an env file.
@@ -222,8 +222,8 @@ Startup status and `/status` include:
 
 ## LaunchAgent
 
-`ai.gateway.plist` resolves its loaded path through launchctl and runs sibling
-`launch`. It uses `RunAtLoad`, `KeepAlive`, `ThrottleInterval = 1`, and
-`Umask = 63`. The LaunchAgent install location remains
+`setup` installs `ai.gateway.plist` with an absolute path to the repo's `launch`
+script. The LaunchAgent uses `RunAtLoad`, `KeepAlive`, `ThrottleInterval = 1`,
+and `Umask = 63`. The install location remains
 `$HOME/Library/LaunchAgents` because that is macOS launchd convention; Gateway
 config, state, cache, and data paths are XDG-only.
