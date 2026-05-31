@@ -151,7 +151,9 @@ fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
     fs::create_dir_all(&cfg.cron_state_dir)
         .map_err(|err| format!("create cron state dir: {err}"))?;
 
-    tg.sync_my_commands(&cfg.telegram_chat_ids)?;
+    if let Err(err) = tg.sync_my_commands(&cfg.telegram_chat_ids) {
+        eprintln!("telegram command sync failed; continuing without command refresh: {err}");
+    }
     let store = SessionStore::new(
         cfg.chat_state_dir.clone(),
         cfg.cron_state_dir.clone(),
@@ -164,12 +166,14 @@ fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
             chat_id: *chat_id,
             thread_id: None,
         });
-        send_long_message(
+        if let Err(err) = send_long_message(
             &tg,
             *chat_id,
             &format_status_message(&state, &status_codex, &status_fetch),
             0,
-        )?;
+        ) {
+            eprintln!("telegram startup status send failed for chat {chat_id}: {err}");
+        }
     }
 
     let (tx, rx) = mpsc::sync_channel::<Job>(cfg.queue_depth);
@@ -191,7 +195,9 @@ fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
             offset = advance_offset(offset, update.update_id);
             write_offset(&cfg.offset_file, offset)?;
             if let Some(message) = update.message {
-                handle_message(&cfg, &tg, &store, &tx, message)?;
+                if let Err(err) = handle_message(&cfg, &tg, &store, &tx, message) {
+                    eprintln!("[gateway] message handler failed: {err}");
+                }
             }
         }
     }
@@ -818,15 +824,55 @@ mod tests {
     }
 
     #[test]
-    fn run_with_client_propagates_startup_send_errors() {
+    fn run_with_client_continues_when_message_delivery_fails() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let tg = FakeTelegram::new();
+        tg.push_update(Ok(Vec::new()));
+        tg.push_update(Ok(vec![Update {
+            update_id: 10,
+            message: Some(message(42, 11, "/help")),
+        }]));
+        tg.push_update(Err("stop".to_string()));
+        tg.fail_sends("send failed");
+
+        let err = run_with_client(cfg.clone(), tg).unwrap_err();
+
+        assert_eq!(err, "stop");
+        assert_eq!(read_offset(&cfg.offset_file), 11);
+    }
+
+    #[test]
+    fn run_with_client_continues_when_command_sync_fails() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let tg = FakeTelegram::new();
+        tg.fail_sync("too many requests");
+        tg.push_update(Ok(Vec::new()));
+        tg.push_update(Err("stop".to_string()));
+
+        let err = run_with_client(cfg, tg.clone()).unwrap_err();
+
+        assert_eq!(err, "stop");
+        assert!(tg.calls().contains(&Call::Sync(vec![42])));
+        assert!(tg.calls().contains(&Call::GetUpdates {
+            offset: 0,
+            timeout: 0
+        }));
+    }
+
+    #[test]
+    fn run_with_client_continues_when_startup_status_send_fails() {
         let dir = tempdir().unwrap();
         let cfg = test_config(dir.path());
         let tg = FakeTelegram::new();
         tg.fail_sends("send failed");
+        tg.push_update(Ok(Vec::new()));
+        tg.push_update(Err("stop".to_string()));
 
         let err = run_with_client(cfg, tg).unwrap_err();
 
-        assert_eq!(err, "send failed");
+        assert_eq!(err, "stop");
     }
 
     #[test]
@@ -1285,6 +1331,7 @@ exit 2
         calls: Vec<Call>,
         updates: VecDeque<Result<Vec<Update>, String>>,
         effects: VecDeque<Result<Message, String>>,
+        sync_error: Option<String>,
         send_error: Option<String>,
         next_message_id: i64,
     }
@@ -1317,6 +1364,10 @@ exit 2
             self.state.lock().unwrap().send_error = Some(err.to_string());
         }
 
+        fn fail_sync(&self, err: &str) {
+            self.state.lock().unwrap().sync_error = Some(err.to_string());
+        }
+
         fn calls(&self) -> Vec<Call> {
             self.state.lock().unwrap().calls.clone()
         }
@@ -1346,11 +1397,14 @@ exit 2
         }
 
         fn sync_my_commands(&self, chat_ids: &[i64]) -> Result<(), String> {
-            self.state
-                .lock()
-                .unwrap()
-                .calls
-                .push(Call::Sync(chat_ids.to_vec()));
+            let sync_error = {
+                let mut state = self.state.lock().unwrap();
+                state.calls.push(Call::Sync(chat_ids.to_vec()));
+                state.sync_error.clone()
+            };
+            if let Some(err) = sync_error {
+                return Err(err);
+            }
             Ok(())
         }
 

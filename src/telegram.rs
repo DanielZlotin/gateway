@@ -270,12 +270,26 @@ impl TelegramClient {
         response: Result<ureq::Response, ureq::Error>,
         method: &str,
     ) -> Result<T, String> {
-        let response = response.map_err(|err| {
-            format!(
-                "telegram {method} request failed: {}",
-                redact_token(&self.base_url, &err.to_string())
-            )
-        })?;
+        let response = match response {
+            Ok(response) => response,
+            Err(ureq::Error::Status(status, response)) => {
+                let envelope: Result<TelegramResponse<T>, _> = response.into_json();
+                return match envelope {
+                    Ok(envelope) => Err(envelope.description.unwrap_or_else(|| {
+                        format!("telegram {method} failed with status {status}")
+                    })),
+                    Err(err) => Err(format!(
+                        "telegram {method} request failed with status {status}; decode error response: {err}"
+                    )),
+                };
+            }
+            Err(err) => {
+                return Err(format!(
+                    "telegram {method} request failed: {}",
+                    redact_token(&self.base_url, &err.to_string())
+                ));
+            }
+        };
         let envelope: TelegramResponse<T> = response
             .into_json()
             .map_err(|err| format!("decode telegram {method} response: {err}"))?;
@@ -775,6 +789,19 @@ mod tests {
         assert!(!plain.body.contains("parse_mode"));
     }
 
+    #[test]
+    fn non_success_json_errors_include_telegram_description() {
+        let server = TestServer::new(vec![status_response(
+            400,
+            r#"{"ok":false,"description":"Bad Request: can't parse entities"}"#,
+        )]);
+        let client = server.client();
+
+        let err = client.send_chat_action(42, "typing").unwrap_err();
+
+        assert_eq!(err, "Bad Request: can't parse entities");
+    }
+
     #[derive(Debug)]
     struct RecordedRequest {
         method: String,
@@ -856,6 +883,14 @@ mod tests {
 
     fn json_response(body: &str) -> String {
         http_response(body)
+    }
+
+    fn status_response(status: u16, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status} Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
     }
 
     fn http_response(body: &str) -> String {
