@@ -4,14 +4,15 @@
 
 Run a focused code-quality pass that preserves behavior while fixing current
 lint blockers, trimming local complexity, improving high-value test coverage,
-and producing a concise CRAAP and mutation-readiness audit.
+adding a launchd setup delay requested by the operator, and producing a concise
+CRAAP and mutation-readiness audit.
 
 ## Scope
 
 The pass is limited to small, behavior-preserving changes in the currently
-failing or directly adjacent code paths. It will not restructure the large
-modules wholesale, change runtime behavior, add compatibility shims, or chase
-100% coverage at any cost.
+failing or directly adjacent code paths, plus a targeted launchctl sequencing
+fix in `setup`. It will not restructure the large modules wholesale, add
+compatibility shims, or chase 100% coverage at any cost.
 
 ## Baseline
 
@@ -37,6 +38,8 @@ Initial checks on 2026-06-01:
    behavior or where coverage identifies a nearby high-value gap.
 5. Use `brew` to install mutation tooling if available, then run a scoped
    mutation pass against edited or high-value files.
+6. Add `sleep 1` between `setup` launchctl `bootout`, `bootstrap`, and
+   `kickstart` commands to reduce observed launchd flakiness.
 
 ## Verification
 
