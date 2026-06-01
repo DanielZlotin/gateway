@@ -1,4 +1,4 @@
-use crate::codex::{run_codex_stream, CodexConfig};
+use crate::codex::{run_codex_stream, CodexConfig, CodexRun};
 use crate::commands::{directive_help, is_allowed, unknown_directive_message};
 use crate::config::{Config, ProviderModel};
 #[cfg(test)]
@@ -429,11 +429,19 @@ fn handle_model_command(
         tg,
         store,
         selections,
-        msg.chat.id,
-        msg.message_id,
-        key,
+        ModelSelectionContext {
+            chat_id: msg.chat.id,
+            reply_to_message_id: msg.message_id,
+            key,
+        },
         index,
     )
+}
+
+struct ModelSelectionContext<'a> {
+    chat_id: i64,
+    reply_to_message_id: i64,
+    key: &'a SessionKey,
 }
 
 fn select_model_slot(
@@ -441,30 +449,28 @@ fn select_model_slot(
     tg: &impl TelegramApi,
     store: &SessionStore,
     selections: &RuntimeSelections,
-    chat_id: i64,
-    reply_to_message_id: i64,
-    key: &SessionKey,
+    context: ModelSelectionContext<'_>,
     index: usize,
 ) -> Result<(), String> {
     let Some(choice) = cfg.provider_model_at(index).cloned() else {
         return tg.send_message(
-            chat_id,
+            context.chat_id,
             &format!(
                 "🧭 Unknown model slot {index}. Use /model and choose one of 0..{}.",
                 cfg.models.len().saturating_sub(1)
             ),
-            reply_to_message_id,
+            context.reply_to_message_id,
         );
     };
-    set_selection(selections, key, choice.clone());
-    store.reset(key)?;
+    set_selection(selections, context.key, choice.clone());
+    store.reset(context.key)?;
     tg.send_message(
-        chat_id,
+        context.chat_id,
         &format!(
             "🤖 Selected {}\n🧵 Session: none",
             provider_model_label(&choice)
         ),
-        reply_to_message_id,
+        context.reply_to_message_id,
     )
 }
 
@@ -677,12 +683,14 @@ fn run_job(
         let _typing = start_typing_loop(tg, job.chat_id);
         run_codex_stream(
             &CodexConfig::from(cfg),
-            &job.prompt,
-            state.session_id.as_deref(),
-            job.provider_model.provider,
-            &job.provider_model.model,
-            cfg.codex_timeout,
-            &cfg.state_dir,
+            CodexRun {
+                prompt: &job.prompt,
+                session_id: state.session_id.as_deref(),
+                provider: job.provider_model.provider,
+                model: &job.provider_model.model,
+                timeout: cfg.codex_timeout,
+                state_dir: &cfg.state_dir,
+            },
             |chunk| {
                 streamed.push_str(chunk);
                 if last_edit.elapsed() >= Duration::from_millis(1200) {

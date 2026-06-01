@@ -35,6 +35,7 @@ gateway_required_commands=(
   mkdir
   mv
   rm
+  sleep
 )
 gateway_missing_commands=()
 
@@ -90,7 +91,9 @@ mv -f "$gateway_plist_tmp" "$gateway_plist_dest"
 gateway_plist_tmp=
 
 launchctl bootout "$gateway_domain/$gateway_label" 2>/dev/null || true
+sleep 1
 launchctl bootstrap "$gateway_domain" "$gateway_plist_dest"
+sleep 1
 launchctl kickstart -k "$gateway_domain/$gateway_label"
 
 print -- "registered and started $gateway_label from $gateway_plist_dest"

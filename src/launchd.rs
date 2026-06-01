@@ -142,6 +142,13 @@ mod tests {
         )
         .unwrap();
         fs::set_permissions(&launchctl, fs::Permissions::from_mode(0o700)).unwrap();
+        let sleep = stub_dir.join("sleep");
+        fs::write(
+            &sleep,
+            "#!/bin/zsh\nprint -- \"sleep $*\" >> \"$GATEWAY_TEST_LAUNCHCTL_LOG\"\nexit 0\n",
+        )
+        .unwrap();
+        fs::set_permissions(&sleep, fs::Permissions::from_mode(0o700)).unwrap();
 
         let setup = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("setup");
         let path = format!(
@@ -175,8 +182,9 @@ mod tests {
         assert!(!plist.contains("GATEWAY_TELEGRAM_TOKEN"));
         assert!(!plist.contains("XDG_STATE_HOME"));
         assert!(plist.contains(&format!("exec {}", env!("CARGO_MANIFEST_DIR"))));
-        assert!(fs::read_to_string(launchctl_log)
-            .unwrap()
-            .contains("bootstrap"));
+        let launchctl_log = fs::read_to_string(launchctl_log).unwrap();
+        assert!(launchctl_log.contains("bootout"));
+        assert!(launchctl_log.contains("sleep 1\nbootstrap"));
+        assert!(launchctl_log.contains("sleep 1\nkickstart"));
     }
 }

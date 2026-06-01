@@ -33,6 +33,15 @@ pub struct CodexOutput {
     pub session_id: Option<String>,
 }
 
+pub struct CodexRun<'a> {
+    pub prompt: &'a str,
+    pub session_id: Option<&'a str>,
+    pub provider: Provider,
+    pub model: &'a str,
+    pub timeout: Duration,
+    pub state_dir: &'a Path,
+}
+
 const GATEWAY_DEVELOPER_INSTRUCTIONS: &str = include_str!("SYSTEM.md");
 
 pub fn codex_args(
@@ -128,39 +137,36 @@ pub fn run_codex(
 ) -> Result<CodexOutput, String> {
     run_codex_stream(
         cfg,
-        prompt,
-        session_id,
-        provider,
-        model,
-        timeout,
-        state_dir,
+        CodexRun {
+            prompt,
+            session_id,
+            provider,
+            model,
+            timeout,
+            state_dir,
+        },
         |_| {},
     )
 }
 
 pub fn run_codex_stream(
     cfg: &CodexConfig,
-    prompt: &str,
-    session_id: Option<&str>,
-    provider: Provider,
-    model: &str,
-    timeout: Duration,
-    state_dir: &Path,
+    run: CodexRun<'_>,
     mut on_stdout: impl FnMut(&str),
 ) -> Result<CodexOutput, String> {
-    fs::create_dir_all(state_dir).map_err(|err| format!("create state dir: {err}"))?;
-    let out_file = tempfile::NamedTempFile::new_in(state_dir).map_err(|err| err.to_string())?;
+    fs::create_dir_all(run.state_dir).map_err(|err| format!("create state dir: {err}"))?;
+    let out_file = tempfile::NamedTempFile::new_in(run.state_dir).map_err(|err| err.to_string())?;
     let out_path = out_file.path().to_path_buf();
-    let claude_proxy = if provider == Provider::Claude {
-        Some(AnthropicProxy::start(timeout)?)
+    let claude_proxy = if run.provider == Provider::Claude {
+        Some(AnthropicProxy::start(run.timeout)?)
     } else {
         None
     };
     let args = codex_args(
         &out_path,
-        session_id,
-        provider,
-        model,
+        run.session_id,
+        run.provider,
+        run.model,
         &cfg.default_model,
         &cfg.workdir,
         claude_proxy.as_ref().map(|proxy| proxy.base_url()),
@@ -208,7 +214,7 @@ pub fn run_codex_stream(
         .stdin
         .as_mut()
         .ok_or_else(|| "open codex stdin".to_string())?
-        .write_all(prompt.as_bytes())
+        .write_all(run.prompt.as_bytes())
         .map_err(|err| format!("write codex stdin: {err}"))?;
     drop(child.stdin.take());
 
@@ -219,13 +225,16 @@ pub fn run_codex_stream(
             stdout_text.push_str(&chunk);
             on_stdout(&chunk);
         }
-        if start.elapsed() > timeout {
+        if start.elapsed() > run.timeout {
             let _ = child.kill();
             let _ = child.wait().map_err(|err| err.to_string())?;
             let _ = stdout_handle.join();
             let stderr = stderr_handle.join().unwrap_or_default();
             let final_text = final_text_from_outputs(&out_path, stdout_text.as_bytes(), &stderr);
-            return Err(format!("codex timed out after {timeout:?}\n\n{final_text}"));
+            return Err(format!(
+                "codex timed out after {:?}\n\n{final_text}",
+                run.timeout
+            ));
         }
         if child.try_wait().map_err(|err| err.to_string())?.is_some() {
             let status = child.wait().map_err(|err| err.to_string())?;
@@ -563,12 +572,14 @@ printf 'session id: session-123\n' >&2
 
         let output = run_codex_stream(
             &cfg,
-            "prompt",
-            None,
-            Provider::Codex,
-            "",
-            Duration::from_secs(5),
-            &dir.path().join("state"),
+            CodexRun {
+                prompt: "prompt",
+                session_id: None,
+                provider: Provider::Codex,
+                model: "",
+                timeout: Duration::from_secs(5),
+                state_dir: &dir.path().join("state"),
+            },
             |chunk| streamed.push_str(chunk),
         )
         .unwrap();
@@ -611,12 +622,14 @@ cat >/dev/null
 
         let output = run_codex_stream(
             &cfg,
-            "prompt",
-            None,
-            Provider::Codex,
-            "",
-            Duration::from_secs(5),
-            &dir.path().join("state"),
+            CodexRun {
+                prompt: "prompt",
+                session_id: None,
+                provider: Provider::Codex,
+                model: "",
+                timeout: Duration::from_secs(5),
+                state_dir: &dir.path().join("state"),
+            },
             |_| {},
         )
         .unwrap();
