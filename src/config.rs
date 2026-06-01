@@ -28,7 +28,6 @@ pub struct Config {
     pub fastfetch_bin: PathBuf,
     pub state_dir: PathBuf,
     pub chat_state_dir: PathBuf,
-    pub cron_state_dir: PathBuf,
     pub offset_file: PathBuf,
     pub gateway_log_file: PathBuf,
     pub launchd_target: String,
@@ -38,14 +37,15 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GatewayConfigFile {
-    #[serde(default = "default_models")]
     pub models: Vec<ProviderModel>,
     #[serde(default = "default_timeout_mins")]
     pub timeout_mins: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderModel {
     pub provider: Provider,
     pub model: String,
@@ -69,7 +69,6 @@ pub fn load_from_env(env: &BTreeMap<String, String>) -> Result<Config, String> {
     let gateway_config = load_gateway_config(&gateway_config_file)?;
     let state_dir = xdg_state_home.join("gateway");
     let chat_state_dir = state_dir.join("chats");
-    let cron_state_dir = state_dir.join("cron");
     let launchd_target = launchd::target()?;
 
     Ok(Config {
@@ -86,7 +85,6 @@ pub fn load_from_env(env: &BTreeMap<String, String>) -> Result<Config, String> {
         fastfetch_bin: PathBuf::from("fastfetch"),
         state_dir: state_dir.clone(),
         chat_state_dir,
-        cron_state_dir,
         offset_file: state_dir.join("telegram.offset"),
         gateway_log_file: state_dir.join("logs/gateway.log"),
         launchd_target,
@@ -97,16 +95,18 @@ pub fn load_from_env(env: &BTreeMap<String, String>) -> Result<Config, String> {
 }
 
 pub fn load_gateway_config(path: &Path) -> Result<GatewayConfigFile, String> {
-    if !path.exists() {
-        let cfg = GatewayConfigFile::default();
-        save_gateway_config(path, &cfg)?;
-        return Ok(cfg);
-    }
-
-    let text = fs::read_to_string(path).map_err(|err| format!("read gateway config: {err}"))?;
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let cfg = GatewayConfigFile::default();
+            save_gateway_config(path, &cfg)?;
+            return Ok(cfg);
+        }
+        Err(err) => return Err(format!("read gateway config: {err}")),
+    };
     let mut cfg: GatewayConfigFile =
         serde_json::from_str(&text).map_err(|err| format!("parse gateway config: {err}"))?;
-    cfg.normalize();
+    cfg.normalize()?;
     save_gateway_config(path, &cfg)?;
     Ok(cfg)
 }
@@ -136,33 +136,30 @@ fn path(env: &BTreeMap<String, String>, key: &str, default: PathBuf) -> PathBuf 
 }
 
 pub fn resolve_xdg_config_home(env: &BTreeMap<String, String>) -> Result<PathBuf, String> {
-    resolve_xdg_home(env, "XDG_CONFIG_HOME", ".config")
+    xdg_path(env, "XDG_CONFIG_HOME", ".config")
 }
 
 pub fn resolve_xdg_cache_home(env: &BTreeMap<String, String>) -> Result<PathBuf, String> {
-    resolve_xdg_home(env, "XDG_CACHE_HOME", ".cache")
+    xdg_path(env, "XDG_CACHE_HOME", ".cache")
 }
 
 pub fn resolve_xdg_data_home(env: &BTreeMap<String, String>) -> Result<PathBuf, String> {
-    resolve_xdg_home(env, "XDG_DATA_HOME", ".local/share")
+    xdg_path(env, "XDG_DATA_HOME", ".local/share")
 }
 
 pub fn resolve_xdg_state_home(env: &BTreeMap<String, String>) -> Result<PathBuf, String> {
-    resolve_xdg_home(env, "XDG_STATE_HOME", ".local/state")
+    xdg_path(env, "XDG_STATE_HOME", ".local/state")
 }
 
-fn resolve_xdg_home(
+fn xdg_path(
     env: &BTreeMap<String, String>,
     key: &str,
-    default_relative_path: &str,
+    home_relative_default: &str,
 ) -> Result<PathBuf, String> {
-    if let Some(path) = optional_path(env, key) {
-        return Ok(path);
+    match env.get(key) {
+        Some(value) if !value.trim().is_empty() => Ok(PathBuf::from(value.trim())),
+        _ => Ok(PathBuf::from(required(env, "HOME")?).join(home_relative_default)),
     }
-
-    optional_path(env, "HOME")
-        .map(|home| home.join(default_relative_path))
-        .ok_or_else(|| format!("HOME is required to default {key}"))
 }
 
 fn optional(env: &BTreeMap<String, String>, key: &str) -> Option<String> {
@@ -206,11 +203,12 @@ impl Default for GatewayConfigFile {
 }
 
 impl GatewayConfigFile {
-    pub fn normalize(&mut self) {
-        normalize_models(&mut self.models);
+    pub fn normalize(&mut self) -> Result<(), String> {
+        normalize_models(&mut self.models)?;
         if self.timeout_mins == 0 {
-            self.timeout_mins = default_timeout_mins();
+            return Err("timeout_mins must be greater than zero".to_string());
         }
+        Ok(())
     }
 }
 
@@ -264,7 +262,6 @@ impl Config {
             ("fastfetch_bin", self.fastfetch_bin.as_path()),
             ("state_dir", self.state_dir.as_path()),
             ("chat_state_dir", self.chat_state_dir.as_path()),
-            ("cron_state_dir", self.cron_state_dir.as_path()),
             ("offset_file", self.offset_file.as_path()),
             ("gateway_log_file", self.gateway_log_file.as_path()),
         ]
@@ -278,20 +275,15 @@ impl Config {
     }
 }
 
-fn normalize_models(models: &mut Vec<ProviderModel>) {
+fn normalize_models(models: &mut Vec<ProviderModel>) -> Result<(), String> {
     for item in models.iter_mut() {
         item.model = item.model.trim().to_string();
     }
     models.retain(|item| !item.model.is_empty());
-    if models.iter().all(|item| item.provider != Provider::Codex) {
-        models.insert(
-            0,
-            ProviderModel {
-                provider: Provider::Codex,
-                model: DEFAULT_CODEX_MODEL.to_string(),
-            },
-        );
+    if models.is_empty() {
+        return Err("gateway config must include at least one non-empty model".to_string());
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -301,6 +293,13 @@ mod tests {
     fn env_with_token() -> (tempfile::TempDir, BTreeMap<String, String>) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
+        let cfg_path = root.join("config/gateway/config.json");
+        fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
+        fs::write(
+            &cfg_path,
+            serde_json::to_string_pretty(&GatewayConfigFile::default()).unwrap(),
+        )
+        .unwrap();
         let env = BTreeMap::from([
             (GATEWAY_TELEGRAM_TOKEN_ENV.to_string(), "token".to_string()),
             ("GATEWAY_TELEGRAM_CHAT_IDS".to_string(), "42".to_string()),
@@ -325,16 +324,8 @@ mod tests {
     }
 
     #[test]
-    fn loads_defaults_from_env_and_creates_models_config() {
-        let (_dir, mut env) = env_with_token();
-        env.insert(
-            "GATEWAY_CLAUDE_MODEL".to_string(),
-            "claude-env-override".to_string(),
-        );
-        env.insert(
-            "GATEWAY_OPENROUTER_MODEL".to_string(),
-            "openrouter/env-override".to_string(),
-        );
+    fn loads_required_env_and_gateway_config() {
+        let (_dir, env) = env_with_token();
         let cfg = load_from_env(&env).unwrap();
 
         assert_eq!(cfg.bot_token, "token");
@@ -388,22 +379,57 @@ mod tests {
 
         let report = cfg.paths_report();
 
-        assert!(report.contains("gateway_config_file="));
-        assert!(report.contains("gateway_log_file="));
-        assert!(report.contains("offset_file="));
-        assert!(report.contains("chat_state_dir="));
-        assert!(report.contains("cron_state_dir="));
+        let labels = report
+            .lines()
+            .map(|line| line.split_once('=').unwrap().0)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            vec![
+                "xdg_config_home",
+                "xdg_cache_home",
+                "xdg_data_home",
+                "xdg_state_home",
+                "gateway_config_file",
+                "codex_bin",
+                "codex_workdir",
+                "fastfetch_bin",
+                "state_dir",
+                "chat_state_dir",
+                "offset_file",
+                "gateway_log_file",
+                "launch_agent_plist",
+            ]
+        );
     }
 
     #[test]
-    fn uses_xdg_defaults_when_xdg_dirs_are_missing_or_blank() {
+    fn blank_xdg_dirs_default_to_home_paths() {
         let (dir, mut env) = env_with_token();
         let home = dir.path().join("home");
         env.insert("HOME".to_string(), home.to_string_lossy().to_string());
-        env.remove("XDG_CONFIG_HOME");
+        env.insert("XDG_CONFIG_HOME".to_string(), " \t ".to_string());
         env.insert("XDG_CACHE_HOME".to_string(), " \t ".to_string());
-        env.remove("XDG_DATA_HOME");
+        env.insert("XDG_DATA_HOME".to_string(), "".to_string());
         env.insert("XDG_STATE_HOME".to_string(), "".to_string());
+
+        let cfg = load_from_env(&env).unwrap();
+
+        assert_eq!(cfg.xdg_config_home, home.join(".config"));
+        assert_eq!(cfg.xdg_cache_home, home.join(".cache"));
+        assert_eq!(cfg.xdg_data_home, home.join(".local/share"));
+        assert_eq!(cfg.xdg_state_home, home.join(".local/state"));
+    }
+
+    #[test]
+    fn unset_xdg_dirs_default_to_home_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let env = BTreeMap::from([
+            (GATEWAY_TELEGRAM_TOKEN_ENV.to_string(), "token".to_string()),
+            ("GATEWAY_TELEGRAM_CHAT_IDS".to_string(), "42".to_string()),
+            ("HOME".to_string(), home.to_string_lossy().to_string()),
+        ]);
 
         let cfg = load_from_env(&env).unwrap();
 
@@ -415,19 +441,19 @@ mod tests {
             cfg.gateway_config_file,
             home.join(".config/gateway/config.json")
         );
-        assert_eq!(cfg.state_dir, home.join(".local/state/gateway"));
+        assert!(cfg.gateway_config_file.exists());
     }
 
     #[test]
-    fn missing_xdg_dirs_require_home_for_defaults() {
-        let (_dir, mut env) = env_with_token();
-        env.remove("HOME");
-        env.remove("XDG_CONFIG_HOME");
+    fn unset_xdg_dirs_require_home() {
+        let env = BTreeMap::from([
+            (GATEWAY_TELEGRAM_TOKEN_ENV.to_string(), "token".to_string()),
+            ("GATEWAY_TELEGRAM_CHAT_IDS".to_string(), "42".to_string()),
+        ]);
 
         let err = load_from_env(&env).unwrap_err();
 
-        assert!(err.contains("HOME"));
-        assert!(err.contains("XDG_CONFIG_HOME"));
+        assert_eq!(err, "HOME is required");
     }
 
     #[test]
@@ -499,7 +525,7 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
-            r#"{"models":[{"provider":"openrouter","model":" "},{"provider":"claude","model":"claude-test"}],"fastfetch":{"args":[" ","--pipe"]}}"#,
+            r#"{"models":[{"provider":"openrouter","model":" "},{"provider":"claude","model":"claude-test"}],"timeout_mins":30}"#,
         )
         .unwrap();
 
@@ -507,40 +533,51 @@ mod tests {
 
         assert_eq!(
             cfg.models,
-            vec![
-                ProviderModel {
-                    provider: Provider::Codex,
-                    model: DEFAULT_CODEX_MODEL.to_string()
-                },
-                ProviderModel {
-                    provider: Provider::Claude,
-                    model: "claude-test".to_string()
-                }
-            ]
+            vec![ProviderModel {
+                provider: Provider::Claude,
+                model: "claude-test".to_string()
+            }]
         );
         let text = fs::read_to_string(&path).unwrap();
-        assert!(!text.contains("fastfetch"));
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert!(value.get("provider").is_none());
         assert!(text.contains("\"timeout_mins\": 30"));
     }
 
     #[test]
-    fn normalizes_blank_models_to_at_least_codex() {
+    fn gateway_config_defaults_missing_timeout() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gateway/config.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, r#"{"models":[]}"#).unwrap();
+        fs::write(
+            &path,
+            r#"{"models":[{"provider":"codex","model":"gpt-test"}]}"#,
+        )
+        .unwrap();
 
         let cfg = load_gateway_config(&path).unwrap();
 
-        assert_eq!(
-            cfg.models,
-            vec![ProviderModel {
-                provider: Provider::Codex,
-                model: DEFAULT_CODEX_MODEL.to_string()
-            }]
-        );
+        assert_eq!(cfg.timeout_mins, DEFAULT_CODEX_TIMEOUT_MINS);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"timeout_mins\": 30"));
+    }
+
+    #[test]
+    fn rejects_unknown_config_fields_and_empty_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gateway/config.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"models":[{"provider":"codex","model":"gpt"}],"timeout_mins":30,"fastfetch":{"args":["--pipe"]}}"#,
+        )
+        .unwrap();
+        let err = load_gateway_config(&path).unwrap_err();
+        assert!(err.contains("parse gateway config"));
+
+        fs::write(&path, r#"{"models":[],"timeout_mins":30}"#).unwrap();
+        let err = load_gateway_config(&path).unwrap_err();
+        assert!(err.contains("at least one"));
     }
 
     #[test]
@@ -570,15 +607,19 @@ mod tests {
     }
 
     #[test]
-    fn gateway_config_defaults_missing_fields_and_rejects_invalid_json() {
+    fn gateway_config_creates_default_when_missing_and_rejects_incomplete_json() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gateway/config.json");
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, "{}").unwrap();
 
         let cfg = load_gateway_config(&path).unwrap();
 
         assert_eq!(cfg, GatewayConfigFile::default());
+        assert!(path.exists());
+
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "{}").unwrap();
+        let err = load_gateway_config(&path).unwrap_err();
+        assert!(err.contains("parse gateway config"));
 
         fs::write(&path, "{").unwrap();
         let err = load_gateway_config(&path).unwrap_err();
@@ -586,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_timeout_is_normalized_and_overflow_is_rejected() {
+    fn zero_timeout_and_overflow_are_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gateway/config.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -595,13 +636,20 @@ mod tests {
             r#"{"models":[{"provider":"codex","model":"gpt-test"}],"timeout_mins":0}"#,
         )
         .unwrap();
-        let cfg = load_gateway_config(&path).unwrap();
-        assert_eq!(cfg.timeout_mins, DEFAULT_CODEX_TIMEOUT_MINS);
+        let err = load_gateway_config(&path).unwrap_err();
+        assert!(err.contains("timeout_mins must be greater than zero"));
 
         let (_dir, env) = env_with_token();
         let path = PathBuf::from(env.get("XDG_CONFIG_HOME").unwrap()).join("gateway/config.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, format!(r#"{{"timeout_mins":{}}}"#, u64::MAX)).unwrap();
+        fs::write(
+            &path,
+            format!(
+                r#"{{"models":[{{"provider":"codex","model":"gpt-test"}}],"timeout_mins":{}}}"#,
+                u64::MAX
+            ),
+        )
+        .unwrap();
         let err = load_from_env(&env).unwrap_err();
         assert!(err.contains("timeout_mins is too large"));
     }

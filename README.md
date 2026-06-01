@@ -3,7 +3,7 @@
 ⚡ Lean Rust Telegram-to-Codex gateway.
 
 1. 🤖 `gateway` or `gateway bot`: run the Telegram bot for allowed chats.
-2. 🕰️ `gateway run`: execute one Codex prompt from scripts or cron.
+2. 🕰️ `gateway run`: execute one fresh Codex prompt from automation.
 
 ## 🛠️ Build
 
@@ -26,6 +26,9 @@ export GATEWAY_TELEGRAM_CHAT_IDS=123456789,-1001234567890
 1. 📁 `GATEWAY_CODEX_WORKDIR`: Codex working directory.
 2. 🟣 `ANTHROPIC_API_KEY`: required for `claude` model slots.
 3. 🌐 `OPENROUTER_API_KEY`: required for `openrouter` model slots.
+4. 🗂️ `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`:
+   override the standard `$HOME/.config`, `$HOME/.cache`,
+   `$HOME/.local/share`, and `$HOME/.local/state` defaults.
 
 📁 Paths:
 
@@ -46,7 +49,8 @@ restarts the bot.
 ## ⚙️ Config
 
 Gateway reads model slots and timeout settings from
-`$XDG_CONFIG_HOME/gateway/config.json`:
+`$XDG_CONFIG_HOME/gateway/config.json`. If the file is missing, Gateway creates
+it with these defaults:
 
 ```json
 {
@@ -71,9 +75,11 @@ Gateway reads model slots and timeout settings from
 📋 Rules:
 
 1. 🤖 `provider` must be `codex`, `claude`, or `openrouter`.
-2. 🧠 The first model slot is the default for new sessions and cron runs.
+2. 🧠 The first model slot is the default for new sessions and `gateway run`.
 3. ⏱️ `timeout_mins` sets the per-prompt Codex timeout.
 4. 💾 `/model` changes the current chat session only; it does not edit config.
+5. 🧱 Existing config files must include `models`; `timeout_mins` defaults to
+   `30` when omitted.
 
 ## 🧰 CLI
 
@@ -83,19 +89,18 @@ gateway bot
 gateway logs [lines]
 gateway paths
 gateway uninstall
-gateway run --job daily --prompt "Summarize status"
-gateway run --job daily --prompt-file ./prompt.txt
-printf '%s\n' "Summarize status" | gateway run --job daily
+gateway run --prompt "Summarize status"
+gateway run --prompt-file ./prompt.txt
+printf '%s\n' "Summarize status" | gateway run
 ```
 
 🏃 `gateway run`:
 
-1. 🧵 `--job NAME` is required and names the saved run session.
-2. 💬 Prompt input comes from `--prompt`, then `--prompt-file`, then stdin.
-3. 🤖 `--model NAME` overrides the saved/default model for that run.
-4. 🆕 `--new` starts a fresh saved session before running.
-5. 📤 Final text is printed to stdout.
-6. 📬 Non-empty, non-`OK` final text is also sent to allowed Telegram chats.
+1. 💬 Prompt input comes from `--prompt`, then `--prompt-file`, then stdin.
+2. 🆕 Each invocation starts a fresh Codex session.
+3. 🤖 `--model NAME` overrides the default model for that run.
+4. 📤 Final text is printed to stdout.
+5. 📬 Non-empty, non-`OK` final text is also sent to allowed Telegram chats.
 
 🧭 Other commands:
 
@@ -110,15 +115,14 @@ Allowed chats can send text messages or captions as Codex prompts. Sessions are
 kept separately per chat/thread, and commands are case-insensitive.
 
 ```text
-🧭 /commands - show supported gateway directives
-❔ /help - alias for /commands
+❔ /help - show supported gateway directives
 📊 /status - show Codex, gateway, and system status
 📜 /log [lines] - send recent gateway logs
 🆕 /new - start a fresh Codex session
 🔄 /restart - restart the gateway service
 🤖 /model [index] - choose a configured provider/model
-↩️ /resume SESSION_OR_NAME - resume a saved session
-🏷️ /rename NAME - rename the current session
+↩️ /resume [SESSION_OR_NAME|index] - list or resume a saved session
+🏷️ /rename [NAME] - rename the current session
 💾 /list - list saved sessions
 ```
 
@@ -127,8 +131,11 @@ kept separately per chat/thread, and commands are case-insensitive.
 1. 🤖 `/model` with no argument shows model buttons; `/model 0`, `/model 1`,
    etc. select by config index.
 2. 🆕 `/new` starts a fresh session using the default model slot.
-3. ↩️ `/resume` accepts a full session ID, first 8 characters, or saved name.
-4. 🏷️ `/rename` names the current session for later `/resume`.
+3. ↩️ `/resume` and `/resume 0` list sessions; `/resume 1` steps back one
+   saved session; non-numeric values still match a full session ID, first 8
+   characters, or saved name.
+4. 🏷️ `/rename NAME` names the current session; `/rename` asks Codex for a
+   concise name automatically.
 5. 📜 `/log` defaults to `10` lines and caps at `200`.
 
 ## 📬 Results

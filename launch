@@ -5,24 +5,9 @@ gateway_root="${0:A:h}"
 gateway_bin="$gateway_root/target/release/gateway"
 : "${HOME:?HOME is required}"
 
-gateway_export_xdg_default() {
-  local gateway_var_name="$1"
-  local gateway_default_path="$2"
-  local gateway_value="${(P)gateway_var_name:-}"
-
-  if [[ -z "${gateway_value//[[:space:]]/}" ]]; then
-    typeset -gx "$gateway_var_name=$gateway_default_path"
-  else
-    typeset -gx "$gateway_var_name=$gateway_value"
-  fi
-}
-
-gateway_export_xdg_default XDG_CONFIG_HOME "$HOME/.config"
-gateway_export_xdg_default XDG_CACHE_HOME "$HOME/.cache"
-gateway_export_xdg_default XDG_DATA_HOME "$HOME/.local/share"
-gateway_export_xdg_default XDG_STATE_HOME "$HOME/.local/state"
-
-gateway_log_file="$XDG_STATE_HOME/gateway/logs/gateway.log"
+gateway_xdg_state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+[[ -n "${gateway_xdg_state_home//[[:space:]]/}" ]] || gateway_xdg_state_home="$HOME/.local/state"
+gateway_log_file="$gateway_xdg_state_home/gateway/logs/gateway.log"
 if [[ ! -x "$gateway_bin" ]]; then
   print -u2 "gateway binary is missing or not executable: $gateway_bin"
   print -u2 "run: cd ${(q)gateway_root} && cargo build --release"

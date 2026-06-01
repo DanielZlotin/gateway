@@ -447,8 +447,7 @@ fn should_retry_plain_text(err: &str) -> bool {
 
 pub fn supported_bot_commands() -> Vec<BotCommand> {
     [
-        ("commands", "🧭 Show supported gateway directives."),
-        ("help", "❔ Alias for /commands."),
+        ("help", "❔ Show supported gateway directives."),
         ("status", "📊 Show Codex, gateway, and system status."),
         ("log", "📜 Send recent gateway logs."),
         ("new", "🆕 Start a fresh Codex session."),
@@ -543,18 +542,22 @@ mod tests {
 
         assert_eq!(
             names,
-            vec![
-                "commands", "help", "status", "log", "new", "restart", "model", "resume", "rename",
-                "list"
-            ]
+            vec!["help", "status", "log", "new", "restart", "model", "resume", "rename", "list"]
         );
+        assert!(!names.contains(&"commands"));
         assert!(commands
             .iter()
             .any(|command| command.command == "status" && command.description.starts_with("📊 ")));
+        assert!(
+            commands
+                .iter()
+                .any(|command| command.command == "help"
+                    && !command.description.contains("/commands"))
+        );
     }
 
     #[test]
-    fn command_scope_targets_match_go_gateway() {
+    fn command_scope_targets_cover_global_and_allowed_chat_scopes() {
         let targets = command_scope_targets(&[42]);
         let summary: Vec<_> = targets
             .iter()

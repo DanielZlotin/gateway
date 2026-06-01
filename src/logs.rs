@@ -48,26 +48,22 @@ mod tests {
     }
 
     #[test]
-    fn read_gateway_logs_uses_xdg_state_default_when_missing() {
+    fn read_gateway_logs_uses_default_xdg_state_home_when_unset() {
         let dir = tempfile::tempdir().unwrap();
-        let log_file = dir
-            .path()
-            .join("home/.local/state/gateway/logs/gateway.log");
+        let home = dir.path().join("home");
+        let log_file = home.join(".local/state/gateway/logs/gateway.log");
         std::fs::create_dir_all(log_file.parent().unwrap()).unwrap();
         std::fs::write(&log_file, "one\ntwo\n").unwrap();
-        let env = BTreeMap::from([(
-            "HOME".to_string(),
-            dir.path().join("home").to_string_lossy().to_string(),
-        )]);
+        let env = BTreeMap::from([("HOME".to_string(), home.to_string_lossy().to_string())]);
 
-        let text = read_gateway_logs(&env, 10).unwrap();
+        let text = read_gateway_logs(&env, 1).unwrap();
 
-        assert_eq!(text, "one\ntwo");
+        assert_eq!(text, "two");
     }
 
     #[test]
-    fn read_gateway_logs_requires_home_when_xdg_state_home_is_missing() {
+    fn read_gateway_logs_requires_home_when_xdg_state_home_is_unset() {
         let err = read_gateway_logs(&BTreeMap::new(), 10).unwrap_err();
-        assert_eq!(err, "HOME is required to default XDG_STATE_HOME");
+        assert_eq!(err, "HOME is required");
     }
 }

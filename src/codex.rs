@@ -516,7 +516,6 @@ mod tests {
             fastfetch_bin: PathBuf::from("fastfetch"),
             state_dir: PathBuf::from("/state/gateway"),
             chat_state_dir: PathBuf::from("/state/gateway/chats"),
-            cron_state_dir: PathBuf::from("/state/gateway/cron"),
             offset_file: PathBuf::from("/state/gateway/telegram.offset"),
             gateway_log_file: PathBuf::from("/state/gateway/logs/gateway.log"),
             launchd_target: "gui/<uid>/ai.gateway".to_string(),

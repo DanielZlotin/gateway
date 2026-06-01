@@ -39,30 +39,26 @@ pub enum SessionKey {
         chat_id: i64,
         thread_id: Option<i64>,
     },
-    Cron(String),
 }
 
 pub struct SessionStore {
     chat_dir: PathBuf,
-    cron_dir: PathBuf,
     default_model: String,
     default_provider: Provider,
 }
 
 impl SessionStore {
-    pub const fn new(chat_dir: PathBuf, cron_dir: PathBuf, default_model: String) -> Self {
-        Self::new_with_provider(chat_dir, cron_dir, default_model, Provider::Codex)
+    pub const fn new(chat_dir: PathBuf, default_model: String) -> Self {
+        Self::new_with_provider(chat_dir, default_model, Provider::Codex)
     }
 
     pub const fn new_with_provider(
         chat_dir: PathBuf,
-        cron_dir: PathBuf,
         default_model: String,
         default_provider: Provider,
     ) -> Self {
         Self {
             chat_dir,
-            cron_dir,
             default_model,
             default_provider,
         }
@@ -122,13 +118,29 @@ impl SessionStore {
         let mut state = self.load(key);
         let found = find_session(&state.sessions, target)
             .ok_or_else(|| format!("🔎 No saved session matches \"{target}\"."))?;
-        state.session_id = Some(found.id);
-        if !found.model.is_empty() {
-            state.model = found.model;
-        }
-        state.provider = found.provider;
-        state.generation += 1;
-        state.updated_at = now_string();
+        apply_resumed_session(&mut state, found);
+        self.save(key, &state)?;
+        Ok(state)
+    }
+
+    pub fn resume_relative(&self, key: &SessionKey, back: usize) -> Result<ChatSession, String> {
+        let mut state = self.load(key);
+        let current_id = state
+            .session_id
+            .as_deref()
+            .ok_or_else(|| "🔎 No current session to step back from.".to_string())?;
+        let current_index = state
+            .sessions
+            .iter()
+            .position(|item| item.id == current_id)
+            .ok_or_else(|| "🔎 Current session is not in saved sessions.".to_string())?;
+        let target_index = current_index + back;
+        let found = state
+            .sessions
+            .get(target_index)
+            .cloned()
+            .ok_or_else(|| format!("🔎 No saved session {back} sessions back."))?;
+        apply_resumed_session(&mut state, found);
         self.save(key, &state)?;
         Ok(state)
     }
@@ -154,7 +166,7 @@ impl SessionStore {
         Ok(state)
     }
 
-    pub fn save_run(
+    pub fn save_current_session(
         &self,
         key: &SessionKey,
         expected_generation: i64,
@@ -216,7 +228,6 @@ impl SessionStore {
                     .unwrap_or_else(|| "main".to_string());
                 self.chat_dir.join(format!("{chat_id}-{suffix}.json"))
             }
-            SessionKey::Cron(name) => self.cron_dir.join(format!("{}.json", sanitize_key(name))),
         }
     }
 
@@ -231,15 +242,6 @@ impl SessionStore {
             });
         if state.model.trim().is_empty() {
             state.model = self.default_model.clone();
-        }
-        if state.session_id.is_some() && state.sessions.is_empty() {
-            state.sessions.push(SavedSession {
-                id: state.session_id.clone().unwrap_or_default(),
-                name: None,
-                model: state.model.clone(),
-                provider: state.provider,
-                updated_at: state.updated_at.clone(),
-            });
         }
         state
     }
@@ -296,16 +298,14 @@ pub fn find_session(items: &[SavedSession], target: &str) -> Option<SavedSession
         .cloned()
 }
 
-fn sanitize_key(name: &str) -> String {
-    name.chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
+fn apply_resumed_session(state: &mut ChatSession, found: SavedSession) {
+    state.session_id = Some(found.id);
+    if !found.model.is_empty() {
+        state.model = found.model;
+    }
+    state.provider = found.provider;
+    state.generation += 1;
+    state.updated_at = now_string();
 }
 
 fn now_string() -> String {
@@ -349,11 +349,7 @@ mod tests {
     #[test]
     fn reset_clears_session_and_increments_generation() {
         let dir = tempdir().unwrap();
-        let store = SessionStore::new(
-            dir.path().join("chats"),
-            dir.path().join("cron"),
-            "gpt-5.5".to_string(),
-        );
+        let store = SessionStore::new(dir.path().join("chats"), "gpt-5.5".to_string());
         let key = SessionKey::Chat {
             chat_id: 42,
             thread_id: None,
@@ -368,35 +364,32 @@ mod tests {
     }
 
     #[test]
-    fn save_run_rejects_stale_generation() {
+    fn save_current_session_rejects_stale_generation() {
         let dir = tempdir().unwrap();
-        let store = SessionStore::new(
-            dir.path().join("chats"),
-            dir.path().join("cron"),
-            "gpt-5.5".to_string(),
-        );
-        let key = SessionKey::Cron("daily".to_string());
+        let store = SessionStore::new(dir.path().join("chats"), "gpt-5.5".to_string());
+        let key = SessionKey::Chat {
+            chat_id: 42,
+            thread_id: None,
+        };
 
         store.reset(&key).unwrap();
-        assert!(!store.save_run(&key, 0, "stale").unwrap());
-        assert!(store.save_run(&key, 1, "fresh").unwrap());
+        assert!(!store.save_current_session(&key, 0, "stale").unwrap());
+        assert!(store.save_current_session(&key, 1, "fresh").unwrap());
         assert_eq!(store.load(&key).session_id.as_deref(), Some("fresh"));
     }
 
     #[test]
     fn set_model_updates_current_saved_session_and_trims_model() {
         let dir = tempdir().unwrap();
-        let store = SessionStore::new(
-            dir.path().join("chats"),
-            dir.path().join("cron"),
-            "gpt-default".to_string(),
-        );
+        let store = SessionStore::new(dir.path().join("chats"), "gpt-default".to_string());
         let key = SessionKey::Chat {
             chat_id: 7,
             thread_id: Some(99),
         };
 
-        assert!(store.save_run(&key, 0, "session-12345678").unwrap());
+        assert!(store
+            .save_current_session(&key, 0, "session-12345678")
+            .unwrap());
         let state = store.set_model(&key, " gpt-new ").unwrap();
 
         assert_eq!(state.model, "gpt-new");
@@ -413,15 +406,14 @@ mod tests {
     #[test]
     fn resume_finds_saved_session_and_reports_missing_targets() {
         let dir = tempdir().unwrap();
-        let store = SessionStore::new(
-            dir.path().join("chats"),
-            dir.path().join("cron"),
-            "gpt-default".to_string(),
-        );
-        let key = SessionKey::Cron("daily/report".to_string());
+        let store = SessionStore::new(dir.path().join("chats"), "gpt-default".to_string());
+        let key = SessionKey::Chat {
+            chat_id: 7,
+            thread_id: Some(99),
+        };
 
         assert!(store
-            .save_run(&key, 0, "019e778b-2c3f-7231-bda6-c40f27bbba21")
+            .save_current_session(&key, 0, "019e778b-2c3f-7231-bda6-c40f27bbba21")
             .unwrap());
         let renamed = store.rename_current(&key, "daily").unwrap();
         assert_eq!(renamed.sessions[0].name.as_deref(), Some("daily"));
@@ -441,11 +433,7 @@ mod tests {
     #[test]
     fn rename_current_requires_current_session() {
         let dir = tempdir().unwrap();
-        let store = SessionStore::new(
-            dir.path().join("chats"),
-            dir.path().join("cron"),
-            "gpt-default".to_string(),
-        );
+        let store = SessionStore::new(dir.path().join("chats"), "gpt-default".to_string());
         let key = SessionKey::Chat {
             chat_id: 7,
             thread_id: None,
@@ -459,18 +447,19 @@ mod tests {
     #[test]
     fn list_formats_current_and_default_model_sessions() {
         let dir = tempdir().unwrap();
-        let store = SessionStore::new(
-            dir.path().join("chats"),
-            dir.path().join("cron"),
-            "gpt-default".to_string(),
-        );
-        let key = SessionKey::Cron("daily/report".to_string());
+        let store = SessionStore::new(dir.path().join("chats"), "gpt-default".to_string());
+        let key = SessionKey::Chat {
+            chat_id: 7,
+            thread_id: Some(99),
+        };
 
         assert_eq!(
             store.list(&key),
             "📭 No saved sessions yet. Send a normal message to create one."
         );
-        assert!(store.save_run(&key, 0, "session-current").unwrap());
+        assert!(store
+            .save_current_session(&key, 0, "session-current")
+            .unwrap());
         let mut state = store.load(&key);
         state.sessions.push(SavedSession {
             id: "session-older".to_string(),
@@ -486,20 +475,16 @@ mod tests {
         assert!(list.contains("💾 Saved sessions:"));
         assert!(list.contains("⭐ Codex session- gpt-default (unnamed)"));
         assert!(list.contains("▫️ Codex session- gpt-default (unnamed)"));
-        assert!(dir.path().join("cron/daily_report.json").exists());
+        assert!(dir.path().join("chats/7-thread-99.json").exists());
     }
 
     #[test]
-    fn load_recovers_legacy_session_and_default_model() {
+    fn load_keeps_missing_session_list_empty() {
         let dir = tempdir().unwrap();
-        let store = SessionStore::new(
-            dir.path().join("chats"),
-            dir.path().join("cron"),
-            "gpt-default".to_string(),
-        );
+        let store = SessionStore::new(dir.path().join("chats"), "gpt-default".to_string());
         let path = dir.path().join("chats/7-main.json");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, r#"{"session_id":"legacy","model":" "}"#).unwrap();
+        std::fs::write(&path, r#"{"session_id":"old-session","model":" "}"#).unwrap();
         let key = SessionKey::Chat {
             chat_id: 7,
             thread_id: None,
@@ -508,9 +493,7 @@ mod tests {
         let state = store.load(&key);
 
         assert_eq!(state.model, "gpt-default");
-        assert_eq!(state.sessions.len(), 1);
-        assert_eq!(state.sessions[0].id, "legacy");
-        assert_eq!(state.sessions[0].model, "gpt-default");
+        assert!(state.sessions.is_empty());
     }
 
     #[test]
@@ -557,11 +540,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let blocked = dir.path().join("blocked");
         std::fs::write(&blocked, "file").unwrap();
-        let store = SessionStore::new(
-            blocked.join("chats"),
-            dir.path().join("cron"),
-            "gpt-default".to_string(),
-        );
+        let store = SessionStore::new(blocked.join("chats"), "gpt-default".to_string());
         let key = SessionKey::Chat {
             chat_id: 7,
             thread_id: None,

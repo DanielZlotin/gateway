@@ -115,6 +115,52 @@ mod tests {
         );
         let log = fs::read_to_string(state_dir.join("gateway/logs/gateway.log")).unwrap();
         assert!(log.contains("stub args=bot token=token chats=42"));
+        assert!(log.contains(&format!("state={}/state", root.display())));
+    }
+
+    #[test]
+    fn launch_script_uses_default_log_path_without_exporting_xdg_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let zdotdir = root.join("zdot");
+        let launch_src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("launch");
+        let launch_dest = root.join("launch");
+        let gateway_bin = root.join("target/release/gateway");
+
+        fs::create_dir_all(&zdotdir).unwrap();
+        fs::copy(launch_src, &launch_dest).unwrap();
+        fs::create_dir_all(gateway_bin.parent().unwrap()).unwrap();
+        fs::write(
+            &gateway_bin,
+            "#!/bin/zsh\nprint -- \"state=${XDG_STATE_HOME-unset} config=${XDG_CONFIG_HOME-unset} cache=${XDG_CACHE_HOME-unset} data=${XDG_DATA_HOME-unset}\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&gateway_bin, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(
+            zdotdir.join(".zshenv"),
+            "typeset -gx GATEWAY_TELEGRAM_TOKEN=token\n\
+             typeset -gx GATEWAY_TELEGRAM_CHAT_IDS=42\n",
+        )
+        .unwrap();
+
+        let launch_command = format!("exec {}", launch_dest.display());
+        let output = Command::new("/bin/zsh")
+            .args(["-lc", &launch_command])
+            .env_clear()
+            .env("HOME", root)
+            .env("PATH", "/bin:/usr/bin")
+            .env("ZDOTDIR", &zdotdir)
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "launch failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let log = fs::read_to_string(root.join(".local/state/gateway/logs/gateway.log")).unwrap();
+        assert!(log.contains("state=unset config=unset cache=unset data=unset"));
     }
 
     #[test]
@@ -123,10 +169,6 @@ mod tests {
         let root = dir.path();
         let stub_dir = root.join("bin");
         let home = root.join("home");
-        let config = root.join("config");
-        let cache = root.join("cache");
-        let data = root.join("data");
-        let state = root.join("state");
         let launchctl_log = root.join("launchctl.log");
 
         fs::create_dir_all(&stub_dir).unwrap();
@@ -164,10 +206,6 @@ mod tests {
             .env("GATEWAY_TEST_LAUNCHCTL_LOG", &launchctl_log)
             .env("GATEWAY_TELEGRAM_TOKEN", "fake&token")
             .env("GATEWAY_TELEGRAM_CHAT_IDS", "42,-100")
-            .env("XDG_CONFIG_HOME", &config)
-            .env("XDG_CACHE_HOME", &cache)
-            .env("XDG_DATA_HOME", &data)
-            .env("XDG_STATE_HOME", &state)
             .output()
             .unwrap();
 

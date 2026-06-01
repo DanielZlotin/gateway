@@ -14,11 +14,9 @@ pub enum Mode {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct RunArgs {
-    pub job: String,
     pub prompt: Option<String>,
     pub prompt_file: Option<PathBuf>,
     pub model: Option<String>,
-    pub new_session: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -45,15 +43,11 @@ struct LogsCli {
 #[derive(Debug, Args)]
 struct RunCli {
     #[arg(long)]
-    job: String,
-    #[arg(long)]
     prompt: Option<String>,
     #[arg(long)]
     prompt_file: Option<PathBuf>,
     #[arg(long)]
     model: Option<String>,
-    #[arg(long)]
-    new: bool,
 }
 
 pub fn parse_args_from<I, T>(args: I) -> Result<Mode, String>
@@ -67,11 +61,9 @@ where
         Some(Command::Logs(args)) => Mode::Logs(normalize_log_line_count(args.lines)),
         Some(Command::Paths) => Mode::Paths,
         Some(Command::Run(args)) => Mode::Run(RunArgs {
-            job: args.job,
             prompt: args.prompt,
             prompt_file: args.prompt_file,
             model: args.model,
-            new_session: args.new,
         }),
         Some(Command::Uninstall) => Mode::Uninstall,
     })
@@ -92,24 +84,19 @@ mod tests {
         let mode = parse_args_from([
             "gateway",
             "run",
-            "--job",
-            "daily",
             "--prompt",
             "summarize",
             "--model",
             "gpt-test",
-            "--new",
         ])
         .unwrap();
 
         assert_eq!(
             mode,
             Mode::Run(RunArgs {
-                job: "daily".to_string(),
                 prompt: Some("summarize".to_string()),
                 prompt_file: None,
                 model: Some("gpt-test".to_string()),
-                new_session: true,
             })
         );
     }
@@ -136,11 +123,5 @@ mod tests {
     fn parses_logs_mode_with_capped_line_count() {
         let mode = parse_args_from(["gateway", "logs", "999"]).unwrap();
         assert_eq!(mode, Mode::Logs(200));
-    }
-
-    #[test]
-    fn run_mode_requires_job() {
-        let err = parse_args_from(["gateway", "run", "--prompt", "hello"]).unwrap_err();
-        assert!(err.contains("--job"));
     }
 }

@@ -1,7 +1,6 @@
 use crate::cli::RunArgs;
 use crate::codex::{run_codex, CodexConfig};
 use crate::config::Config;
-use crate::session::{SessionKey, SessionStore};
 use crate::telegram::TelegramClient;
 use crate::text::{is_ok_response, split_telegram_message};
 use std::fs;
@@ -46,29 +45,20 @@ fn run_with_sender(
     mut send_telegram: impl FnMut(&str, i64, &str) -> Result<(), String>,
 ) -> Result<String, String> {
     let prompt = load_prompt(&args, std::io::stdin())?;
-    let store = SessionStore::new(
-        cfg.chat_state_dir.clone(),
-        cfg.cron_state_dir.clone(),
-        cfg.default_provider_model().model.clone(),
-    );
-    let key = SessionKey::Cron(args.job.clone());
-    if args.new_session {
-        store.reset(&key)?;
-    }
-    let state = store.load(&key);
-    let model = args.model.as_deref().unwrap_or(&state.model);
+    let default_provider_model = cfg.default_provider_model();
+    let model = args
+        .model
+        .as_deref()
+        .unwrap_or(&default_provider_model.model);
     let output = run_codex(
         &CodexConfig::from(&cfg),
         &prompt,
-        state.session_id.as_deref(),
-        cfg.default_provider_model().provider,
+        None,
+        default_provider_model.provider,
         model,
         cfg.codex_timeout,
         &cfg.state_dir,
     )?;
-    if let Some(session_id) = output.session_id.as_deref() {
-        store.save_run(&key, state.generation, session_id)?;
-    }
     if should_send_telegram_result(&output.final_text) {
         for chat_id in &cfg.telegram_chat_ids {
             for part in split_telegram_message(&output.final_text) {
@@ -92,11 +82,9 @@ mod tests {
 
     fn base_args() -> RunArgs {
         RunArgs {
-            job: "daily".to_string(),
             prompt: None,
             prompt_file: None,
             model: None,
-            new_session: false,
         }
     }
 
@@ -184,14 +172,11 @@ printf 'session id: session-cli\n' >&2
 
         assert_eq!(output, "OK");
         assert!(sends.lock().unwrap().is_empty());
-        let default_model = cfg.default_provider_model().model.clone();
-        let store = SessionStore::new(cfg.chat_state_dir, cfg.cron_state_dir, default_model);
-        let state = store.load(&SessionKey::Cron("daily".to_string()));
-        assert_eq!(state.session_id.as_deref(), Some("session-cli"));
+        assert!(!cfg.chat_state_dir.exists());
     }
 
     #[test]
-    fn run_mode_resets_saves_and_sends_non_ok_results() {
+    fn run_mode_sends_non_ok_results_without_saving_session_state() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = test_config(dir.path());
         cfg.codex_bin = executable(
@@ -211,11 +196,9 @@ printf 'session id: session-run\n' >&2
         let sends = Arc::new(Mutex::new(Vec::new()));
         let sent = sends.clone();
         let args = RunArgs {
-            job: "daily".to_string(),
             prompt: Some("work".to_string()),
             prompt_file: None,
             model: Some("gpt-override".to_string()),
-            new_session: true,
         };
 
         let output = run_with_sender(args, cfg.clone(), move |token, chat_id, text| {
@@ -231,11 +214,7 @@ printf 'session id: session-run\n' >&2
             *sends.lock().unwrap(),
             vec![("token".to_string(), 42, "done".to_string())]
         );
-        let default_model = cfg.default_provider_model().model.clone();
-        let store = SessionStore::new(cfg.chat_state_dir, cfg.cron_state_dir, default_model);
-        let state = store.load(&SessionKey::Cron("daily".to_string()));
-        assert_eq!(state.session_id.as_deref(), Some("session-run"));
-        assert_eq!(state.generation, 1);
+        assert!(!cfg.chat_state_dir.exists());
     }
 
     #[test]
@@ -292,7 +271,6 @@ printf 'done\n' > "$out"
             fastfetch_bin: PathBuf::from("fastfetch"),
             state_dir: root.join("state/gateway"),
             chat_state_dir: root.join("state/gateway/chats"),
-            cron_state_dir: root.join("state/gateway/cron"),
             offset_file: root.join("state/gateway/telegram.offset"),
             gateway_log_file: root.join("state/gateway/logs/gateway.log"),
             launchd_target: "gui/0/ai.gateway-test".to_string(),

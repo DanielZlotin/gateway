@@ -1,18 +1,17 @@
 pub const DIRECTIVES: &str =
-    "/commands, /help, /status, /log, /new, /restart, /model, /resume, /rename, /list";
+    "/help, /status, /log, /new, /restart, /model, /resume, /rename, /list";
 
 pub fn directive_help() -> String {
     [
         "🧭 Supported directives:",
-        "🧭 /commands - show supported gateway directives",
-        "❔ /help - alias for /commands",
+        "❔ /help - show supported gateway directives",
         "📊 /status - show Codex, gateway, and system status",
         "📜 /log [lines] - send recent gateway logs",
         "🆕 /new - start a fresh Codex session",
         "🔄 /restart - restart the gateway service",
         "🤖 /model [index] - choose a configured provider/model",
-        "↩️ /resume SESSION_OR_NAME - resume a saved session",
-        "🏷️ /rename NAME - rename the current session",
+        "↩️ /resume [SESSION_OR_NAME|index] - list or resume a saved session",
+        "🏷️ /rename [NAME] - rename the current session",
         "💾 /list - list saved sessions",
     ]
     .join("\n")
@@ -35,20 +34,12 @@ mod tests {
         let help = directive_help();
         assert!(help.starts_with("🧭 Supported directives:"));
         for command in [
-            "/commands",
-            "/help",
-            "/status",
-            "/log",
-            "/new",
-            "/restart",
-            "/model",
-            "/resume",
-            "/rename",
-            "/list",
+            "/help", "/status", "/log", "/new", "/restart", "/model", "/resume", "/rename", "/list",
         ] {
             assert!(help.contains(command), "missing {command}");
         }
         assert!(help.contains("📊 /status"));
+        assert!(!help.contains("/commands"));
         assert!(!help.contains("/start"));
     }
 

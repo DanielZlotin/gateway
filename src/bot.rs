@@ -1,4 +1,4 @@
-use crate::codex::{run_codex_stream, CodexConfig, CodexRun};
+use crate::codex::{run_codex, run_codex_stream, CodexConfig, CodexRun};
 use crate::commands::{directive_help, is_allowed, unknown_directive_message};
 use crate::config::{Config, ProviderModel};
 #[cfg(test)]
@@ -174,8 +174,6 @@ fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
     fs::create_dir_all(&cfg.state_dir).map_err(|err| format!("create state dir: {err}"))?;
     fs::create_dir_all(&cfg.chat_state_dir)
         .map_err(|err| format!("create chat state dir: {err}"))?;
-    fs::create_dir_all(&cfg.cron_state_dir)
-        .map_err(|err| format!("create cron state dir: {err}"))?;
 
     if let Err(err) = tg.sync_my_commands(&cfg.telegram_chat_ids) {
         eprintln!("telegram command sync failed; continuing without command refresh: {err}");
@@ -183,7 +181,6 @@ fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
     let default_model = cfg.default_provider_model().clone();
     let store = SessionStore::new_with_provider(
         cfg.chat_state_dir.clone(),
-        cfg.cron_state_dir.clone(),
         default_model.model.clone(),
         default_model.provider,
     );
@@ -351,9 +348,9 @@ fn handle_command(
         }
         "/model" => handle_model_command(cfg, tg, store, selections, msg, text, &key),
         "/resume" => handle_resume_command(tg, store, selections, msg, text, &key),
-        "/rename" => handle_rename_command(tg, store, msg, text, &key),
+        "/rename" => handle_rename_command(cfg, tg, store, msg, text, &key),
         "/list" => send_long_message(tg, msg.chat.id, &store.list(&key), msg.message_id),
-        "/help" | "/commands" => tg.send_message(msg.chat.id, &directive_help(), msg.message_id),
+        "/help" => tg.send_message(msg.chat.id, &directive_help(), msg.message_id),
         "/status" => handle_status_command(cfg, tg, store, selections, msg, &key),
         _ => tg.send_message(msg.chat.id, &unknown_directive_message(), msg.message_id),
     }
@@ -561,28 +558,41 @@ fn handle_resume_command(
     key: &SessionKey,
 ) -> Result<(), String> {
     let target = command_arg(text);
-    if target.is_empty() {
-        let body = format!("🧭 Usage: /resume SESSION_OR_NAME\n\n{}", store.list(key));
+    if target.is_empty() || target == "0" {
+        let body = store.list(key);
         return send_long_message(tg, msg.chat.id, &body, msg.message_id);
     }
-    match store.resume(key, &target) {
+    let result = target.parse::<usize>().map_or_else(
+        |_| store.resume(key, &target),
+        |back| store.resume_relative(key, back),
+    );
+    match result {
         Ok(state) => {
             clear_selection(selections, key);
-            tg.send_message(
-                msg.chat.id,
-                &format!(
-                    "↩️ Resumed session {}\n🤖 Model: {}",
-                    session_label(state.session_id.as_deref().unwrap_or("")),
-                    state.model
-                ),
-                msg.message_id,
-            )
+            send_resumed_session(tg, msg, &state)
         }
         Err(err) => tg.send_message(msg.chat.id, &err, msg.message_id),
     }
 }
 
+fn send_resumed_session(
+    tg: &impl TelegramApi,
+    msg: &Message,
+    state: &crate::session::ChatSession,
+) -> Result<(), String> {
+    tg.send_message(
+        msg.chat.id,
+        &format!(
+            "↩️ Resumed session {}\n🤖 Model: {}",
+            session_label(state.session_id.as_deref().unwrap_or("")),
+            state.model
+        ),
+        msg.message_id,
+    )
+}
+
 fn handle_rename_command(
+    cfg: &Config,
     tg: &impl TelegramApi,
     store: &SessionStore,
     msg: &Message,
@@ -591,9 +601,87 @@ fn handle_rename_command(
 ) -> Result<(), String> {
     let name = command_arg(text);
     if name.is_empty() {
-        return tg.send_message(msg.chat.id, "🧭 Usage: /rename NAME", msg.message_id);
+        return handle_auto_rename_command(cfg, tg, store, msg, key);
     }
-    match store.rename_current(key, &name) {
+    rename_session(tg, store, msg, key, &name)
+}
+
+fn handle_auto_rename_command(
+    cfg: &Config,
+    tg: &impl TelegramApi,
+    store: &SessionStore,
+    msg: &Message,
+    key: &SessionKey,
+) -> Result<(), String> {
+    let state = store.load(key);
+    if state.session_id.is_none() {
+        return tg.send_message(
+            msg.chat.id,
+            "🏷️ No current session to rename. Send a normal message first.",
+            msg.message_id,
+        );
+    }
+    tg.send_message(msg.chat.id, "🏷️ Naming current session…", msg.message_id)?;
+    let output = match run_codex(
+        &CodexConfig::from(cfg),
+        AUTO_RENAME_PROMPT,
+        state.session_id.as_deref(),
+        state.provider,
+        &state.model,
+        cfg.codex_timeout,
+        &cfg.state_dir,
+    ) {
+        Ok(output) => output,
+        Err(err) => {
+            return tg.send_message(
+                msg.chat.id,
+                &format!("⚠️ Failed to rename session: {err}"),
+                msg.message_id,
+            )
+        }
+    };
+    let Some(name) = auto_session_name(&output.final_text) else {
+        return tg.send_message(
+            msg.chat.id,
+            "⚠️ Failed to rename session: Codex returned an empty name.",
+            msg.message_id,
+        );
+    };
+    if let Some(session_id) = output.session_id.as_deref() {
+        if let Err(err) = store.save_current_session(key, state.generation, session_id) {
+            return tg.send_message(
+                msg.chat.id,
+                &format!("⚠️ Failed to save renamed session: {err}"),
+                msg.message_id,
+            );
+        }
+    }
+    rename_session(tg, store, msg, key, &name)
+}
+
+const AUTO_RENAME_PROMPT: &str = "Create a concise name for this session. Return only the name, with no quotes, prefixes, markdown, or explanation. Use at most eight words.";
+
+fn auto_session_name(text: &str) -> Option<String> {
+    text.lines()
+        .map(|line| {
+            line.trim()
+                .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '*'))
+                .trim()
+        })
+        .find(|line| !line.is_empty())
+        .map(|line| line.chars().take(80).collect::<String>())
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+}
+
+fn rename_session(
+    tg: &impl TelegramApi,
+    store: &SessionStore,
+    msg: &Message,
+    key: &SessionKey,
+    name: &str,
+) -> Result<(), String> {
+    match store.rename_current(key, name) {
         Ok(state) => tg.send_message(
             msg.chat.id,
             &format!(
@@ -642,7 +730,6 @@ fn worker_loop(cfg: Config, rx: mpsc::Receiver<Job>) {
     let default_model = cfg.default_provider_model().clone();
     let store = SessionStore::new_with_provider(
         cfg.chat_state_dir.clone(),
-        cfg.cron_state_dir.clone(),
         default_model.model,
         default_model.provider,
     );
@@ -724,7 +811,7 @@ fn run_job(
         }
     };
     if let Some(session_id) = output.session_id.as_deref() {
-        store.save_run(&key, state.generation, session_id)?;
+        store.save_current_session(&key, state.generation, session_id)?;
     }
     eprintln!(
         "[gateway] job success chat={} elapsed_ms={} final_chars={} session={}",
@@ -967,7 +1054,15 @@ mod tests {
         assert_eq!(err, "stop");
         assert!(cfg.state_dir.exists());
         assert!(cfg.chat_state_dir.exists());
-        assert!(cfg.cron_state_dir.exists());
+        let mut state_entries = fs::read_dir(&cfg.state_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        state_entries.sort();
+        assert_eq!(
+            state_entries,
+            vec!["chats".to_string(), "telegram.offset".to_string()]
+        );
         assert_eq!(read_offset(&cfg.offset_file), 5);
         assert!(tg.calls().contains(&Call::Sync(vec![42])));
         assert!(tg.calls().iter().any(|call| {
@@ -1074,7 +1169,6 @@ mod tests {
         let cfg = test_config(dir.path());
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
-            cfg.cron_state_dir.clone(),
             cfg.default_provider_model().model.clone(),
         );
         let tg = FakeTelegram::new();
@@ -1136,7 +1230,6 @@ mod tests {
         let cfg = test_config(dir.path());
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
-            cfg.cron_state_dir.clone(),
             cfg.default_provider_model().model.clone(),
         );
         let tg = FakeTelegram::new();
@@ -1163,12 +1256,11 @@ mod tests {
         let cfg = test_config(dir.path());
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
-            cfg.cron_state_dir.clone(),
             cfg.default_provider_model().model.clone(),
         );
         let tg = FakeTelegram::new();
         let selections = RuntimeSelections::default();
-        let msg = message(42, 10, "/commands");
+        let msg = message(42, 10, "/help");
         let key = SessionKey::Chat {
             chat_id: 42,
             thread_id: None,
@@ -1193,7 +1285,7 @@ mod tests {
         )
         .unwrap();
         store
-            .save_run(&key, store.load(&key).generation, "session-12345678")
+            .save_current_session(&key, store.load(&key).generation, "session-12345678")
             .unwrap();
         handle_command(
             &cfg,
@@ -1244,15 +1336,29 @@ mod tests {
         assert!(sent
             .iter()
             .any(|text| text.contains("🤖 Selected Codex: gpt-test")));
-        assert!(sent.iter().any(|text| text.contains("🧭 Usage: /resume")));
+        assert!(sent
+            .iter()
+            .any(|text| text.contains("📭 No saved sessions yet")));
         assert!(sent
             .iter()
             .any(|text| text.contains("🔎 No saved session matches")));
         assert!(sent.iter().any(|text| text.contains("↩️ Resumed session")));
-        assert!(sent.iter().any(|text| text.contains("🧭 Usage: /rename")));
+        assert!(sent
+            .iter()
+            .any(|text| text.contains("🏷️ Naming current session")));
+        assert!(sent
+            .iter()
+            .any(|text| text.contains("🏷️ Renamed session session- to \"OK\".")));
         assert!(sent.iter().any(|text| text.contains("🏷️ Renamed session")));
         assert!(sent.iter().any(|text| text.contains("💾 Saved sessions:")));
         assert!(sent.iter().any(|text| text.contains("/status")));
+        assert!(!sent.iter().any(|text| text.contains("/commands")));
+        assert_eq!(
+            sent.iter()
+                .filter(|text| text.contains("❓ Unknown directive"))
+                .count(),
+            2
+        );
         assert!(sent.iter().any(|text| text.contains("🧠 Codex:")));
         assert!(sent.iter().any(|text| text == "🔄 Restarting gateway."));
         assert!(sent
@@ -1261,12 +1367,113 @@ mod tests {
     }
 
     #[test]
+    fn resume_numeric_argument_steps_back_from_current_session() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let tg = FakeTelegram::new();
+        let selections = RuntimeSelections::default();
+        let msg = message(42, 10, "/resume 1");
+        let key = SessionKey::Chat {
+            chat_id: 42,
+            thread_id: None,
+        };
+        seed_session_history(&store, &key);
+
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/resume 1", "/resume").unwrap();
+
+        let state = store.load(&key);
+        assert_eq!(state.session_id.as_deref(), Some("bbbbbbbb-previous"));
+        assert!(tg
+            .sent_text()
+            .iter()
+            .any(|text| text.contains("↩️ Resumed session bbbbbbbb")));
+    }
+
+    #[test]
+    fn resume_zero_and_empty_arguments_show_session_list() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let tg = FakeTelegram::new();
+        let selections = RuntimeSelections::default();
+        let msg = message(42, 10, "/resume");
+        let key = SessionKey::Chat {
+            chat_id: 42,
+            thread_id: None,
+        };
+        seed_session_history(&store, &key);
+
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/resume", "/resume").unwrap();
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/resume 0", "/resume").unwrap();
+
+        let sent = tg.sent_text();
+        assert_eq!(
+            sent.iter()
+                .filter(|text| text.contains("💾 Saved sessions:"))
+                .count(),
+            2
+        );
+        assert!(!sent.iter().any(|text| text.contains("Usage: /resume")));
+    }
+
+    #[test]
+    fn rename_without_name_asks_codex_for_session_name() {
+        let dir = tempdir().unwrap();
+        let mut cfg = test_config(dir.path());
+        cfg.codex_bin = executable(
+            dir.path().join("codex-title"),
+            r#"#!/bin/sh
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--output-last-message" ]; then out="$arg"; fi
+  prev="$arg"
+done
+cat >/dev/null
+printf '  Generated Session Name  \n' > "$out"
+printf 'session id: aaaaaaaa-current\n' >&2
+"#,
+        );
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let key = SessionKey::Chat {
+            chat_id: 42,
+            thread_id: None,
+        };
+        assert!(store
+            .save_current_session(&key, 0, "aaaaaaaa-current")
+            .unwrap());
+        let tg = FakeTelegram::new();
+        let selections = RuntimeSelections::default();
+        let msg = message(42, 10, "/rename");
+
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/rename", "/rename").unwrap();
+
+        let state = store.load(&key);
+        assert_eq!(
+            state.sessions[0].name.as_deref(),
+            Some("Generated Session Name")
+        );
+        assert!(tg.sent_text().iter().any(
+            |text| text.contains("🏷️ Renamed session aaaaaaaa to \"Generated Session Name\".")
+        ));
+    }
+
+    #[test]
     fn model_command_shows_configured_model_buttons() {
         let dir = tempdir().unwrap();
         let cfg = test_config(dir.path());
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
-            cfg.cron_state_dir.clone(),
             cfg.default_provider_model().model.clone(),
         );
         let tg = FakeTelegram::new();
@@ -1298,7 +1505,6 @@ mod tests {
         let cfg = test_config(dir.path());
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
-            cfg.cron_state_dir.clone(),
             cfg.default_provider_model().model.clone(),
         );
         let tg = FakeTelegram::new();
@@ -1328,7 +1534,6 @@ mod tests {
         let cfg = test_config(dir.path());
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
-            cfg.cron_state_dir.clone(),
             cfg.default_provider_model().model.clone(),
         );
         let tg = FakeTelegram::new();
@@ -1364,7 +1569,6 @@ mod tests {
         let cfg = test_config(dir.path());
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
-            cfg.cron_state_dir.clone(),
             cfg.default_provider_model().model.clone(),
         );
         let tg = FakeTelegram::new();
@@ -1399,7 +1603,6 @@ mod tests {
         cfg.chat_state_dir = blocked.join("chats");
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
-            cfg.cron_state_dir.clone(),
             cfg.default_provider_model().model.clone(),
         );
         let tg = FakeTelegram::new();
@@ -1445,7 +1648,6 @@ printf 'session id: session-ok\n' >&2
         );
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
-            cfg.cron_state_dir.clone(),
             cfg.default_provider_model().model.clone(),
         );
         let tg = FakeTelegram::new();
@@ -1498,7 +1700,6 @@ printf 'final text\n' > "$out"
         );
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
-            cfg.cron_state_dir.clone(),
             cfg.default_provider_model().model.clone(),
         );
         let tg = FakeTelegram::new();
@@ -1546,7 +1747,6 @@ printf '%s\n' '{}' > "$out"
         );
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
-            cfg.cron_state_dir.clone(),
             cfg.default_provider_model().model.clone(),
         );
         let tg = FakeTelegram::new();
@@ -1576,7 +1776,6 @@ exit 2
         );
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
-            cfg.cron_state_dir.clone(),
             cfg.default_provider_model().model.clone(),
         );
         let tg = FakeTelegram::new();
@@ -1602,7 +1801,6 @@ exit 2
         );
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
-            cfg.cron_state_dir.clone(),
             cfg.default_provider_model().model.clone(),
         );
         let tg = FakeTelegram::new();
@@ -1933,6 +2131,20 @@ exit 2
         }
     }
 
+    fn seed_session_history(store: &SessionStore, key: &SessionKey) {
+        assert!(store
+            .save_current_session(key, 0, "cccccccc-oldest")
+            .unwrap());
+        store.reset(key).unwrap();
+        assert!(store
+            .save_current_session(key, 1, "bbbbbbbb-previous")
+            .unwrap());
+        store.reset(key).unwrap();
+        assert!(store
+            .save_current_session(key, 2, "aaaaaaaa-current")
+            .unwrap());
+    }
+
     fn test_config(root: &Path) -> Config {
         let codex = executable(
             root.join("codex"),
@@ -1985,7 +2197,6 @@ printf 'OS: test\n'
             fastfetch_bin: fastfetch,
             state_dir: root.join("state/gateway"),
             chat_state_dir: root.join("state/gateway/chats"),
-            cron_state_dir: root.join("state/gateway/cron"),
             offset_file: root.join("state/gateway/telegram.offset"),
             gateway_log_file: root.join("state/gateway/logs/gateway.log"),
             launchd_target: "gui/0/ai.gateway-test".to_string(),
