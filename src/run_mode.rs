@@ -49,7 +49,7 @@ fn run_with_sender(
     let store = SessionStore::new(
         cfg.chat_state_dir.clone(),
         cfg.cron_state_dir.clone(),
-        cfg.codex_model.clone(),
+        cfg.default_provider_model().model.clone(),
     );
     let key = SessionKey::Cron(args.job.clone());
     if args.new_session {
@@ -61,6 +61,7 @@ fn run_with_sender(
         &CodexConfig::from(&cfg),
         &prompt,
         state.session_id.as_deref(),
+        cfg.default_provider_model().provider,
         model,
         cfg.codex_timeout,
         &cfg.state_dir,
@@ -183,7 +184,8 @@ printf 'session id: session-cli\n' >&2
 
         assert_eq!(output, "OK");
         assert!(sends.lock().unwrap().is_empty());
-        let store = SessionStore::new(cfg.chat_state_dir, cfg.cron_state_dir, cfg.codex_model);
+        let default_model = cfg.default_provider_model().model.clone();
+        let store = SessionStore::new(cfg.chat_state_dir, cfg.cron_state_dir, default_model);
         let state = store.load(&SessionKey::Cron("daily".to_string()));
         assert_eq!(state.session_id.as_deref(), Some("session-cli"));
     }
@@ -229,7 +231,8 @@ printf 'session id: session-run\n' >&2
             *sends.lock().unwrap(),
             vec![("token".to_string(), 42, "done".to_string())]
         );
-        let store = SessionStore::new(cfg.chat_state_dir, cfg.cron_state_dir, cfg.codex_model);
+        let default_model = cfg.default_provider_model().model.clone();
+        let store = SessionStore::new(cfg.chat_state_dir, cfg.cron_state_dir, default_model);
         let state = store.load(&SessionKey::Cron("daily".to_string()));
         assert_eq!(state.session_id.as_deref(), Some("session-run"));
         assert_eq!(state.generation, 1);
@@ -282,12 +285,10 @@ printf 'done\n' > "$out"
             gateway_config_file: root.join("config/gateway/config.json"),
             codex_bin: root.join("codex"),
             codex_workdir: root.to_path_buf(),
-            codex_model: "gpt-test".to_string(),
-            provider: crate::provider::Provider::Codex,
-            claude_model: "claude-test".to_string(),
-            openrouter_model: "openrouter/test".to_string(),
-            anthropic_api_key: None,
-            openrouter_api_key: None,
+            models: vec![crate::config::ProviderModel {
+                provider: crate::provider::Provider::Codex,
+                model: "gpt-test".to_string(),
+            }],
             fastfetch_bin: PathBuf::from("fastfetch"),
             state_dir: root.join("state/gateway"),
             chat_state_dir: root.join("state/gateway/chats"),

@@ -1,3 +1,4 @@
+pub mod anthropic_proxy;
 pub mod bot;
 pub mod cli;
 pub mod codex;
@@ -5,7 +6,6 @@ pub mod commands;
 pub mod config;
 pub mod json_file;
 pub mod launchd;
-pub mod llm;
 pub mod logs;
 pub mod provider;
 pub mod run_mode;

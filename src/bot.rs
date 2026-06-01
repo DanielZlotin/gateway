@@ -1,19 +1,20 @@
 use crate::codex::{run_codex_stream, CodexConfig};
 use crate::commands::{directive_help, is_allowed, unknown_directive_message};
-use crate::config::{save_gateway_config, Config, GatewayConfigFile};
-use crate::llm::{run_claude, run_openrouter, ApiProviderConfig};
-use crate::provider::{provider_for_model_slot, Provider};
+use crate::config::{Config, ProviderModel};
+#[cfg(test)]
+use crate::provider::Provider;
 use crate::session::{SessionKey, SessionStore};
-use crate::status::{codex_status, fastfetch_status, format_status_message, status_header};
-use crate::telegram::{Message, TelegramClient, Update};
+use crate::status::{codex_status, fastfetch_status, format_status_message};
+use crate::telegram::{CallbackQuery, InlineKeyboardButton, Message, TelegramClient, Update};
 use crate::text::{
     command_arg, is_ok_response, log_line_count, parse_command, session_label,
     split_telegram_message, tail_log_text,
 };
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -28,6 +29,14 @@ trait TelegramApi: Clone + Send + 'static {
         text: &str,
         reply_to_message_id: i64,
     ) -> Result<(), String>;
+    fn send_message_with_inline_keyboard(
+        &self,
+        chat_id: i64,
+        text: &str,
+        reply_to_message_id: i64,
+        buttons: &[InlineKeyboardButton],
+    ) -> Result<(), String>;
+    fn answer_callback_query(&self, callback_query_id: &str, text: &str) -> Result<(), String>;
     fn send_message_returning(
         &self,
         chat_id: i64,
@@ -68,6 +77,18 @@ impl TelegramApi for TelegramClient {
         reply_to_message_id: i64,
     ) -> Result<(), String> {
         self.send_message(chat_id, text, reply_to_message_id)
+    }
+    fn send_message_with_inline_keyboard(
+        &self,
+        chat_id: i64,
+        text: &str,
+        reply_to_message_id: i64,
+        buttons: &[InlineKeyboardButton],
+    ) -> Result<(), String> {
+        self.send_message_with_inline_keyboard(chat_id, text, reply_to_message_id, buttons)
+    }
+    fn answer_callback_query(&self, callback_query_id: &str, text: &str) -> Result<(), String> {
+        self.answer_callback_query(callback_query_id, text)
     }
 
     fn send_message_returning(
@@ -117,7 +138,10 @@ struct Job {
     thread_id: Option<i64>,
     reply_to_message_id: i64,
     prompt: String,
+    provider_model: ProviderModel,
 }
+
+type RuntimeSelections = Arc<Mutex<HashMap<SessionKey, ProviderModel>>>;
 
 struct TypingLoop {
     stop: Option<mpsc::Sender<()>>,
@@ -156,11 +180,12 @@ fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
     if let Err(err) = tg.sync_my_commands(&cfg.telegram_chat_ids) {
         eprintln!("telegram command sync failed; continuing without command refresh: {err}");
     }
+    let default_model = cfg.default_provider_model().clone();
     let store = SessionStore::new_with_provider(
         cfg.chat_state_dir.clone(),
         cfg.cron_state_dir.clone(),
-        default_model_for_provider(&cfg).to_string(),
-        cfg.provider,
+        default_model.model.clone(),
+        default_model.provider,
     );
     let status_codex = codex_status(&cfg);
     let status_fetch = fastfetch_status(&cfg.fastfetch_bin);
@@ -182,6 +207,7 @@ fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
     let (tx, rx) = mpsc::sync_channel::<Job>(cfg.queue_depth);
     let worker_cfg = cfg.clone();
     let _worker = thread::spawn(move || worker_loop(worker_cfg, rx));
+    let selections = RuntimeSelections::default();
 
     let mut offset = read_offset(&cfg.offset_file);
     if offset == 0 {
@@ -198,8 +224,15 @@ fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
             offset = advance_offset(offset, update.update_id);
             write_offset(&cfg.offset_file, offset)?;
             if let Some(message) = update.message {
-                if let Err(err) = handle_message(&cfg, &tg, &store, &tx, message) {
+                if let Err(err) = handle_message(&cfg, &tg, &store, &selections, &tx, message) {
                     eprintln!("[gateway] message handler failed: {err}");
+                }
+            }
+            if let Some(callback_query) = update.callback_query {
+                if let Err(err) =
+                    handle_callback_query(&cfg, &tg, &store, &selections, callback_query)
+                {
+                    eprintln!("[gateway] callback handler failed: {err}");
                 }
             }
         }
@@ -250,6 +283,7 @@ fn handle_message(
     cfg: &Config,
     tg: &impl TelegramApi,
     store: &SessionStore,
+    selections: &RuntimeSelections,
     tx: &mpsc::SyncSender<Job>,
     msg: Message,
 ) -> Result<(), String> {
@@ -265,7 +299,7 @@ fn handle_message(
     };
 
     if let Some(command) = parse_command(&text) {
-        return handle_command(cfg, tg, store, &msg, &text, &command);
+        return handle_command(cfg, tg, store, selections, &msg, &text, &command);
     }
 
     let queued = tx.try_send(Job {
@@ -273,6 +307,14 @@ fn handle_message(
         thread_id: msg.message_thread_id,
         reply_to_message_id: msg.message_id,
         prompt: text,
+        provider_model: selected_provider_model(
+            cfg,
+            selections,
+            &SessionKey::Chat {
+                chat_id: msg.chat.id,
+                thread_id: msg.message_thread_id,
+            },
+        ),
     });
     if queued.is_err() {
         tg.send_message(
@@ -290,6 +332,7 @@ fn handle_command(
     cfg: &Config,
     tg: &impl TelegramApi,
     store: &SessionStore,
+    selections: &RuntimeSelections,
     msg: &Message,
     text: &str,
     command: &str,
@@ -300,21 +343,18 @@ fn handle_command(
     };
     match command {
         "/log" => handle_log_command(cfg, tg, msg, text),
-        "/new" => handle_new_command(tg, store, msg, &key),
+        "/new" => handle_new_command(tg, store, selections, msg, &key),
         "/restart" => {
             tg.send_message(msg.chat.id, "🔄 Restarting gateway.", msg.message_id)?;
             restart_gateway(&cfg.launchd_target);
             Ok(())
         }
-        "/model" => handle_model_command(cfg, tg, store, msg, text, &key),
-        "/codex" => handle_provider_command(cfg, tg, store, msg, &key, Provider::Codex),
-        "/claude" => handle_provider_command(cfg, tg, store, msg, &key, Provider::Claude),
-        "/openrouter" => handle_provider_command(cfg, tg, store, msg, &key, Provider::Openrouter),
-        "/resume" => handle_resume_command(tg, store, msg, text, &key),
+        "/model" => handle_model_command(cfg, tg, store, selections, msg, text, &key),
+        "/resume" => handle_resume_command(tg, store, selections, msg, text, &key),
         "/rename" => handle_rename_command(tg, store, msg, text, &key),
         "/list" => send_long_message(tg, msg.chat.id, &store.list(&key), msg.message_id),
         "/help" | "/commands" => tg.send_message(msg.chat.id, &directive_help(), msg.message_id),
-        "/status" => handle_status_command(cfg, tg, store, msg, &key),
+        "/status" => handle_status_command(cfg, tg, store, selections, msg, &key),
         _ => tg.send_message(msg.chat.id, &unknown_directive_message(), msg.message_id),
     }
 }
@@ -335,15 +375,19 @@ fn handle_log_command(
 fn handle_new_command(
     tg: &impl TelegramApi,
     store: &SessionStore,
+    selections: &RuntimeSelections,
     msg: &Message,
     key: &SessionKey,
 ) -> Result<(), String> {
     match store.reset(key) {
-        Ok(state) => tg.send_message(
-            msg.chat.id,
-            &format!("🆕 New session ready. 🤖 Model: {}", state.model),
-            msg.message_id,
-        ),
+        Ok(state) => {
+            clear_selection(selections, key);
+            tg.send_message(
+                msg.chat.id,
+                &format!("🆕 New session ready. 🤖 Model: {}", state.model),
+                msg.message_id,
+            )
+        }
         Err(err) => tg.send_message(
             msg.chat.id,
             &format!("⚠️ Failed to reset session: {err}"),
@@ -356,107 +400,156 @@ fn handle_model_command(
     cfg: &Config,
     tg: &impl TelegramApi,
     store: &SessionStore,
+    selections: &RuntimeSelections,
     msg: &Message,
     text: &str,
     key: &SessionKey,
 ) -> Result<(), String> {
-    let model = command_arg(text);
-    if model.is_empty() {
-        let state = store.load(key);
-        return tg.send_message(msg.chat.id, &status_header(&state), msg.message_id);
-    }
-    if let Some(provider) = provider_for_model_slot(&model) {
-        return handle_provider_command(cfg, tg, store, msg, key, provider);
-    }
-    match store.set_model(key, &model) {
-        Ok(state) => {
-            save_gateway_config(
-                &cfg.gateway_config_file,
-                &gateway_config_for_state(cfg, state.provider, &state.model),
-            )?;
-            tg.send_message(
-                msg.chat.id,
-                &format!(
-                    "🤖 Model set to {}\n🧵 Session: {}",
-                    state.model,
-                    session_label(state.session_id.as_deref().unwrap_or(""))
-                ),
-                msg.message_id,
-            )
-        }
-        Err(err) => tg.send_message(
+    let arg = command_arg(text);
+    if arg.is_empty() {
+        return tg.send_message_with_inline_keyboard(
             msg.chat.id,
-            &format!("⚠️ Failed to set model: {err}"),
+            "🤖 Select model:",
             msg.message_id,
-        ),
+            &model_buttons(cfg),
+        );
     }
+    let Ok(index) = arg.parse::<usize>() else {
+        return tg.send_message(
+            msg.chat.id,
+            &format!(
+                "🧭 Usage: /model or /model 0..{}",
+                cfg.models.len().saturating_sub(1)
+            ),
+            msg.message_id,
+        );
+    };
+    select_model_slot(
+        cfg,
+        tg,
+        store,
+        selections,
+        msg.chat.id,
+        msg.message_id,
+        key,
+        index,
+    )
 }
 
-fn handle_provider_command(
+fn select_model_slot(
     cfg: &Config,
     tg: &impl TelegramApi,
     store: &SessionStore,
-    msg: &Message,
+    selections: &RuntimeSelections,
+    chat_id: i64,
+    reply_to_message_id: i64,
     key: &SessionKey,
-    provider: Provider,
+    index: usize,
 ) -> Result<(), String> {
-    let model = match provider {
-        Provider::Codex => cfg.codex_model.as_str(),
-        Provider::Claude => cfg.claude_model.as_str(),
-        Provider::Openrouter => cfg.openrouter_model.as_str(),
+    let Some(choice) = cfg.provider_model_at(index).cloned() else {
+        return tg.send_message(
+            chat_id,
+            &format!(
+                "🧭 Unknown model slot {index}. Use /model and choose one of 0..{}.",
+                cfg.models.len().saturating_sub(1)
+            ),
+            reply_to_message_id,
+        );
     };
-    match store.set_provider(key, provider, model) {
-        Ok(state) => {
-            save_gateway_config(
-                &cfg.gateway_config_file,
-                &gateway_config_for_state(cfg, state.provider, &state.model),
-            )?;
-            tg.send_message(
-                msg.chat.id,
-                &format!(
-                    "🔌 Provider set to {}\n🤖 Model: {}\n🧵 Session: {}",
-                    state.provider.label(),
-                    state.model,
-                    session_label(state.session_id.as_deref().unwrap_or(""))
-                ),
-                msg.message_id,
-            )
-        }
-        Err(err) => tg.send_message(
-            msg.chat.id,
-            &format!("⚠️ Failed to set provider: {err}"),
-            msg.message_id,
+    set_selection(selections, key, choice.clone());
+    store.reset(key)?;
+    tg.send_message(
+        chat_id,
+        &format!(
+            "🤖 Selected {}\n🧵 Session: none",
+            provider_model_label(&choice)
         ),
-    }
+        reply_to_message_id,
+    )
 }
 
-fn gateway_config_for_state(cfg: &Config, provider: Provider, model: &str) -> GatewayConfigFile {
-    let mut file = GatewayConfigFile {
-        model: cfg.codex_model.clone(),
-        provider,
-        claude_model: cfg.claude_model.clone(),
-        openrouter_model: cfg.openrouter_model.clone(),
-        timeout_mins: cfg.codex_timeout.as_secs() / 60,
+fn model_buttons(cfg: &Config) -> Vec<InlineKeyboardButton> {
+    cfg.models
+        .iter()
+        .enumerate()
+        .map(|(index, choice)| InlineKeyboardButton {
+            text: provider_model_label(choice),
+            callback_data: format!("model:{index}"),
+        })
+        .collect()
+}
+
+fn provider_model_label(choice: &ProviderModel) -> String {
+    format!("{}: {}", choice.provider.label(), choice.model)
+}
+
+fn selected_provider_model(
+    cfg: &Config,
+    selections: &RuntimeSelections,
+    key: &SessionKey,
+) -> ProviderModel {
+    selections
+        .lock()
+        .unwrap()
+        .get(key)
+        .cloned()
+        .unwrap_or_else(|| cfg.default_provider_model().clone())
+}
+
+fn set_selection(selections: &RuntimeSelections, key: &SessionKey, choice: ProviderModel) {
+    selections.lock().unwrap().insert(key.clone(), choice);
+}
+
+fn clear_selection(selections: &RuntimeSelections, key: &SessionKey) {
+    selections.lock().unwrap().remove(key);
+}
+
+fn handle_callback_query(
+    cfg: &Config,
+    tg: &impl TelegramApi,
+    store: &SessionStore,
+    selections: &RuntimeSelections,
+    query: CallbackQuery,
+) -> Result<(), String> {
+    let Some(message) = query.message.as_ref() else {
+        return tg.answer_callback_query(&query.id, "Message unavailable.");
     };
-    match provider {
-        Provider::Codex => file.model = model.to_string(),
-        Provider::Claude => file.claude_model = model.to_string(),
-        Provider::Openrouter => file.openrouter_model = model.to_string(),
+    if !is_allowed(&cfg.telegram_chat_ids, message.chat.id) {
+        return Ok(());
     }
-    file
-}
-
-fn default_model_for_provider(cfg: &Config) -> &str {
-    match cfg.provider {
-        Provider::Codex => &cfg.codex_model,
-        Provider::Claude => &cfg.claude_model,
-        Provider::Openrouter => &cfg.openrouter_model,
-    }
+    let Some(raw_index) = query.data.strip_prefix("model:") else {
+        return tg.answer_callback_query(&query.id, "Unknown action.");
+    };
+    let Ok(index) = raw_index.parse::<usize>() else {
+        return tg.answer_callback_query(&query.id, "Unknown model slot.");
+    };
+    let key = SessionKey::Chat {
+        chat_id: message.chat.id,
+        thread_id: message.message_thread_id,
+    };
+    let Some(choice) = cfg.provider_model_at(index).cloned() else {
+        return tg.answer_callback_query(&query.id, "Unknown model slot.");
+    };
+    set_selection(selections, &key, choice.clone());
+    store.reset(&key)?;
+    tg.answer_callback_query(
+        &query.id,
+        &format!("Selected {}", provider_model_label(&choice)),
+    )?;
+    tg.send_message(
+        message.chat.id,
+        &format!(
+            "🤖 Selected {}\n🧵 Session: none",
+            provider_model_label(&choice)
+        ),
+        message.message_id,
+    )
 }
 
 fn handle_resume_command(
     tg: &impl TelegramApi,
     store: &SessionStore,
+    selections: &RuntimeSelections,
     msg: &Message,
     text: &str,
     key: &SessionKey,
@@ -467,15 +560,18 @@ fn handle_resume_command(
         return send_long_message(tg, msg.chat.id, &body, msg.message_id);
     }
     match store.resume(key, &target) {
-        Ok(state) => tg.send_message(
-            msg.chat.id,
-            &format!(
-                "↩️ Resumed session {}\n🤖 Model: {}",
-                session_label(state.session_id.as_deref().unwrap_or("")),
-                state.model
-            ),
-            msg.message_id,
-        ),
+        Ok(state) => {
+            clear_selection(selections, key);
+            tg.send_message(
+                msg.chat.id,
+                &format!(
+                    "↩️ Resumed session {}\n🤖 Model: {}",
+                    session_label(state.session_id.as_deref().unwrap_or("")),
+                    state.model
+                ),
+                msg.message_id,
+            )
+        }
         Err(err) => tg.send_message(msg.chat.id, &err, msg.message_id),
     }
 }
@@ -508,6 +604,7 @@ fn handle_status_command(
     cfg: &Config,
     tg: &impl TelegramApi,
     store: &SessionStore,
+    selections: &RuntimeSelections,
     msg: &Message,
     key: &SessionKey,
 ) -> Result<(), String> {
@@ -516,7 +613,7 @@ fn handle_status_command(
         tg,
         msg.chat.id,
         &format_status_message(
-            &state,
+            &state_with_provider_model(&state, &selected_provider_model(cfg, selections, key)),
             &codex_status(cfg),
             &fastfetch_status(&cfg.fastfetch_bin),
         ),
@@ -524,13 +621,24 @@ fn handle_status_command(
     )
 }
 
+fn state_with_provider_model(
+    state: &crate::session::ChatSession,
+    choice: &ProviderModel,
+) -> crate::session::ChatSession {
+    let mut state = state.clone();
+    state.provider = choice.provider;
+    state.model = choice.model.clone();
+    state
+}
+
 fn worker_loop(cfg: Config, rx: mpsc::Receiver<Job>) {
     let tg = TelegramClient::new(&cfg.bot_token);
+    let default_model = cfg.default_provider_model().clone();
     let store = SessionStore::new_with_provider(
         cfg.chat_state_dir.clone(),
         cfg.cron_state_dir.clone(),
-        default_model_for_provider(&cfg).to_string(),
-        cfg.provider,
+        default_model.model,
+        default_model.provider,
     );
     for job in rx {
         if let Err(err) = run_job(&cfg, &tg, &store, job) {
@@ -555,8 +663,8 @@ fn run_job(
         "[gateway] job start chat={} reply_to={} provider={} model={} session={} prompt_chars={} timeout_secs={}",
         job.chat_id,
         job.reply_to_message_id,
-        state.provider.label(),
-        state.model,
+        job.provider_model.provider.label(),
+        job.provider_model.model,
         session_label(state.session_id.as_deref().unwrap_or("")),
         job.prompt.chars().count(),
         cfg.codex_timeout.as_secs()
@@ -567,45 +675,26 @@ fn run_job(
     let mut last_edit = Instant::now();
     let run_result = {
         let _typing = start_typing_loop(tg, job.chat_id);
-        match state.provider {
-            Provider::Codex => run_codex_stream(
-                &CodexConfig::from(cfg),
-                &job.prompt,
-                state.session_id.as_deref(),
-                &state.model,
-                cfg.codex_timeout,
-                &cfg.state_dir,
-                |chunk| {
-                    streamed.push_str(chunk);
-                    if last_edit.elapsed() >= Duration::from_millis(1200) {
-                        let _ = tg.edit_message_text(
-                            job.chat_id,
-                            stream_message_id,
-                            &stream_preview(&streamed),
-                        );
-                        last_edit = Instant::now();
-                    }
-                },
-            ),
-            Provider::Claude => run_claude(
-                &ApiProviderConfig::from(cfg),
-                &job.prompt,
-                cfg.codex_timeout,
-            )
-            .map(|output| crate::codex::CodexOutput {
-                final_text: output.final_text,
-                session_id: None,
-            }),
-            Provider::Openrouter => run_openrouter(
-                &ApiProviderConfig::from(cfg),
-                &job.prompt,
-                cfg.codex_timeout,
-            )
-            .map(|output| crate::codex::CodexOutput {
-                final_text: output.final_text,
-                session_id: None,
-            }),
-        }
+        run_codex_stream(
+            &CodexConfig::from(cfg),
+            &job.prompt,
+            state.session_id.as_deref(),
+            job.provider_model.provider,
+            &job.provider_model.model,
+            cfg.codex_timeout,
+            &cfg.state_dir,
+            |chunk| {
+                streamed.push_str(chunk);
+                if last_edit.elapsed() >= Duration::from_millis(1200) {
+                    let _ = tg.edit_message_text(
+                        job.chat_id,
+                        stream_message_id,
+                        &stream_preview(&streamed),
+                    );
+                    last_edit = Instant::now();
+                }
+            },
+        )
     };
     let output = match run_result {
         Ok(output) => output,
@@ -613,14 +702,14 @@ fn run_job(
             eprintln!(
                 "[gateway] job provider failed chat={} provider={} elapsed_ms={} error={}",
                 job.chat_id,
-                state.provider.label(),
+                job.provider_model.provider.label(),
                 started.elapsed().as_millis(),
                 single_line(&err)
             );
             send_long_message(
                 tg,
                 job.chat_id,
-                &format!("⚠️ {} failed:\n{err}", state.provider.label()),
+                &format!("⚠️ {} failed:\n{err}", job.provider_model.provider.label()),
                 job.reply_to_message_id,
             )?;
             return Ok(());
@@ -774,7 +863,7 @@ pub const fn typing_refresh_interval() -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telegram::Chat;
+    use crate::telegram::{Chat, User};
     use std::collections::VecDeque;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -815,10 +904,12 @@ mod tests {
             crate::telegram::Update {
                 update_id: 4,
                 message: None,
+                callback_query: None,
             },
             crate::telegram::Update {
                 update_id: 9,
                 message: None,
+                callback_query: None,
             },
         ];
 
@@ -859,6 +950,7 @@ mod tests {
         tg.push_update(Ok(vec![Update {
             update_id: 4,
             message: None,
+            callback_query: None,
         }]));
         tg.push_update(Err("stop".to_string()));
 
@@ -904,6 +996,7 @@ mod tests {
         tg.push_update(Ok(vec![Update {
             update_id: 10,
             message: Some(message(42, 11, "/help")),
+            callback_query: None,
         }]));
         tg.push_update(Err("stop".to_string()));
 
@@ -923,6 +1016,7 @@ mod tests {
         tg.push_update(Ok(vec![Update {
             update_id: 10,
             message: Some(message(42, 11, "/help")),
+            callback_query: None,
         }]));
         tg.push_update(Err("stop".to_string()));
         tg.fail_sends("send failed");
@@ -973,20 +1067,37 @@ mod tests {
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
             cfg.cron_state_dir.clone(),
-            cfg.codex_model.clone(),
+            cfg.default_provider_model().model.clone(),
         );
         let tg = FakeTelegram::new();
+        let selections = RuntimeSelections::default();
         let (tx, rx) = mpsc::sync_channel(1);
 
-        handle_message(&cfg, &tg, &store, &tx, message(9, 1, "ignored")).unwrap();
+        handle_message(
+            &cfg,
+            &tg,
+            &store,
+            &selections,
+            &tx,
+            message(9, 1, "ignored"),
+        )
+        .unwrap();
         assert!(tg.calls().is_empty());
 
-        handle_message(&cfg, &tg, &store, &tx, message(42, 2, "  ")).unwrap();
+        handle_message(&cfg, &tg, &store, &selections, &tx, message(42, 2, "  ")).unwrap();
         assert!(tg.calls().iter().any(|call| {
             matches!(call, Call::Send { text, reply_to: 2, .. } if text == "📝 Text messages only.")
         }));
 
-        handle_message(&cfg, &tg, &store, &tx, message(42, 3, "run this")).unwrap();
+        handle_message(
+            &cfg,
+            &tg,
+            &store,
+            &selections,
+            &tx,
+            message(42, 3, "run this"),
+        )
+        .unwrap();
         let job = rx.recv().unwrap();
         assert_eq!(job.chat_id, 42);
         assert_eq!(job.reply_to_message_id, 3);
@@ -997,7 +1108,15 @@ mod tests {
         }));
 
         let (full_tx, _full_rx) = mpsc::sync_channel(0);
-        handle_message(&cfg, &tg, &store, &full_tx, message(42, 4, "queued")).unwrap();
+        handle_message(
+            &cfg,
+            &tg,
+            &store,
+            &selections,
+            &full_tx,
+            message(42, 4, "queued"),
+        )
+        .unwrap();
         assert!(tg.calls().iter().any(|call| {
             matches!(call, Call::Send { text, reply_to: 4, .. } if text.contains("🚦 Codex queue is full"))
         }));
@@ -1010,14 +1129,22 @@ mod tests {
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
             cfg.cron_state_dir.clone(),
-            cfg.codex_model.clone(),
+            cfg.default_provider_model().model.clone(),
         );
         let tg = FakeTelegram::new();
         tg.fail_sends("send failed");
+        let selections = RuntimeSelections::default();
         let (full_tx, _full_rx) = mpsc::sync_channel(0);
 
-        let err =
-            handle_message(&cfg, &tg, &store, &full_tx, message(42, 4, "queued")).unwrap_err();
+        let err = handle_message(
+            &cfg,
+            &tg,
+            &store,
+            &selections,
+            &full_tx,
+            message(42, 4, "queued"),
+        )
+        .unwrap_err();
 
         assert_eq!(err, "send failed");
     }
@@ -1029,24 +1156,34 @@ mod tests {
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
             cfg.cron_state_dir.clone(),
-            cfg.codex_model.clone(),
+            cfg.default_provider_model().model.clone(),
         );
         let tg = FakeTelegram::new();
+        let selections = RuntimeSelections::default();
         let msg = message(42, 10, "/commands");
         let key = SessionKey::Chat {
             chat_id: 42,
             thread_id: None,
         };
 
-        handle_command(&cfg, &tg, &store, &msg, "/log", "/log").unwrap();
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/log", "/log").unwrap();
         fs::create_dir_all(cfg.gateway_log_file.parent().unwrap()).unwrap();
         fs::write(&cfg.gateway_log_file, "one\ntwo\nthree\n").unwrap();
-        handle_command(&cfg, &tg, &store, &msg, "/log 2", "/log").unwrap();
-        handle_command(&cfg, &tg, &store, &msg, "/new", "/new").unwrap();
-        handle_command(&cfg, &tg, &store, &msg, "/model", "/model").unwrap();
-        handle_command(&cfg, &tg, &store, &msg, "/model gpt-next", "/model").unwrap();
-        handle_command(&cfg, &tg, &store, &msg, "/resume", "/resume").unwrap();
-        handle_command(&cfg, &tg, &store, &msg, "/resume missing", "/resume").unwrap();
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/log 2", "/log").unwrap();
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/new", "/new").unwrap();
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/model", "/model").unwrap();
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/model 0", "/model").unwrap();
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/resume", "/resume").unwrap();
+        handle_command(
+            &cfg,
+            &tg,
+            &store,
+            &selections,
+            &msg,
+            "/resume missing",
+            "/resume",
+        )
+        .unwrap();
         store
             .save_run(&key, store.load(&key).generation, "session-12345678")
             .unwrap();
@@ -1054,19 +1191,38 @@ mod tests {
             &cfg,
             &tg,
             &store,
+            &selections,
             &msg,
             "/resume session-12345678",
             "/resume",
         )
         .unwrap();
-        handle_command(&cfg, &tg, &store, &msg, "/rename", "/rename").unwrap();
-        handle_command(&cfg, &tg, &store, &msg, "/rename work", "/rename").unwrap();
-        handle_command(&cfg, &tg, &store, &msg, "/list", "/list").unwrap();
-        handle_command(&cfg, &tg, &store, &msg, "/help", "/help").unwrap();
-        handle_command(&cfg, &tg, &store, &msg, "/commands", "/commands").unwrap();
-        handle_command(&cfg, &tg, &store, &msg, "/status", "/status").unwrap();
-        handle_command(&cfg, &tg, &store, &msg, "/restart", "/restart").unwrap();
-        handle_command(&cfg, &tg, &store, &msg, "/wat", "/wat").unwrap();
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/rename", "/rename").unwrap();
+        handle_command(
+            &cfg,
+            &tg,
+            &store,
+            &selections,
+            &msg,
+            "/rename work",
+            "/rename",
+        )
+        .unwrap();
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/list", "/list").unwrap();
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/help", "/help").unwrap();
+        handle_command(
+            &cfg,
+            &tg,
+            &store,
+            &selections,
+            &msg,
+            "/commands",
+            "/commands",
+        )
+        .unwrap();
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/status", "/status").unwrap();
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/restart", "/restart").unwrap();
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/wat", "/wat").unwrap();
 
         let sent = tg.sent_text();
         assert!(sent
@@ -1079,7 +1235,7 @@ mod tests {
         assert!(sent.iter().any(|text| text.contains("🤖 Model: gpt-test")));
         assert!(sent
             .iter()
-            .any(|text| text.contains("🤖 Model set to gpt-next")));
+            .any(|text| text.contains("🤖 Selected Codex: gpt-test")));
         assert!(sent.iter().any(|text| text.contains("🧭 Usage: /resume")));
         assert!(sent
             .iter()
@@ -1097,6 +1253,136 @@ mod tests {
     }
 
     #[test]
+    fn model_command_shows_configured_model_buttons() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.cron_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let tg = FakeTelegram::new();
+        let selections = RuntimeSelections::default();
+        let msg = message(42, 10, "/model");
+
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/model", "/model").unwrap();
+
+        assert!(tg.calls().iter().any(|call| {
+            matches!(
+                call,
+                Call::SendKeyboard { text, buttons, .. }
+                    if text == "🤖 Select model:"
+                        && buttons.iter().map(|button| button.text.as_str()).collect::<Vec<_>>()
+                            == vec![
+                                "Codex: gpt-test",
+                                "Claude: claude-test",
+                                "OpenRouter: openrouter/test"
+                            ]
+                        && buttons.iter().map(|button| button.callback_data.as_str()).collect::<Vec<_>>()
+                            == vec!["model:0", "model:1", "model:2"]
+            )
+        }));
+    }
+
+    #[test]
+    fn model_command_reports_usage_for_invalid_index() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.cron_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let tg = FakeTelegram::new();
+        let selections = RuntimeSelections::default();
+        let msg = message(42, 10, "/model nope");
+
+        handle_command(
+            &cfg,
+            &tg,
+            &store,
+            &selections,
+            &msg,
+            "/model nope",
+            "/model",
+        )
+        .unwrap();
+
+        assert!(tg
+            .sent_text()
+            .iter()
+            .any(|text| text == "🧭 Usage: /model or /model 0..2"));
+    }
+
+    #[test]
+    fn model_index_selection_is_in_memory_and_resets_on_new_session() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.cron_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let tg = FakeTelegram::new();
+        let selections = RuntimeSelections::default();
+        let (tx, rx) = mpsc::sync_channel(1);
+        let msg = message(42, 10, "/model");
+
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/model 1", "/model").unwrap();
+        handle_message(&cfg, &tg, &store, &selections, &tx, message(42, 11, "run")).unwrap();
+        let selected_job = rx.recv().unwrap();
+        assert_eq!(selected_job.provider_model.provider, Provider::Claude);
+        assert_eq!(selected_job.provider_model.model, "claude-test");
+        assert!(!cfg.gateway_config_file.exists());
+
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/new", "/new").unwrap();
+        handle_message(
+            &cfg,
+            &tg,
+            &store,
+            &selections,
+            &tx,
+            message(42, 12, "run again"),
+        )
+        .unwrap();
+        let default_job = rx.recv().unwrap();
+        assert_eq!(default_job.provider_model.provider, Provider::Codex);
+        assert_eq!(default_job.provider_model.model, "gpt-test");
+    }
+
+    #[test]
+    fn callback_query_selects_model_slot() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.cron_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let tg = FakeTelegram::new();
+        let selections = RuntimeSelections::default();
+        let (tx, rx) = mpsc::sync_channel(1);
+
+        handle_callback_query(
+            &cfg,
+            &tg,
+            &store,
+            &selections,
+            callback_query("callback-1", message(42, 10, "/model"), "model:2"),
+        )
+        .unwrap();
+        handle_message(&cfg, &tg, &store, &selections, &tx, message(42, 11, "run")).unwrap();
+
+        assert!(tg.calls().contains(&Call::AnswerCallback {
+            callback_query_id: "callback-1".to_string(),
+            text: "Selected OpenRouter: openrouter/test".to_string(),
+        }));
+        let job = rx.recv().unwrap();
+        assert_eq!(job.provider_model.provider, Provider::Openrouter);
+        assert_eq!(job.provider_model.model, "openrouter/test");
+    }
+
+    #[test]
     fn handle_command_reports_session_and_config_write_errors() {
         let dir = tempdir().unwrap();
         let mut cfg = test_config(dir.path());
@@ -1106,36 +1392,29 @@ mod tests {
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
             cfg.cron_state_dir.clone(),
-            cfg.codex_model.clone(),
+            cfg.default_provider_model().model.clone(),
         );
         let tg = FakeTelegram::new();
+        let selections = RuntimeSelections::default();
         let msg = message(42, 10, "/new");
 
-        handle_command(&cfg, &tg, &store, &msg, "/new", "/new").unwrap();
-        handle_command(&cfg, &tg, &store, &msg, "/model gpt-fail", "/model").unwrap();
-        handle_command(&cfg, &tg, &store, &msg, "/rename work", "/rename").unwrap();
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/new", "/new").unwrap();
+        handle_command(
+            &cfg,
+            &tg,
+            &store,
+            &selections,
+            &msg,
+            "/rename work",
+            "/rename",
+        )
+        .unwrap();
 
         let sent = tg.sent_text();
         assert!(sent
             .iter()
             .any(|text| text.contains("⚠️ Failed to reset session")));
-        assert!(sent.iter().any(|text| text.contains("Failed to set model")));
         assert!(sent.iter().any(|text| text.contains("No current session")));
-
-        let mut cfg = test_config(dir.path());
-        let store = SessionStore::new(
-            cfg.chat_state_dir.clone(),
-            cfg.cron_state_dir.clone(),
-            cfg.codex_model.clone(),
-        );
-        let key = SessionKey::Chat {
-            chat_id: 42,
-            thread_id: None,
-        };
-        store.save_run(&key, 0, "session-123").unwrap();
-        cfg.gateway_config_file = blocked.join("config.json");
-        let err = handle_command(&cfg, &tg, &store, &msg, "/model gpt-fail", "/model").unwrap_err();
-        assert!(err.contains("create gateway config dir"));
     }
 
     #[test]
@@ -1159,7 +1438,7 @@ printf 'session id: session-ok\n' >&2
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
             cfg.cron_state_dir.clone(),
-            cfg.codex_model.clone(),
+            cfg.default_provider_model().model.clone(),
         );
         let tg = FakeTelegram::new();
 
@@ -1212,7 +1491,7 @@ printf 'final text\n' > "$out"
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
             cfg.cron_state_dir.clone(),
-            cfg.codex_model.clone(),
+            cfg.default_provider_model().model.clone(),
         );
         let tg = FakeTelegram::new();
         tg.push_effect(Ok(message_with_effect(200, None)));
@@ -1260,7 +1539,7 @@ printf '%s\n' '{}' > "$out"
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
             cfg.cron_state_dir.clone(),
-            cfg.codex_model.clone(),
+            cfg.default_provider_model().model.clone(),
         );
         let tg = FakeTelegram::new();
 
@@ -1290,7 +1569,7 @@ exit 2
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
             cfg.cron_state_dir.clone(),
-            cfg.codex_model.clone(),
+            cfg.default_provider_model().model.clone(),
         );
         let tg = FakeTelegram::new();
 
@@ -1316,7 +1595,7 @@ exit 2
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
             cfg.cron_state_dir.clone(),
-            cfg.codex_model.clone(),
+            cfg.default_provider_model().model.clone(),
         );
         let tg = FakeTelegram::new();
         tg.fail_sends("send failed");
@@ -1384,6 +1663,16 @@ exit 2
         Send {
             chat_id: i64,
             reply_to: i64,
+            text: String,
+        },
+        SendKeyboard {
+            chat_id: i64,
+            reply_to: i64,
+            text: String,
+            buttons: Vec<InlineKeyboardButton>,
+        },
+        AnswerCallback {
+            callback_query_id: String,
             text: String,
         },
         SendReturning {
@@ -1519,6 +1808,38 @@ exit 2
             }
             Ok(())
         }
+
+        fn send_message_with_inline_keyboard(
+            &self,
+            chat_id: i64,
+            text: &str,
+            reply_to_message_id: i64,
+            buttons: &[InlineKeyboardButton],
+        ) -> Result<(), String> {
+            let send_error = {
+                let mut state = self.state.lock().unwrap();
+                state.calls.push(Call::SendKeyboard {
+                    chat_id,
+                    reply_to: reply_to_message_id,
+                    text: text.to_string(),
+                    buttons: buttons.to_vec(),
+                });
+                state.send_error.clone()
+            };
+            if let Some(err) = send_error {
+                return Err(err);
+            }
+            Ok(())
+        }
+
+        fn answer_callback_query(&self, callback_query_id: &str, text: &str) -> Result<(), String> {
+            self.state.lock().unwrap().calls.push(Call::AnswerCallback {
+                callback_query_id: callback_query_id.to_string(),
+                text: text.to_string(),
+            });
+            Ok(())
+        }
+
         fn send_message_returning(
             &self,
             chat_id: i64,
@@ -1639,12 +1960,20 @@ printf 'OS: test\n'
             gateway_config_file: root.join("config/gateway/config.json"),
             codex_bin: codex,
             codex_workdir: root.to_path_buf(),
-            codex_model: "gpt-test".to_string(),
-            provider: Provider::Codex,
-            claude_model: "claude-test".to_string(),
-            openrouter_model: "openrouter/test".to_string(),
-            anthropic_api_key: Some("anthropic-key".to_string()),
-            openrouter_api_key: Some("openrouter-key".to_string()),
+            models: vec![
+                ProviderModel {
+                    provider: Provider::Codex,
+                    model: "gpt-test".to_string(),
+                },
+                ProviderModel {
+                    provider: Provider::Claude,
+                    model: "claude-test".to_string(),
+                },
+                ProviderModel {
+                    provider: Provider::Openrouter,
+                    model: "openrouter/test".to_string(),
+                },
+            ],
             fastfetch_bin: fastfetch,
             state_dir: root.join("state/gateway"),
             chat_state_dir: root.join("state/gateway/chats"),
@@ -1674,12 +2003,28 @@ printf 'OS: test\n'
         }
     }
 
+    fn callback_query(id: &str, message: Message, data: &str) -> CallbackQuery {
+        CallbackQuery {
+            id: id.to_string(),
+            from: User {
+                id: 1,
+                username: String::new(),
+            },
+            message: Some(message),
+            data: data.to_string(),
+        }
+    }
+
     fn job(prompt: &str) -> Job {
         Job {
             chat_id: 42,
             thread_id: None,
             reply_to_message_id: 7,
             prompt: prompt.to_string(),
+            provider_model: ProviderModel {
+                provider: Provider::Codex,
+                model: "gpt-test".to_string(),
+            },
         }
     }
 

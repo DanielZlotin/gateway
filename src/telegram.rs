@@ -33,6 +33,8 @@ pub struct TelegramResponse<T> {
 pub struct Update {
     pub update_id: i64,
     pub message: Option<Message>,
+    #[serde(default)]
+    pub callback_query: Option<CallbackQuery>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,6 +50,16 @@ pub struct Message {
     pub text: String,
     #[serde(default)]
     pub caption: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CallbackQuery {
+    pub id: String,
+    pub from: User,
+    #[serde(default)]
+    pub message: Option<Message>,
+    #[serde(default)]
+    pub data: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,7 +110,7 @@ impl TelegramClient {
             .agent
             .get(&format!("{}/getUpdates", self.base_url))
             .query("timeout", &timeout_sec.to_string())
-            .query("allowed_updates", r#"["message"]"#);
+            .query("allowed_updates", r#"["message","callback_query"]"#);
         if offset > 0 {
             request = request.query("offset", &offset.to_string());
         }
@@ -115,6 +127,41 @@ impl TelegramClient {
         let plain_values = send_message_values(chat_id, text, reply_to_message_id, None, false);
         let _: serde_json::Value =
             self.post_form_with_plain_text_retry("sendMessage", &values, &plain_values)?;
+        Ok(())
+    }
+
+    pub fn send_message_with_inline_keyboard(
+        &self,
+        chat_id: i64,
+        text: &str,
+        reply_to_message_id: i64,
+        buttons: &[InlineKeyboardButton],
+    ) -> Result<(), String> {
+        let values = send_message_with_inline_keyboard_values(
+            chat_id,
+            text,
+            reply_to_message_id,
+            buttons,
+            true,
+        )?;
+        let plain_values = send_message_with_inline_keyboard_values(
+            chat_id,
+            text,
+            reply_to_message_id,
+            buttons,
+            false,
+        )?;
+        let _: serde_json::Value =
+            self.post_form_with_plain_text_retry("sendMessage", &values, &plain_values)?;
+        Ok(())
+    }
+
+    pub fn answer_callback_query(&self, callback_query_id: &str, text: &str) -> Result<(), String> {
+        let mut values = vec![("callback_query_id", callback_query_id.to_string())];
+        if !text.trim().is_empty() {
+            values.push(("text", text.to_string()));
+        }
+        let _: bool = self.post_form("answerCallbackQuery", &values)?;
         Ok(())
     }
 
@@ -305,6 +352,12 @@ impl TelegramClient {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InlineKeyboardButton {
+    pub text: String,
+    pub callback_data: String,
+}
+
 fn edit_message_values(
     chat_id: i64,
     message_id: i64,
@@ -321,6 +374,27 @@ fn edit_message_values(
         values.push(("parse_mode", TELEGRAM_PARSE_MODE.to_string()));
     }
     values
+}
+
+fn send_message_with_inline_keyboard_values(
+    chat_id: i64,
+    text: &str,
+    reply_to_message_id: i64,
+    buttons: &[InlineKeyboardButton],
+    parse_markdown: bool,
+) -> Result<Vec<(&'static str, String)>, String> {
+    let mut values = send_message_values(chat_id, text, reply_to_message_id, None, parse_markdown);
+    values.push((
+        "reply_markup",
+        serde_json::to_string(&serde_json::json!({
+            "inline_keyboard": buttons
+                .iter()
+                .map(|button| vec![button])
+                .collect::<Vec<_>>()
+        }))
+        .map_err(|err| err.to_string())?,
+    ));
+    Ok(values)
 }
 
 fn send_message_values(
@@ -379,10 +453,7 @@ pub fn supported_bot_commands() -> Vec<BotCommand> {
         ("log", "📜 Send recent gateway logs."),
         ("new", "🆕 Start a fresh Codex session."),
         ("restart", "🔄 Restart the gateway service."),
-        ("model", "🤖 Show/set model or switch provider slot."),
-        ("codex", "🧠 Use Codex subscription auth."),
-        ("claude", "🟣 Use Claude API key."),
-        ("openrouter", "🌐 Use OpenRouter API key."),
+        ("model", "🤖 Choose a configured provider/model."),
         ("resume", "↩️ Resume a saved session."),
         ("rename", "🏷️ Rename the current session."),
         ("list", "💾 List saved sessions."),
@@ -473,18 +544,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "commands",
-                "help",
-                "status",
-                "log",
-                "new",
-                "restart",
-                "model",
-                "codex",
-                "claude",
-                "openrouter",
-                "resume",
-                "rename",
+                "commands", "help", "status", "log", "new", "restart", "model", "resume", "rename",
                 "list"
             ]
         );

@@ -33,7 +33,7 @@ pub struct SavedSession {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SessionKey {
     Chat {
         chat_id: i64,

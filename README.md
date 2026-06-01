@@ -27,17 +27,15 @@ and deduplicated.
 ⚙️ Optional:
 
 1. 📁 `GATEWAY_CODEX_WORKDIR`: Codex working directory.
-2. 🤖 `GATEWAY_CLAUDE_MODEL`: overrides the configured Claude model.
-3. 🌐 `GATEWAY_OPENROUTER_MODEL`: overrides the configured OpenRouter model.
-4. 📁 `XDG_CONFIG_HOME`: defaults to `$HOME/.config`.
-5. 📁 `XDG_CACHE_HOME`: defaults to `$HOME/.cache`.
-6. 📁 `XDG_DATA_HOME`: defaults to `$HOME/.local/share`.
-7. 📁 `XDG_STATE_HOME`: defaults to `$HOME/.local/state`.
+2. 📁 `XDG_CONFIG_HOME`: defaults to `$HOME/.config`.
+3. 📁 `XDG_CACHE_HOME`: defaults to `$HOME/.cache`.
+4. 📁 `XDG_DATA_HOME`: defaults to `$HOME/.local/share`.
+5. 📁 `XDG_STATE_HOME`: defaults to `$HOME/.local/state`.
 
 🔐 Provider API keys:
 
-1. 🟣 `ANTHROPIC_API_KEY`: required only when Claude is selected.
-2. 🌐 `OPENROUTER_API_KEY`: required only when OpenRouter is selected.
+1. 🟣 `ANTHROPIC_API_KEY`: required when Claude is selected.
+2. 🌐 `OPENROUTER_API_KEY`: required when OpenRouter is selected.
 
 📌 Fixed runtime values:
 
@@ -68,22 +66,33 @@ Gateway creates and normalizes `gateway/config.json` under the resolved
 
 ```json
 {
-  "model": "gpt-5.5",
-  "provider": "codex",
-  "claude_model": "claude-sonnet-4-5-20250929",
-  "openrouter_model": "openai/gpt-5.5",
+  "models": [
+    {
+      "provider": "codex",
+      "model": "gpt-5.5"
+    },
+    {
+      "provider": "claude",
+      "model": "claude-opus-4-8"
+    },
+    {
+      "provider": "openrouter",
+      "model": "openai/gpt-5.5"
+    }
+  ],
   "timeout_mins": 30
 }
 ```
 
 📋 Rules:
 
-1. 🤖 Blank `model` resets to `gpt-5.5`.
+1. 🤖 `models` is an ordered array of `{ "provider", "model" }` entries.
 2. ⏱️ `timeout_mins: 0` resets to `30`.
 3. ⚠️ Overflowing `timeout_mins` fails config load.
-4. 🔌 `provider` is `codex`, `claude`, or `openrouter`.
-5. 💾 `/model NAME` updates the active provider's model and persists it without
-   changing `timeout_mins`.
+4. 🔌 Each `provider` is `codex`, `claude`, or `openrouter`.
+5. 🧠 Default config includes Codex, Claude, and OpenRouter slots; if `models`
+   is empty, a Codex slot is inserted.
+6. 💾 `/model` selections are session-only and do not rewrite config.
 
 ## 💾 State
 
@@ -175,10 +184,7 @@ defaults to `10` lines, caps at `200`, and uses the resolved `XDG_STATE_HOME`.
 📜 /log [lines] - send recent gateway logs
 🆕 /new - start a fresh Codex session
 🔄 /restart - restart the gateway service
-🤖 /model [name|1|2|3] - show/set model or switch provider slot
-🧠 /codex - switch to Codex subscription auth
-🟣 /claude - switch to Claude API key
-🌐 /openrouter - switch to OpenRouter API key
+🤖 /model [index] - choose a configured provider/model
 ↩️ /resume SESSION_OR_NAME - resume a saved session
 🏷️ /rename NAME - rename the current session
 💾 /list - list saved sessions
@@ -190,11 +196,10 @@ defaults to `10` lines, caps at `200`, and uses the resolved `XDG_STATE_HOME`.
 2. 📜 `/log` defaults to `10` lines and caps at `200`.
 3. 🆕 `/new` clears current session ID and increments generation.
 4. 🔄 `/restart` spawns `/bin/launchctl kickstart -k <target>`.
-5. 🤖 `/model` with no argument shows status; with a name updates the active
-   provider model.
-6. 🔢 `/model 1`, `/model 2`, and `/model 3` switch to Codex, Claude, and
-   OpenRouter respectively.
-7. 🔌 `/codex`, `/claude`, and `/openrouter` switch provider directly.
+5. 🤖 `/model` with no argument sends inline buttons for every configured
+   provider/model slot.
+6. 🔢 `/model 0`, `/model 1`, etc. select by zero-based `models` array index.
+7. 🧠 `/new` and `/resume` return the chat to `models[0]`.
 8. ↩️ `/resume` matches full ID, first 8 chars, or saved name.
 9. 🏷️ `/rename` requires a current session.
 10. 💾 `/list` marks the current saved session with `⭐`.
@@ -203,13 +208,43 @@ defaults to `10` lines, caps at `200`, and uses the resolved `XDG_STATE_HOME`.
 ## 🧠 Codex
 
 Gateway injects `src/SYSTEM.md` as `developer_instructions`, enables live search,
-passes prompts on stdin, and lets Codex inherit Gateway's environment.
-Codex uses the existing logged-in subscription auth; the gateway does not log out
-or replace Codex credentials.
+passes prompts on stdin, and lets Codex inherit Gateway's environment. All
+providers run through Codex.
 
-Claude and OpenRouter are API-key based by design. They use `ANTHROPIC_API_KEY`
-and `OPENROUTER_API_KEY` from the inherited environment when their provider is
-selected.
+`codex` provider slots use the existing logged-in Codex subscription auth.
+`claude` provider slots start a loopback Anthropic adapter, then run Codex with
+provider overrides equivalent to:
+
+```toml
+model_provider = "anthropic-gateway"
+
+[model_providers.anthropic-gateway]
+name = "Anthropic Gateway"
+base_url = "http://127.0.0.1:<ephemeral>/v1"
+env_key = "ANTHROPIC_API_KEY"
+wire_api = "responses"
+```
+
+The adapter translates Codex Responses API requests to Anthropic's
+OpenAI-compatible `/v1/chat/completions` endpoint and returns Responses-style
+SSE events to Codex. It is local to one Codex run and does not use OpenRouter.
+
+`openrouter` provider slots run Codex with OpenRouter provider overrides
+equivalent to:
+
+```toml
+model_provider = "openrouter"
+
+[model_providers.openrouter]
+name = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+env_key = "OPENROUTER_API_KEY"
+wire_api = "responses"
+```
+
+Gateway does not write Codex credentials or edit Codex `config.toml`; Codex reads
+the selected provider API key from the inherited environment. Model names come
+from `models` in `gateway/config.json`, not from provider model env overrides.
 
 🆕 New sessions:
 

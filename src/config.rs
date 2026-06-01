@@ -9,7 +9,7 @@ use std::time::Duration;
 
 pub const GATEWAY_TELEGRAM_TOKEN_ENV: &str = "GATEWAY_TELEGRAM_TOKEN";
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.5";
-pub const DEFAULT_CLAUDE_MODEL: &str = "claude-sonnet-4-5-20250929";
+pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-4-8";
 pub const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-5.5";
 pub const DEFAULT_CODEX_TIMEOUT_MINS: u64 = 30;
 
@@ -24,12 +24,7 @@ pub struct Config {
     pub gateway_config_file: PathBuf,
     pub codex_bin: PathBuf,
     pub codex_workdir: PathBuf,
-    pub codex_model: String,
-    pub provider: Provider,
-    pub claude_model: String,
-    pub openrouter_model: String,
-    pub anthropic_api_key: Option<String>,
-    pub openrouter_api_key: Option<String>,
+    pub models: Vec<ProviderModel>,
     pub fastfetch_bin: PathBuf,
     pub state_dir: PathBuf,
     pub chat_state_dir: PathBuf,
@@ -44,16 +39,16 @@ pub struct Config {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayConfigFile {
-    #[serde(default = "default_codex_model")]
-    pub model: String,
-    #[serde(default)]
-    pub provider: Provider,
-    #[serde(default = "default_claude_model")]
-    pub claude_model: String,
-    #[serde(default = "default_openrouter_model")]
-    pub openrouter_model: String,
+    #[serde(default = "default_models")]
+    pub models: Vec<ProviderModel>,
     #[serde(default = "default_timeout_mins")]
     pub timeout_mins: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderModel {
+    pub provider: Provider,
+    pub model: String,
 }
 
 pub fn current_env() -> BTreeMap<String, String> {
@@ -87,13 +82,7 @@ pub fn load_from_env(env: &BTreeMap<String, String>) -> Result<Config, String> {
         gateway_config_file,
         codex_bin: PathBuf::from("codex"),
         codex_workdir: path(env, "GATEWAY_CODEX_WORKDIR", xdg_config_home),
-        codex_model: gateway_config.model,
-        provider: gateway_config.provider,
-        claude_model: optional(env, "GATEWAY_CLAUDE_MODEL").unwrap_or(gateway_config.claude_model),
-        openrouter_model: optional(env, "GATEWAY_OPENROUTER_MODEL")
-            .unwrap_or(gateway_config.openrouter_model),
-        anthropic_api_key: optional(env, "ANTHROPIC_API_KEY"),
-        openrouter_api_key: optional(env, "OPENROUTER_API_KEY"),
+        models: gateway_config.models,
         fastfetch_bin: PathBuf::from("fastfetch"),
         state_dir: state_dir.clone(),
         chat_state_dir,
@@ -210,10 +199,7 @@ fn telegram_chat_ids(env: &BTreeMap<String, String>) -> Result<Vec<i64>, String>
 impl Default for GatewayConfigFile {
     fn default() -> Self {
         Self {
-            model: default_codex_model(),
-            provider: Provider::Codex,
-            claude_model: default_claude_model(),
-            openrouter_model: default_openrouter_model(),
+            models: default_models(),
             timeout_mins: default_timeout_mins(),
         }
     }
@@ -221,37 +207,28 @@ impl Default for GatewayConfigFile {
 
 impl GatewayConfigFile {
     pub fn normalize(&mut self) {
-        if self.model.trim().is_empty() {
-            self.model = default_codex_model();
-        } else {
-            self.model = self.model.trim().to_string();
-        }
-        if self.claude_model.trim().is_empty() {
-            self.claude_model = default_claude_model();
-        } else {
-            self.claude_model = self.claude_model.trim().to_string();
-        }
-        if self.openrouter_model.trim().is_empty() {
-            self.openrouter_model = default_openrouter_model();
-        } else {
-            self.openrouter_model = self.openrouter_model.trim().to_string();
-        }
+        normalize_models(&mut self.models);
         if self.timeout_mins == 0 {
             self.timeout_mins = default_timeout_mins();
         }
     }
 }
 
-fn default_codex_model() -> String {
-    DEFAULT_CODEX_MODEL.to_string()
-}
-
-fn default_claude_model() -> String {
-    DEFAULT_CLAUDE_MODEL.to_string()
-}
-
-fn default_openrouter_model() -> String {
-    DEFAULT_OPENROUTER_MODEL.to_string()
+pub fn default_models() -> Vec<ProviderModel> {
+    vec![
+        ProviderModel {
+            provider: Provider::Codex,
+            model: DEFAULT_CODEX_MODEL.to_string(),
+        },
+        ProviderModel {
+            provider: Provider::Claude,
+            model: DEFAULT_CLAUDE_MODEL.to_string(),
+        },
+        ProviderModel {
+            provider: Provider::Openrouter,
+            model: DEFAULT_OPENROUTER_MODEL.to_string(),
+        },
+    ]
 }
 
 const fn default_timeout_mins() -> u64 {
@@ -265,6 +242,16 @@ fn timeout_secs(timeout_mins: u64) -> Result<u64, String> {
 }
 
 impl Config {
+    pub fn default_provider_model(&self) -> &ProviderModel {
+        self.models
+            .first()
+            .expect("gateway config normalization ensures at least one model")
+    }
+
+    pub fn provider_model_at(&self, index: usize) -> Option<&ProviderModel> {
+        self.models.get(index)
+    }
+
     pub fn paths_report(&self) -> String {
         let mut lines: Vec<String> = [
             ("xdg_config_home", self.xdg_config_home.as_path()),
@@ -288,6 +275,22 @@ impl Config {
             lines.push(format!("launch_agent_plist={}", path.display()));
         }
         lines.join("\n")
+    }
+}
+
+fn normalize_models(models: &mut Vec<ProviderModel>) {
+    for item in models.iter_mut() {
+        item.model = item.model.trim().to_string();
+    }
+    models.retain(|item| !item.model.is_empty());
+    if models.iter().all(|item| item.provider != Provider::Codex) {
+        models.insert(
+            0,
+            ProviderModel {
+                provider: Provider::Codex,
+                model: DEFAULT_CODEX_MODEL.to_string(),
+            },
+        );
     }
 }
 
@@ -322,8 +325,16 @@ mod tests {
     }
 
     #[test]
-    fn loads_defaults_from_env_and_creates_config() {
-        let (_dir, env) = env_with_token();
+    fn loads_defaults_from_env_and_creates_models_config() {
+        let (_dir, mut env) = env_with_token();
+        env.insert(
+            "GATEWAY_CLAUDE_MODEL".to_string(),
+            "claude-env-override".to_string(),
+        );
+        env.insert(
+            "GATEWAY_OPENROUTER_MODEL".to_string(),
+            "openrouter/env-override".to_string(),
+        );
         let cfg = load_from_env(&env).unwrap();
 
         assert_eq!(cfg.bot_token, "token");
@@ -343,9 +354,31 @@ mod tests {
         assert!(cfg.gateway_config_file.exists());
         assert!(cfg.launchd_target.starts_with("gui/"));
         assert!(cfg.launchd_target.ends_with("/ai.gateway"));
-        assert_eq!(cfg.codex_model, DEFAULT_CODEX_MODEL);
+        assert_eq!(
+            cfg.models,
+            vec![
+                ProviderModel {
+                    provider: Provider::Codex,
+                    model: DEFAULT_CODEX_MODEL.to_string()
+                },
+                ProviderModel {
+                    provider: Provider::Claude,
+                    model: "claude-opus-4-8".to_string()
+                },
+                ProviderModel {
+                    provider: Provider::Openrouter,
+                    model: DEFAULT_OPENROUTER_MODEL.to_string()
+                }
+            ]
+        );
         assert_eq!(cfg.queue_depth, 8);
         assert_eq!(cfg.codex_timeout, Duration::from_secs(30 * 60));
+
+        let text = fs::read_to_string(&cfg.gateway_config_file).unwrap();
+        assert!(text.contains(r#""models""#));
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(value.get("provider").is_none());
+        assert!(!text.contains(r#""claude_model""#));
     }
 
     #[test]
@@ -434,12 +467,22 @@ mod tests {
         let cfg_path =
             PathBuf::from(env.get("XDG_CONFIG_HOME").unwrap()).join("gateway/config.json");
         fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
-        fs::write(&cfg_path, r#"{"model":"gpt-test","timeout_mins":9}"#).unwrap();
+        fs::write(
+            &cfg_path,
+            r#"{"models":[{"provider":"codex","model":"gpt-test"}],"timeout_mins":9}"#,
+        )
+        .unwrap();
 
         let cfg = load_from_env(&env).unwrap();
 
         assert_eq!(cfg.telegram_chat_ids, vec![7, 8]);
-        assert_eq!(cfg.codex_model, "gpt-test");
+        assert_eq!(
+            cfg.default_provider_model(),
+            &ProviderModel {
+                provider: Provider::Codex,
+                model: "gpt-test".to_string()
+            }
+        );
         assert_eq!(cfg.queue_depth, 8);
         assert_eq!(cfg.codex_timeout, Duration::from_secs(9 * 60));
         assert_eq!(cfg.state_dir, cfg.xdg_state_home.join("gateway"));
@@ -456,16 +499,48 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
-            r#"{"model":"  ","fastfetch":{"args":[" ","--pipe"]}}"#,
+            r#"{"models":[{"provider":"openrouter","model":" "},{"provider":"claude","model":"claude-test"}],"fastfetch":{"args":[" ","--pipe"]}}"#,
         )
         .unwrap();
 
         let cfg = load_gateway_config(&path).unwrap();
 
-        assert_eq!(cfg.model, DEFAULT_CODEX_MODEL);
+        assert_eq!(
+            cfg.models,
+            vec![
+                ProviderModel {
+                    provider: Provider::Codex,
+                    model: DEFAULT_CODEX_MODEL.to_string()
+                },
+                ProviderModel {
+                    provider: Provider::Claude,
+                    model: "claude-test".to_string()
+                }
+            ]
+        );
         let text = fs::read_to_string(&path).unwrap();
         assert!(!text.contains("fastfetch"));
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(value.get("provider").is_none());
         assert!(text.contains("\"timeout_mins\": 30"));
+    }
+
+    #[test]
+    fn normalizes_blank_models_to_at_least_codex() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gateway/config.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"models":[]}"#).unwrap();
+
+        let cfg = load_gateway_config(&path).unwrap();
+
+        assert_eq!(
+            cfg.models,
+            vec![ProviderModel {
+                provider: Provider::Codex,
+                model: DEFAULT_CODEX_MODEL.to_string()
+            }]
+        );
     }
 
     #[test]
@@ -515,7 +590,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gateway/config.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, r#"{"model":"gpt-test","timeout_mins":0}"#).unwrap();
+        fs::write(
+            &path,
+            r#"{"models":[{"provider":"codex","model":"gpt-test"}],"timeout_mins":0}"#,
+        )
+        .unwrap();
         let cfg = load_gateway_config(&path).unwrap();
         assert_eq!(cfg.timeout_mins, DEFAULT_CODEX_TIMEOUT_MINS);
 

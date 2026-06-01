@@ -1,4 +1,6 @@
+use crate::anthropic_proxy::AnthropicProxy;
 use crate::config::Config;
+use crate::provider::Provider;
 use serde::Deserialize;
 use std::fs;
 use std::io::{Read, Write};
@@ -20,7 +22,7 @@ impl From<&Config> for CodexConfig {
         Self {
             bin: cfg.codex_bin.clone(),
             workdir: cfg.codex_workdir.clone(),
-            default_model: cfg.codex_model.clone(),
+            default_model: cfg.default_provider_model().model.clone(),
         }
     }
 }
@@ -36,10 +38,12 @@ const GATEWAY_DEVELOPER_INSTRUCTIONS: &str = include_str!("SYSTEM.md");
 pub fn codex_args(
     out_path: &Path,
     session_id: Option<&str>,
+    provider: Provider,
     model: &str,
     default_model: &str,
     workdir: &Path,
-) -> Vec<String> {
+    claude_proxy_base_url: Option<&str>,
+) -> Result<Vec<String>, String> {
     let model = if model.trim().is_empty() {
         default_model
     } else {
@@ -53,10 +57,9 @@ pub fn codex_args(
             .expect("gateway developer instructions should serialize")
     );
     if let Some(session_id) = session_id.filter(|value| !value.trim().is_empty()) {
-        return strings([
-            "--search",
-            "exec",
-            "resume",
+        let mut args = strings(["--search", "exec", "resume"]);
+        append_model_provider_config(&mut args, provider, claude_proxy_base_url)?;
+        args.extend(strings([
             "-c",
             &developer_instructions_config,
             "--skip-git-repo-check",
@@ -67,14 +70,13 @@ pub fn codex_args(
             &out,
             session_id,
             "-",
-        ]);
+        ]));
+        return Ok(args);
     }
 
-    strings([
-        "--search",
-        "exec",
-        "--color",
-        "never",
+    let mut args = strings(["--search", "exec", "--color", "never"]);
+    append_model_provider_config(&mut args, provider, claude_proxy_base_url)?;
+    args.extend(strings([
         "-c",
         &developer_instructions_config,
         "--cd",
@@ -86,7 +88,8 @@ pub fn codex_args(
         "--output-last-message",
         &out,
         "-",
-    ])
+    ]));
+    Ok(args)
 }
 
 pub fn parse_codex_json(output: &str) -> CodexOutput {
@@ -118,17 +121,28 @@ pub fn run_codex(
     cfg: &CodexConfig,
     prompt: &str,
     session_id: Option<&str>,
+    provider: Provider,
     model: &str,
     timeout: Duration,
     state_dir: &Path,
 ) -> Result<CodexOutput, String> {
-    run_codex_stream(cfg, prompt, session_id, model, timeout, state_dir, |_| {})
+    run_codex_stream(
+        cfg,
+        prompt,
+        session_id,
+        provider,
+        model,
+        timeout,
+        state_dir,
+        |_| {},
+    )
 }
 
 pub fn run_codex_stream(
     cfg: &CodexConfig,
     prompt: &str,
     session_id: Option<&str>,
+    provider: Provider,
     model: &str,
     timeout: Duration,
     state_dir: &Path,
@@ -137,13 +151,20 @@ pub fn run_codex_stream(
     fs::create_dir_all(state_dir).map_err(|err| format!("create state dir: {err}"))?;
     let out_file = tempfile::NamedTempFile::new_in(state_dir).map_err(|err| err.to_string())?;
     let out_path = out_file.path().to_path_buf();
+    let claude_proxy = if provider == Provider::Claude {
+        Some(AnthropicProxy::start(timeout)?)
+    } else {
+        None
+    };
     let args = codex_args(
         &out_path,
         session_id,
+        provider,
         model,
         &cfg.default_model,
         &cfg.workdir,
-    );
+        claude_proxy.as_ref().map(|proxy| proxy.base_url()),
+    )?;
 
     let mut child = Command::new(&cfg.bin)
         .args(args)
@@ -268,6 +289,43 @@ fn strings<const N: usize>(values: [&str; N]) -> Vec<String> {
     values.iter().map(|value| (*value).to_string()).collect()
 }
 
+fn append_model_provider_config(
+    args: &mut Vec<String>,
+    provider: Provider,
+    claude_proxy_base_url: Option<&str>,
+) -> Result<(), String> {
+    let values = match provider {
+        Provider::Codex => return Ok(()),
+        Provider::Claude => {
+            let base_url = claude_proxy_base_url
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| "Claude provider requires an Anthropic proxy".to_string())?;
+            vec![
+                "model_provider=\"anthropic-gateway\"".to_string(),
+                "model_providers.anthropic-gateway.name=\"Anthropic Gateway\"".to_string(),
+                format!(
+                    "model_providers.anthropic-gateway.base_url={}",
+                    serde_json::to_string(base_url).expect("Anthropic proxy URL should serialize")
+                ),
+                "model_providers.anthropic-gateway.env_key=\"ANTHROPIC_API_KEY\"".to_string(),
+                "model_providers.anthropic-gateway.wire_api=\"responses\"".to_string(),
+            ]
+        }
+        Provider::Openrouter => vec![
+            "model_provider=\"openrouter\"".to_string(),
+            "model_providers.openrouter.name=\"openrouter\"".to_string(),
+            "model_providers.openrouter.base_url=\"https://openrouter.ai/api/v1\"".to_string(),
+            "model_providers.openrouter.env_key=\"OPENROUTER_API_KEY\"".to_string(),
+            "model_providers.openrouter.wire_api=\"responses\"".to_string(),
+        ],
+    };
+    for value in values {
+        args.push("-c".to_string());
+        args.push(value);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 struct CodexEvent {
     #[serde(rename = "type")]
@@ -298,10 +356,13 @@ mod tests {
         let args = codex_args(
             Path::new("/tmp/out"),
             None,
+            crate::provider::Provider::Codex,
             "",
             "gpt-5.5",
             Path::new("/work"),
-        );
+            None,
+        )
+        .unwrap();
         let joined = args.join(" ");
 
         assert_eq!(args[0], "--search");
@@ -320,10 +381,13 @@ mod tests {
         let args = codex_args(
             Path::new("/tmp/out"),
             Some("session-123"),
+            crate::provider::Provider::Codex,
             "gpt-test",
             "gpt-5.5",
             Path::new("/work"),
-        );
+            None,
+        )
+        .unwrap();
         let joined = args.join(" ");
 
         assert_eq!(args[0], "--search");
@@ -335,6 +399,71 @@ mod tests {
         assert!(joined.contains("--dangerously-bypass-approvals-and-sandbox"));
         assert!(joined.contains("-m gpt-test"));
         assert!(joined.contains("--output-last-message /tmp/out session-123 -"));
+    }
+
+    #[test]
+    fn codex_args_configure_openrouter_provider() {
+        let args = codex_args(
+            Path::new("/tmp/out"),
+            None,
+            crate::provider::Provider::Openrouter,
+            "openai/gpt-5.5",
+            "gpt-5.5",
+            Path::new("/work"),
+            None,
+        )
+        .unwrap();
+        let joined = args.join(" ");
+
+        assert!(joined.contains("model_provider=\"openrouter\""));
+        assert!(joined.contains("model_providers.openrouter.name=\"openrouter\""));
+        assert!(
+            joined.contains("model_providers.openrouter.base_url=\"https://openrouter.ai/api/v1\"")
+        );
+        assert!(joined.contains("model_providers.openrouter.env_key=\"OPENROUTER_API_KEY\""));
+        assert!(joined.contains("model_providers.openrouter.wire_api=\"responses\""));
+        assert!(joined.contains("-m openai/gpt-5.5"));
+    }
+
+    #[test]
+    fn codex_args_configure_claude_slot_through_anthropic_proxy() {
+        let args = codex_args(
+            Path::new("/tmp/out"),
+            None,
+            crate::provider::Provider::Claude,
+            "claude-opus-4-8",
+            "gpt-5.5",
+            Path::new("/work"),
+            Some("http://127.0.0.1:12345/v1"),
+        )
+        .unwrap();
+        let joined = args.join(" ");
+
+        assert!(joined.contains("model_provider=\"anthropic-gateway\""));
+        assert!(joined.contains("model_providers.anthropic-gateway.name=\"Anthropic Gateway\""));
+        assert!(joined
+            .contains("model_providers.anthropic-gateway.base_url=\"http://127.0.0.1:12345/v1\""));
+        assert!(joined.contains("model_providers.anthropic-gateway.env_key=\"ANTHROPIC_API_KEY\""));
+        assert!(joined.contains("model_providers.anthropic-gateway.wire_api=\"responses\""));
+        assert!(!joined.contains("model_provider=\"openrouter\""));
+        assert!(!joined.contains("OPENROUTER_API_KEY"));
+        assert!(joined.contains("-m claude-opus-4-8"));
+    }
+
+    #[test]
+    fn codex_args_reject_claude_without_anthropic_proxy() {
+        let err = codex_args(
+            Path::new("/tmp/out"),
+            None,
+            crate::provider::Provider::Claude,
+            "claude-opus-4-8",
+            "gpt-5.5",
+            Path::new("/work"),
+            None,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("Claude provider requires an Anthropic proxy"));
     }
 
     #[test]
@@ -371,12 +500,10 @@ mod tests {
             gateway_config_file: PathBuf::from("/xdg/config/gateway/config.json"),
             codex_bin: PathBuf::from("codex"),
             codex_workdir: PathBuf::from("/work"),
-            codex_model: "gpt-default".to_string(),
-            provider: crate::provider::Provider::Codex,
-            claude_model: "claude-test".to_string(),
-            openrouter_model: "openrouter/test".to_string(),
-            anthropic_api_key: None,
-            openrouter_api_key: None,
+            models: vec![crate::config::ProviderModel {
+                provider: crate::provider::Provider::Codex,
+                model: "gpt-default".to_string(),
+            }],
             fastfetch_bin: PathBuf::from("fastfetch"),
             state_dir: PathBuf::from("/state/gateway"),
             chat_state_dir: PathBuf::from("/state/gateway/chats"),
@@ -438,6 +565,7 @@ printf 'session id: session-123\n' >&2
             &cfg,
             "prompt",
             None,
+            Provider::Codex,
             "",
             Duration::from_secs(5),
             &dir.path().join("state"),
@@ -485,6 +613,7 @@ cat >/dev/null
             &cfg,
             "prompt",
             None,
+            Provider::Codex,
             "",
             Duration::from_secs(5),
             &dir.path().join("state"),
@@ -511,6 +640,7 @@ printf 'stdout final\n'
             &cfg,
             "prompt",
             Some("session-123"),
+            Provider::Codex,
             "gpt-test",
             Duration::from_secs(5),
             &dir.path().join("state"),
@@ -538,6 +668,7 @@ exit 2
             &cfg,
             "prompt",
             None,
+            Provider::Codex,
             "gpt-test",
             Duration::from_secs(5),
             &dir.path().join("state"),
@@ -556,6 +687,7 @@ exit 2
             &cfg,
             "prompt",
             None,
+            Provider::Codex,
             "gpt-test",
             Duration::from_secs(5),
             &dir.path().join("state"),
@@ -576,6 +708,7 @@ sleep 1
             &cfg,
             "prompt",
             None,
+            Provider::Codex,
             "gpt-test",
             Duration::from_millis(10),
             &dir.path().join("state"),
