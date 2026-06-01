@@ -1,5 +1,6 @@
 use crate::json_file::{save_pretty_json, SaveJsonLabels};
 use crate::launchd;
+use crate::provider::Provider;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -8,6 +9,8 @@ use std::time::Duration;
 
 pub const GATEWAY_TELEGRAM_TOKEN_ENV: &str = "GATEWAY_TELEGRAM_TOKEN";
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.5";
+pub const DEFAULT_CLAUDE_MODEL: &str = "claude-sonnet-4-5-20250929";
+pub const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-5.5";
 pub const DEFAULT_CODEX_TIMEOUT_MINS: u64 = 30;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +25,11 @@ pub struct Config {
     pub codex_bin: PathBuf,
     pub codex_workdir: PathBuf,
     pub codex_model: String,
+    pub provider: Provider,
+    pub claude_model: String,
+    pub openrouter_model: String,
+    pub anthropic_api_key: Option<String>,
+    pub openrouter_api_key: Option<String>,
     pub fastfetch_bin: PathBuf,
     pub state_dir: PathBuf,
     pub chat_state_dir: PathBuf,
@@ -38,6 +46,12 @@ pub struct Config {
 pub struct GatewayConfigFile {
     #[serde(default = "default_codex_model")]
     pub model: String,
+    #[serde(default)]
+    pub provider: Provider,
+    #[serde(default = "default_claude_model")]
+    pub claude_model: String,
+    #[serde(default = "default_openrouter_model")]
+    pub openrouter_model: String,
     #[serde(default = "default_timeout_mins")]
     pub timeout_mins: u64,
 }
@@ -74,6 +88,12 @@ pub fn load_from_env(env: &BTreeMap<String, String>) -> Result<Config, String> {
         codex_bin: PathBuf::from("codex"),
         codex_workdir: path(env, "GATEWAY_CODEX_WORKDIR", xdg_config_home),
         codex_model: gateway_config.model,
+        provider: gateway_config.provider,
+        claude_model: optional(env, "GATEWAY_CLAUDE_MODEL").unwrap_or(gateway_config.claude_model),
+        openrouter_model: optional(env, "GATEWAY_OPENROUTER_MODEL")
+            .unwrap_or(gateway_config.openrouter_model),
+        anthropic_api_key: optional(env, "ANTHROPIC_API_KEY"),
+        openrouter_api_key: optional(env, "OPENROUTER_API_KEY"),
         fastfetch_bin: PathBuf::from("fastfetch"),
         state_dir: state_dir.clone(),
         chat_state_dir,
@@ -191,6 +211,9 @@ impl Default for GatewayConfigFile {
     fn default() -> Self {
         Self {
             model: default_codex_model(),
+            provider: Provider::Codex,
+            claude_model: default_claude_model(),
+            openrouter_model: default_openrouter_model(),
             timeout_mins: default_timeout_mins(),
         }
     }
@@ -203,6 +226,16 @@ impl GatewayConfigFile {
         } else {
             self.model = self.model.trim().to_string();
         }
+        if self.claude_model.trim().is_empty() {
+            self.claude_model = default_claude_model();
+        } else {
+            self.claude_model = self.claude_model.trim().to_string();
+        }
+        if self.openrouter_model.trim().is_empty() {
+            self.openrouter_model = default_openrouter_model();
+        } else {
+            self.openrouter_model = self.openrouter_model.trim().to_string();
+        }
         if self.timeout_mins == 0 {
             self.timeout_mins = default_timeout_mins();
         }
@@ -211,6 +244,14 @@ impl GatewayConfigFile {
 
 fn default_codex_model() -> String {
     DEFAULT_CODEX_MODEL.to_string()
+}
+
+fn default_claude_model() -> String {
+    DEFAULT_CLAUDE_MODEL.to_string()
+}
+
+fn default_openrouter_model() -> String {
+    DEFAULT_OPENROUTER_MODEL.to_string()
 }
 
 const fn default_timeout_mins() -> u64 {

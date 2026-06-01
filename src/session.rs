@@ -1,4 +1,5 @@
 use crate::json_file::{save_pretty_json, SaveJsonLabels};
+use crate::provider::Provider;
 use crate::text::session_label;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -9,6 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct ChatSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    #[serde(default)]
+    pub provider: Provider,
     pub model: String,
     #[serde(default)]
     pub generation: i64,
@@ -24,6 +27,8 @@ pub struct SavedSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub model: String,
+    #[serde(default)]
+    pub provider: Provider,
     #[serde(default)]
     pub updated_at: String,
 }
@@ -41,14 +46,25 @@ pub struct SessionStore {
     chat_dir: PathBuf,
     cron_dir: PathBuf,
     default_model: String,
+    default_provider: Provider,
 }
 
 impl SessionStore {
     pub const fn new(chat_dir: PathBuf, cron_dir: PathBuf, default_model: String) -> Self {
+        Self::new_with_provider(chat_dir, cron_dir, default_model, Provider::Codex)
+    }
+
+    pub const fn new_with_provider(
+        chat_dir: PathBuf,
+        cron_dir: PathBuf,
+        default_model: String,
+        default_provider: Provider,
+    ) -> Self {
         Self {
             chat_dir,
             cron_dir,
             default_model,
+            default_provider,
         }
     }
 
@@ -58,6 +74,22 @@ impl SessionStore {
 
     pub fn reset(&self, key: &SessionKey) -> Result<ChatSession, String> {
         let mut state = self.load(key);
+        state.session_id = None;
+        state.generation += 1;
+        state.updated_at = now_string();
+        self.save(key, &state)?;
+        Ok(state)
+    }
+
+    pub fn set_provider(
+        &self,
+        key: &SessionKey,
+        provider: Provider,
+        model: &str,
+    ) -> Result<ChatSession, String> {
+        let mut state = self.load(key);
+        state.provider = provider;
+        state.model = model.trim().to_string();
         state.session_id = None;
         state.generation += 1;
         state.updated_at = now_string();
@@ -76,6 +108,7 @@ impl SessionStore {
                     id,
                     name: None,
                     model: state.model.clone(),
+                    provider: state.provider,
                     updated_at: state.updated_at.clone(),
                 },
                 &self.default_model,
@@ -93,6 +126,7 @@ impl SessionStore {
         if !found.model.is_empty() {
             state.model = found.model;
         }
+        state.provider = found.provider;
         state.generation += 1;
         state.updated_at = now_string();
         self.save(key, &state)?;
@@ -111,6 +145,7 @@ impl SessionStore {
                 id,
                 name: Some(name.trim().to_string()),
                 model: state.model.clone(),
+                provider: state.provider,
                 updated_at: state.updated_at.clone(),
             },
             &self.default_model,
@@ -137,6 +172,7 @@ impl SessionStore {
                 id: session_id.to_string(),
                 name: None,
                 model: state.model.clone(),
+                provider: state.provider,
                 updated_at: state.updated_at.clone(),
             },
             &self.default_model,
@@ -164,7 +200,8 @@ impl SessionStore {
                 item.model.as_str()
             };
             lines.push(format!(
-                "{marker} {} {model} {name}",
+                "{marker} {} {} {model} {name}",
+                item.provider.label(),
                 session_label(&item.id)
             ));
         }
@@ -188,6 +225,7 @@ impl SessionStore {
             .ok()
             .and_then(|text| serde_json::from_str::<ChatSession>(&text).ok())
             .unwrap_or_else(|| ChatSession {
+                provider: self.default_provider,
                 model: self.default_model.clone(),
                 ..ChatSession::default()
             });
@@ -199,6 +237,7 @@ impl SessionStore {
                 id: state.session_id.clone().unwrap_or_default(),
                 name: None,
                 model: state.model.clone(),
+                provider: state.provider,
                 updated_at: state.updated_at.clone(),
             });
         }
@@ -287,12 +326,14 @@ mod tests {
             id: "019e778b-2c3f-7231-bda6-c40f27bbba21".to_string(),
             name: Some("main".to_string()),
             model: "gpt-5.5".to_string(),
+            provider: Provider::Codex,
             updated_at: "now".to_string(),
         };
         let second = SavedSession {
             id: first.id.clone(),
             name: None,
             model: "gpt-test".to_string(),
+            provider: Provider::Codex,
             updated_at: "later".to_string(),
         };
 
@@ -435,6 +476,7 @@ mod tests {
             id: "session-older".to_string(),
             name: None,
             model: String::new(),
+            provider: Provider::Codex,
             updated_at: String::new(),
         });
         store.save(&key, &state).unwrap();
@@ -442,8 +484,8 @@ mod tests {
         let list = store.list(&key);
 
         assert!(list.contains("💾 Saved sessions:"));
-        assert!(list.contains("⭐ session- gpt-default (unnamed)"));
-        assert!(list.contains("▫️ session- gpt-default (unnamed)"));
+        assert!(list.contains("⭐ Codex session- gpt-default (unnamed)"));
+        assert!(list.contains("▫️ Codex session- gpt-default (unnamed)"));
         assert!(dir.path().join("cron/daily_report.json").exists());
     }
 
@@ -477,6 +519,7 @@ mod tests {
             id: "existing".to_string(),
             name: None,
             model: "gpt-old".to_string(),
+            provider: Provider::Codex,
             updated_at: String::new(),
         }];
 
@@ -486,6 +529,7 @@ mod tests {
                 id: " ".to_string(),
                 name: None,
                 model: String::new(),
+                provider: Provider::Codex,
                 updated_at: String::new(),
             },
             "gpt-default",
@@ -496,6 +540,7 @@ mod tests {
                 id: " new ".to_string(),
                 name: Some("named".to_string()),
                 model: " ".to_string(),
+                provider: Provider::Codex,
                 updated_at: String::new(),
             },
             "gpt-default",

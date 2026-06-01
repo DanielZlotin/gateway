@@ -379,7 +379,10 @@ pub fn supported_bot_commands() -> Vec<BotCommand> {
         ("log", "📜 Send recent gateway logs."),
         ("new", "🆕 Start a fresh Codex session."),
         ("restart", "🔄 Restart the gateway service."),
-        ("model", "🤖 Show or set the Codex model."),
+        ("model", "🤖 Show/set model or switch provider slot."),
+        ("codex", "🧠 Use Codex subscription auth."),
+        ("claude", "🟣 Use Claude API key."),
+        ("openrouter", "🌐 Use OpenRouter API key."),
         ("resume", "↩️ Resume a saved session."),
         ("rename", "🏷️ Rename the current session."),
         ("list", "💾 List saved sessions."),
@@ -470,7 +473,18 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "commands", "help", "status", "log", "new", "restart", "model", "resume", "rename",
+                "commands",
+                "help",
+                "status",
+                "log",
+                "new",
+                "restart",
+                "model",
+                "codex",
+                "claude",
+                "openrouter",
+                "resume",
+                "rename",
                 "list"
             ]
         );

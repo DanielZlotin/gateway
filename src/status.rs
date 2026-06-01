@@ -57,7 +57,8 @@ const FASTFETCH_CONFIG: &str = r#"{
 
 pub fn status_header(state: &ChatSession) -> String {
     format!(
-        "🤖 Model: {}\n🧵 Session: {}",
+        "🔌 Provider: {}\n🤖 Model: {}\n🧵 Session: {}",
+        state.provider.label(),
         state.model,
         session_label(state.session_id.as_deref().unwrap_or(""))
     )

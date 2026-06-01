@@ -1,6 +1,8 @@
 use crate::codex::{run_codex_stream, CodexConfig};
 use crate::commands::{directive_help, is_allowed, unknown_directive_message};
 use crate::config::{save_gateway_config, Config, GatewayConfigFile};
+use crate::llm::{run_claude, run_openrouter, ApiProviderConfig};
+use crate::provider::{provider_for_model_slot, Provider};
 use crate::session::{SessionKey, SessionStore};
 use crate::status::{codex_status, fastfetch_status, format_status_message, status_header};
 use crate::telegram::{Message, TelegramClient, Update};
@@ -154,10 +156,11 @@ fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
     if let Err(err) = tg.sync_my_commands(&cfg.telegram_chat_ids) {
         eprintln!("telegram command sync failed; continuing without command refresh: {err}");
     }
-    let store = SessionStore::new(
+    let store = SessionStore::new_with_provider(
         cfg.chat_state_dir.clone(),
         cfg.cron_state_dir.clone(),
-        cfg.codex_model.clone(),
+        default_model_for_provider(&cfg).to_string(),
+        cfg.provider,
     );
     let status_codex = codex_status(&cfg);
     let status_fetch = fastfetch_status(&cfg.fastfetch_bin);
@@ -304,6 +307,9 @@ fn handle_command(
             Ok(())
         }
         "/model" => handle_model_command(cfg, tg, store, msg, text, &key),
+        "/codex" => handle_provider_command(cfg, tg, store, msg, &key, Provider::Codex),
+        "/claude" => handle_provider_command(cfg, tg, store, msg, &key, Provider::Claude),
+        "/openrouter" => handle_provider_command(cfg, tg, store, msg, &key, Provider::Openrouter),
         "/resume" => handle_resume_command(tg, store, msg, text, &key),
         "/rename" => handle_rename_command(tg, store, msg, text, &key),
         "/list" => send_long_message(tg, msg.chat.id, &store.list(&key), msg.message_id),
@@ -359,14 +365,14 @@ fn handle_model_command(
         let state = store.load(key);
         return tg.send_message(msg.chat.id, &status_header(&state), msg.message_id);
     }
+    if let Some(provider) = provider_for_model_slot(&model) {
+        return handle_provider_command(cfg, tg, store, msg, key, provider);
+    }
     match store.set_model(key, &model) {
         Ok(state) => {
             save_gateway_config(
                 &cfg.gateway_config_file,
-                &GatewayConfigFile {
-                    model: state.model.clone(),
-                    timeout_mins: cfg.codex_timeout.as_secs() / 60,
-                },
+                &gateway_config_for_state(cfg, state.provider, &state.model),
             )?;
             tg.send_message(
                 msg.chat.id,
@@ -383,6 +389,68 @@ fn handle_model_command(
             &format!("⚠️ Failed to set model: {err}"),
             msg.message_id,
         ),
+    }
+}
+
+fn handle_provider_command(
+    cfg: &Config,
+    tg: &impl TelegramApi,
+    store: &SessionStore,
+    msg: &Message,
+    key: &SessionKey,
+    provider: Provider,
+) -> Result<(), String> {
+    let model = match provider {
+        Provider::Codex => cfg.codex_model.as_str(),
+        Provider::Claude => cfg.claude_model.as_str(),
+        Provider::Openrouter => cfg.openrouter_model.as_str(),
+    };
+    match store.set_provider(key, provider, model) {
+        Ok(state) => {
+            save_gateway_config(
+                &cfg.gateway_config_file,
+                &gateway_config_for_state(cfg, state.provider, &state.model),
+            )?;
+            tg.send_message(
+                msg.chat.id,
+                &format!(
+                    "🔌 Provider set to {}\n🤖 Model: {}\n🧵 Session: {}",
+                    state.provider.label(),
+                    state.model,
+                    session_label(state.session_id.as_deref().unwrap_or(""))
+                ),
+                msg.message_id,
+            )
+        }
+        Err(err) => tg.send_message(
+            msg.chat.id,
+            &format!("⚠️ Failed to set provider: {err}"),
+            msg.message_id,
+        ),
+    }
+}
+
+fn gateway_config_for_state(cfg: &Config, provider: Provider, model: &str) -> GatewayConfigFile {
+    let mut file = GatewayConfigFile {
+        model: cfg.codex_model.clone(),
+        provider,
+        claude_model: cfg.claude_model.clone(),
+        openrouter_model: cfg.openrouter_model.clone(),
+        timeout_mins: cfg.codex_timeout.as_secs() / 60,
+    };
+    match provider {
+        Provider::Codex => file.model = model.to_string(),
+        Provider::Claude => file.claude_model = model.to_string(),
+        Provider::Openrouter => file.openrouter_model = model.to_string(),
+    }
+    file
+}
+
+fn default_model_for_provider(cfg: &Config) -> &str {
+    match cfg.provider {
+        Provider::Codex => &cfg.codex_model,
+        Provider::Claude => &cfg.claude_model,
+        Provider::Openrouter => &cfg.openrouter_model,
     }
 }
 
@@ -458,10 +526,11 @@ fn handle_status_command(
 
 fn worker_loop(cfg: Config, rx: mpsc::Receiver<Job>) {
     let tg = TelegramClient::new(&cfg.bot_token);
-    let store = SessionStore::new(
+    let store = SessionStore::new_with_provider(
         cfg.chat_state_dir.clone(),
         cfg.cron_state_dir.clone(),
-        cfg.codex_model.clone(),
+        default_model_for_provider(&cfg).to_string(),
+        cfg.provider,
     );
     for job in rx {
         if let Err(err) = run_job(&cfg, &tg, &store, job) {
@@ -483,9 +552,10 @@ fn run_job(
     };
     let state = store.load(&key);
     eprintln!(
-        "[gateway] job start chat={} reply_to={} model={} session={} prompt_chars={} timeout_secs={}",
+        "[gateway] job start chat={} reply_to={} provider={} model={} session={} prompt_chars={} timeout_secs={}",
         job.chat_id,
         job.reply_to_message_id,
+        state.provider.label(),
         state.model,
         session_label(state.session_id.as_deref().unwrap_or("")),
         job.prompt.chars().count(),
@@ -495,41 +565,62 @@ fn run_job(
         tg.send_message_returning(job.chat_id, "🫧 Thinking…", job.reply_to_message_id)?;
     let mut streamed = String::new();
     let mut last_edit = Instant::now();
-    let codex_result = {
+    let run_result = {
         let _typing = start_typing_loop(tg, job.chat_id);
-        run_codex_stream(
-            &CodexConfig::from(cfg),
-            &job.prompt,
-            state.session_id.as_deref(),
-            &state.model,
-            cfg.codex_timeout,
-            &cfg.state_dir,
-            |chunk| {
-                streamed.push_str(chunk);
-                if last_edit.elapsed() >= Duration::from_millis(1200) {
-                    let _ = tg.edit_message_text(
-                        job.chat_id,
-                        stream_message_id,
-                        &stream_preview(&streamed),
-                    );
-                    last_edit = Instant::now();
-                }
-            },
-        )
+        match state.provider {
+            Provider::Codex => run_codex_stream(
+                &CodexConfig::from(cfg),
+                &job.prompt,
+                state.session_id.as_deref(),
+                &state.model,
+                cfg.codex_timeout,
+                &cfg.state_dir,
+                |chunk| {
+                    streamed.push_str(chunk);
+                    if last_edit.elapsed() >= Duration::from_millis(1200) {
+                        let _ = tg.edit_message_text(
+                            job.chat_id,
+                            stream_message_id,
+                            &stream_preview(&streamed),
+                        );
+                        last_edit = Instant::now();
+                    }
+                },
+            ),
+            Provider::Claude => run_claude(
+                &ApiProviderConfig::from(cfg),
+                &job.prompt,
+                cfg.codex_timeout,
+            )
+            .map(|output| crate::codex::CodexOutput {
+                final_text: output.final_text,
+                session_id: None,
+            }),
+            Provider::Openrouter => run_openrouter(
+                &ApiProviderConfig::from(cfg),
+                &job.prompt,
+                cfg.codex_timeout,
+            )
+            .map(|output| crate::codex::CodexOutput {
+                final_text: output.final_text,
+                session_id: None,
+            }),
+        }
     };
-    let output = match codex_result {
+    let output = match run_result {
         Ok(output) => output,
         Err(err) => {
             eprintln!(
-                "[gateway] job codex failed chat={} elapsed_ms={} error={}",
+                "[gateway] job provider failed chat={} provider={} elapsed_ms={} error={}",
                 job.chat_id,
+                state.provider.label(),
                 started.elapsed().as_millis(),
                 single_line(&err)
             );
             send_long_message(
                 tg,
                 job.chat_id,
-                &format!("⚠️ Codex failed:\n{err}"),
+                &format!("⚠️ {} failed:\n{err}", state.provider.label()),
                 job.reply_to_message_id,
             )?;
             return Ok(());
@@ -1549,6 +1640,11 @@ printf 'OS: test\n'
             codex_bin: codex,
             codex_workdir: root.to_path_buf(),
             codex_model: "gpt-test".to_string(),
+            provider: Provider::Codex,
+            claude_model: "claude-test".to_string(),
+            openrouter_model: "openrouter/test".to_string(),
+            anthropic_api_key: Some("anthropic-key".to_string()),
+            openrouter_api_key: Some("openrouter-key".to_string()),
             fastfetch_bin: fastfetch,
             state_dir: root.join("state/gateway"),
             chat_state_dir: root.join("state/gateway/chats"),

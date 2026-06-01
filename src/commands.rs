@@ -1,5 +1,5 @@
 pub const DIRECTIVES: &str =
-    "/commands, /help, /status, /log, /new, /restart, /model, /resume, /rename, /list";
+    "/commands, /help, /status, /log, /new, /restart, /model, /codex, /claude, /openrouter, /resume, /rename, /list";
 
 pub fn directive_help() -> String {
     [
@@ -10,7 +10,10 @@ pub fn directive_help() -> String {
         "📜 /log [lines] - send recent gateway logs",
         "🆕 /new - start a fresh Codex session",
         "🔄 /restart - restart the gateway service",
-        "🤖 /model [name] - show or set the Codex model",
+        "🤖 /model [name|1|2|3] - show/set model or switch provider slot",
+        "🧠 /codex - switch to Codex subscription auth",
+        "🟣 /claude - switch to Claude API key",
+        "🌐 /openrouter - switch to OpenRouter API key",
         "↩️ /resume SESSION_OR_NAME - resume a saved session",
         "🏷️ /rename NAME - rename the current session",
         "💾 /list - list saved sessions",
@@ -42,6 +45,9 @@ mod tests {
             "/new",
             "/restart",
             "/model",
+            "/codex",
+            "/claude",
+            "/openrouter",
             "/resume",
             "/rename",
             "/list",
