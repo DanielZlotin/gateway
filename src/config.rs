@@ -181,9 +181,13 @@ fn telegram_chat_ids(env: &BTreeMap<String, String>) -> Result<Vec<i64>, String>
         .map(str::trim)
         .filter(|part| !part.is_empty())
     {
-        ids.push(part.parse::<i64>().map_err(|_| {
+        let id = part.parse::<i64>().map_err(|_| {
             "GATEWAY_TELEGRAM_CHAT_IDS must contain comma-separated integers".to_string()
-        })?);
+        })?;
+        if id <= 0 {
+            return Err("GATEWAY_TELEGRAM_CHAT_IDS must contain private chat ids only".to_string());
+        }
+        ids.push(id);
     }
     if ids.is_empty() {
         return Err("GATEWAY_TELEGRAM_CHAT_IDS must include at least one id".to_string());
@@ -591,6 +595,14 @@ mod tests {
         env.insert("GATEWAY_TELEGRAM_CHAT_IDS".to_string(), " , ".to_string());
         let err = load_from_env(&env).unwrap_err();
         assert!(err.contains("at least one id"));
+
+        let (_dir, mut env) = env_with_token();
+        env.insert(
+            "GATEWAY_TELEGRAM_CHAT_IDS".to_string(),
+            "42,-100".to_string(),
+        );
+        let err = load_from_env(&env).unwrap_err();
+        assert!(err.contains("private chat ids"));
     }
 
     #[test]

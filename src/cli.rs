@@ -17,6 +17,7 @@ pub struct RunArgs {
     pub prompt: Option<String>,
     pub prompt_file: Option<PathBuf>,
     pub model: Option<String>,
+    pub chat: Option<i64>,
 }
 
 #[derive(Debug, Parser)]
@@ -48,6 +49,8 @@ struct RunCli {
     prompt_file: Option<PathBuf>,
     #[arg(long)]
     model: Option<String>,
+    #[arg(long)]
+    chat: Option<i64>,
 }
 
 pub fn parse_args_from<I, T>(args: I) -> Result<Mode, String>
@@ -64,6 +67,7 @@ where
             prompt: args.prompt,
             prompt_file: args.prompt_file,
             model: args.model,
+            chat: args.chat,
         }),
         Some(Command::Uninstall) => Mode::Uninstall,
     })
@@ -88,6 +92,8 @@ mod tests {
             "summarize",
             "--model",
             "gpt-test",
+            "--chat",
+            "77",
         ])
         .unwrap();
 
@@ -97,6 +103,7 @@ mod tests {
                 prompt: Some("summarize".to_string()),
                 prompt_file: None,
                 model: Some("gpt-test".to_string()),
+                chat: Some(77),
             })
         );
     }

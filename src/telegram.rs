@@ -1,3 +1,4 @@
+use crate::text::redact_private_data;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::time::Duration;
 
@@ -123,8 +124,9 @@ impl TelegramClient {
         text: &str,
         reply_to_message_id: i64,
     ) -> Result<(), String> {
-        let values = send_message_values(chat_id, text, reply_to_message_id, None, true);
-        let plain_values = send_message_values(chat_id, text, reply_to_message_id, None, false);
+        let text = redact_private_data(text);
+        let values = send_message_values(chat_id, &text, reply_to_message_id, None, true);
+        let plain_values = send_message_values(chat_id, &text, reply_to_message_id, None, false);
         let _: serde_json::Value =
             self.post_form_with_plain_text_retry("sendMessage", &values, &plain_values)?;
         Ok(())
@@ -137,16 +139,17 @@ impl TelegramClient {
         reply_to_message_id: i64,
         buttons: &[InlineKeyboardButton],
     ) -> Result<(), String> {
+        let text = redact_private_data(text);
         let values = send_message_with_inline_keyboard_values(
             chat_id,
-            text,
+            &text,
             reply_to_message_id,
             buttons,
             true,
         )?;
         let plain_values = send_message_with_inline_keyboard_values(
             chat_id,
-            text,
+            &text,
             reply_to_message_id,
             buttons,
             false,
@@ -157,9 +160,10 @@ impl TelegramClient {
     }
 
     pub fn answer_callback_query(&self, callback_query_id: &str, text: &str) -> Result<(), String> {
+        let text = redact_private_data(text);
         let mut values = vec![("callback_query_id", callback_query_id.to_string())];
         if !text.trim().is_empty() {
-            values.push(("text", text.to_string()));
+            values.push(("text", text));
         }
         let _: bool = self.post_form("answerCallbackQuery", &values)?;
         Ok(())
@@ -171,8 +175,9 @@ impl TelegramClient {
         text: &str,
         reply_to_message_id: i64,
     ) -> Result<i64, String> {
-        let values = send_message_values(chat_id, text, reply_to_message_id, None, true);
-        let plain_values = send_message_values(chat_id, text, reply_to_message_id, None, false);
+        let text = redact_private_data(text);
+        let values = send_message_values(chat_id, &text, reply_to_message_id, None, true);
+        let plain_values = send_message_values(chat_id, &text, reply_to_message_id, None, false);
         let message: Message =
             self.post_form_with_plain_text_retry("sendMessage", &values, &plain_values)?;
         Ok(message.message_id)
@@ -185,16 +190,17 @@ impl TelegramClient {
         reply_to_message_id: i64,
         message_effect_id: &str,
     ) -> Result<Message, String> {
+        let text = redact_private_data(text);
         let values = send_message_values(
             chat_id,
-            text,
+            &text,
             reply_to_message_id,
             Some(message_effect_id),
             true,
         );
         let plain_values = send_message_values(
             chat_id,
-            text,
+            &text,
             reply_to_message_id,
             Some(message_effect_id),
             false,
@@ -228,8 +234,9 @@ impl TelegramClient {
         message_id: i64,
         text: &str,
     ) -> Result<(), String> {
-        let values = edit_message_values(chat_id, message_id, text, true);
-        let plain_values = edit_message_values(chat_id, message_id, text, false);
+        let text = redact_private_data(text);
+        let values = edit_message_values(chat_id, message_id, &text, true);
+        let plain_values = edit_message_values(chat_id, message_id, &text, false);
         let _: serde_json::Value =
             self.post_form_with_plain_text_retry("editMessageText", &values, &plain_values)?;
         Ok(())
@@ -467,8 +474,8 @@ pub fn supported_bot_commands() -> Vec<BotCommand> {
 
 pub fn command_scope_targets(chat_ids: &[i64]) -> Vec<CommandScopeTarget> {
     let mut targets = vec![
-        target("default", "default", None, true),
-        target("all_private_chats", "all_private_chats", None, true),
+        target("default", "default", None, false),
+        target("all_private_chats", "all_private_chats", None, false),
         target("all_group_chats", "all_group_chats", None, false),
         target(
             "all_chat_administrators",
@@ -557,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn command_scope_targets_cover_global_and_allowed_chat_scopes() {
+    fn command_scope_targets_set_only_allowed_chat_scopes() {
         let targets = command_scope_targets(&[42]);
         let summary: Vec<_> = targets
             .iter()
@@ -573,8 +580,8 @@ mod tests {
         assert_eq!(
             summary,
             vec![
-                ("default", "default", true),
-                ("all_private_chats", "all_private_chats", true),
+                ("default", "default", false),
+                ("all_private_chats", "all_private_chats", false),
                 ("all_group_chats", "all_group_chats", false),
                 ("all_chat_administrators", "all_chat_administrators", false),
                 ("chat:42", "chat", true),
@@ -702,6 +709,20 @@ mod tests {
     }
 
     #[test]
+    fn send_message_redacts_private_data_before_posting() {
+        let server = TestServer::new(vec![json_response(r#"{"ok":true,"result":{}}"#)]);
+        let client = server.client();
+
+        client
+            .send_message(42, "OPENAI_API_KEY=sk-test-secret-value", 7)
+            .unwrap();
+
+        let request = server.request();
+        assert!(!request.body.contains("sk-test-secret-value"));
+        assert!(request.body.contains("redacted"));
+    }
+
+    #[test]
     fn send_message_returning_and_with_effect_decode_messages() {
         let server = TestServer::new(vec![
             json_response(message_json(55, None).as_str()),
@@ -759,8 +780,8 @@ mod tests {
     }
 
     #[test]
-    fn sync_my_commands_deletes_global_scopes_and_sets_allowed_scopes() {
-        let responses = (0..24)
+    fn sync_my_commands_deletes_global_scopes_and_sets_only_allowed_chat_scopes() {
+        let responses = (0..18)
             .map(|_| json_response(r#"{"ok":true,"result":true}"#))
             .collect();
         let server = TestServer::new(responses);
@@ -768,7 +789,7 @@ mod tests {
 
         client.sync_my_commands(&[42]).unwrap();
 
-        let requests: Vec<_> = (0..24).map(|_| server.request()).collect();
+        let requests: Vec<_> = (0..18).map(|_| server.request()).collect();
         let deletes = requests
             .iter()
             .filter(|request| request.path == "/botsecret/deleteMyCommands")
@@ -778,7 +799,7 @@ mod tests {
             .filter(|request| request.path == "/botsecret/setMyCommands")
             .count();
         assert_eq!(deletes, 15);
-        assert_eq!(sets, 9);
+        assert_eq!(sets, 3);
         assert!(requests
             .iter()
             .any(|request| request.body.contains("language_code=en")));

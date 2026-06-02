@@ -7,7 +7,7 @@ use crate::session::{SessionKey, SessionStore};
 use crate::status::{codex_status, fastfetch_status, format_status_message};
 use crate::telegram::{CallbackQuery, InlineKeyboardButton, Message, TelegramClient, Update};
 use crate::text::{
-    command_arg, is_ok_response, log_line_count, parse_command, session_label,
+    command_arg, is_ok_response, log_line_count, parse_command, redact_private_data, session_label,
     split_telegram_message, tail_log_text,
 };
 use std::collections::HashMap;
@@ -284,7 +284,7 @@ fn handle_message(
     tx: &mpsc::SyncSender<Job>,
     msg: Message,
 ) -> Result<(), String> {
-    if !is_allowed(&cfg.telegram_chat_ids, msg.chat.id) {
+    if !is_allowed_private_message(&cfg.telegram_chat_ids, &msg) {
         return Ok(());
     }
     let text = match message_text(&msg.text, &msg.caption) {
@@ -517,7 +517,7 @@ fn handle_callback_query(
     let Some(message) = query.message.as_ref() else {
         return tg.answer_callback_query(&query.id, "Message unavailable.");
     };
-    if !is_allowed(&cfg.telegram_chat_ids, message.chat.id) {
+    if !is_allowed_private_callback(&cfg.telegram_chat_ids, &query) {
         return Ok(());
     }
     let Some(raw_index) = query.data.strip_prefix("model:") else {
@@ -547,6 +547,38 @@ fn handle_callback_query(
         ),
         message.message_id,
     )
+}
+
+fn is_allowed_private_message(telegram_chat_ids: &[i64], msg: &Message) -> bool {
+    is_allowed_private_chat(
+        telegram_chat_ids,
+        msg.chat.id,
+        &msg.chat.kind,
+        msg.from.as_ref(),
+    )
+}
+
+fn is_allowed_private_callback(telegram_chat_ids: &[i64], query: &CallbackQuery) -> bool {
+    let Some(message) = query.message.as_ref() else {
+        return false;
+    };
+    is_allowed_private_chat(
+        telegram_chat_ids,
+        message.chat.id,
+        &message.chat.kind,
+        Some(&query.from),
+    )
+}
+
+fn is_allowed_private_chat(
+    telegram_chat_ids: &[i64],
+    chat_id: i64,
+    chat_kind: &str,
+    from: Option<&crate::telegram::User>,
+) -> bool {
+    is_allowed(telegram_chat_ids, chat_id)
+        && chat_kind == "private"
+        && from.is_some_and(|user| user.id == chat_id)
 }
 
 fn handle_resume_command(
@@ -826,6 +858,7 @@ fn run_job(
             tg.set_message_reaction(job.chat_id, job.reply_to_message_id, "👍")
         }
         FinalDelivery::Message(final_text) => {
+            let final_text = redact_private_data(&final_text);
             let parts = split_telegram_message(&final_text);
             if let Some(first) = parts.first() {
                 send_final_message(tg, &job, stream_message_id, first)?;
@@ -847,9 +880,10 @@ fn send_final_message(
     first: &str,
 ) -> Result<(), String> {
     let _ = tg.delete_message(job.chat_id, stream_message_id);
+    let first = redact_private_data(first);
     match tg.send_message_with_effect(
         job.chat_id,
-        first,
+        &first,
         job.reply_to_message_id,
         FINAL_MESSAGE_EFFECT_ID,
     ) {
@@ -870,7 +904,7 @@ fn send_final_message(
                 "[gateway] telegram final effect failed chat={} effect={} error={}",
                 job.chat_id, FINAL_MESSAGE_EFFECT_ID, err
             );
-            tg.send_message(job.chat_id, first, job.reply_to_message_id)
+            tg.send_message(job.chat_id, &first, job.reply_to_message_id)
         }
     }
 }
@@ -911,7 +945,8 @@ fn final_delivery(text: &str) -> FinalDelivery {
 }
 
 fn stream_preview(text: &str) -> String {
-    let text = text.trim();
+    let redacted = redact_private_data(text);
+    let text = redacted.trim();
     if text.is_empty() {
         return "⏳ Codex is thinking…".to_string();
     }
@@ -936,7 +971,8 @@ fn send_long_message(
     text: &str,
     reply_to_message_id: i64,
 ) -> Result<(), String> {
-    for (index, part) in split_telegram_message(text).into_iter().enumerate() {
+    let text = redact_private_data(text);
+    for (index, part) in split_telegram_message(&text).into_iter().enumerate() {
         let reply = if index == 0 { reply_to_message_id } else { 0 };
         tg.send_message(chat_id, &part, reply)?;
     }
@@ -1222,6 +1258,49 @@ mod tests {
         assert!(tg.calls().iter().any(|call| {
             matches!(call, Call::Send { text, reply_to: 4, .. } if text.contains("🚦 Codex queue is full"))
         }));
+    }
+
+    #[test]
+    fn handle_message_ignores_allowed_non_private_chat() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let tg = FakeTelegram::new();
+        let selections = RuntimeSelections::default();
+        let (tx, rx) = mpsc::sync_channel(1);
+        let mut msg = message(42, 5, "run this");
+        msg.chat.kind = "group".to_string();
+
+        handle_message(&cfg, &tg, &store, &selections, &tx, msg).unwrap();
+
+        assert!(tg.calls().is_empty());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn handle_message_ignores_private_chat_when_sender_does_not_match_chat() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let tg = FakeTelegram::new();
+        let selections = RuntimeSelections::default();
+        let (tx, rx) = mpsc::sync_channel(1);
+        let mut msg = message(42, 5, "run this");
+        msg.from = Some(User {
+            id: 7,
+            username: String::new(),
+        });
+
+        handle_message(&cfg, &tg, &store, &selections, &tx, msg).unwrap();
+
+        assert!(tg.calls().is_empty());
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
@@ -1595,6 +1674,30 @@ printf 'session id: aaaaaaaa-current\n' >&2
     }
 
     #[test]
+    fn callback_query_ignores_private_chat_when_sender_does_not_match_chat() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let tg = FakeTelegram::new();
+        let selections = RuntimeSelections::default();
+        let (tx, rx) = mpsc::sync_channel(1);
+
+        let mut query = callback_query("callback-1", message(42, 10, "/model"), "model:2");
+        query.from.id = 7;
+        handle_callback_query(&cfg, &tg, &store, &selections, query).unwrap();
+        assert!(tg.calls().is_empty());
+
+        handle_message(&cfg, &tg, &store, &selections, &tx, message(42, 11, "run")).unwrap();
+
+        let job = rx.recv().unwrap();
+        assert_eq!(job.provider_model.provider, Provider::Codex);
+        assert_eq!(job.provider_model.model, "gpt-test");
+    }
+
+    #[test]
     fn handle_command_reports_session_and_config_write_errors() {
         let dir = tempdir().unwrap();
         let mut cfg = test_config(dir.path());
@@ -1626,6 +1729,33 @@ printf 'session id: aaaaaaaa-current\n' >&2
             .iter()
             .any(|text| text.contains("⚠️ Failed to reset session")));
         assert!(sent.iter().any(|text| text.contains("No current session")));
+    }
+
+    #[test]
+    fn log_command_redacts_sensitive_values_before_sending() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let tg = FakeTelegram::new();
+        let selections = RuntimeSelections::default();
+        let msg = message(42, 12, "/log 10");
+        fs::create_dir_all(cfg.gateway_log_file.parent().unwrap()).unwrap();
+        fs::write(
+            &cfg.gateway_log_file,
+            "OPENAI_API_KEY=sk-test-secret-value\nAuthorization: Bearer bearer-secret-token\n",
+        )
+        .unwrap();
+
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/log 10", "/log").unwrap();
+
+        let sent = tg.sent_text().join("\n");
+        assert!(!sent.contains("sk-test-secret-value"));
+        assert!(!sent.contains("bearer-secret-token"));
+        assert!(sent.contains("OPENAI_API_KEY=<redacted>"));
+        assert!(sent.contains("Authorization: Bearer <redacted>"));
     }
 
     #[test]
@@ -1719,6 +1849,43 @@ printf 'final text\n' > "$out"
         run_job(&cfg, &tg, &store, job("answer")).unwrap();
 
         assert!(tg.sent_text().contains(&"final text".to_string()));
+    }
+
+    #[test]
+    fn run_job_redacts_final_text_before_sending_to_telegram() {
+        let dir = tempdir().unwrap();
+        let mut cfg = test_config(dir.path());
+        cfg.codex_bin = executable(
+            dir.path().join("codex-secret"),
+            r#"#!/bin/sh
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--output-last-message" ]; then out="$arg"; fi
+  prev="$arg"
+done
+cat >/dev/null
+printf 'OPENAI_API_KEY=sk-test-secret-value\n' > "$out"
+"#,
+        );
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let tg = FakeTelegram::new();
+
+        run_job(&cfg, &tg, &store, job("answer")).unwrap();
+
+        let delivered = tg
+            .calls()
+            .into_iter()
+            .find_map(|call| match call {
+                Call::Effect { text, .. } => Some(text),
+                _ => None,
+            })
+            .unwrap();
+        assert!(!delivered.contains("sk-test-secret-value"));
+        assert!(delivered.contains("OPENAI_API_KEY=<redacted>"));
     }
 
     #[test]
@@ -1827,7 +1994,7 @@ exit 2
     #[test]
     fn telegram_client_trait_impl_delegates_to_inherent_methods() {
         let mut responses = vec![json_response(r#"{"ok":true,"result":[]}"#)];
-        responses.extend((0..24).map(|_| json_response(r#"{"ok":true,"result":true}"#)));
+        responses.extend((0..18).map(|_| json_response(r#"{"ok":true,"result":true}"#)));
         responses.extend([
             json_response(r#"{"ok":true,"result":{}}"#),
             json_response(telegram_message_json(101, None).as_str()),
@@ -2211,7 +2378,10 @@ printf 'OS: test\n'
             message_id,
             message_thread_id: None,
             effect_id: None,
-            from: None,
+            from: Some(User {
+                id: chat_id,
+                username: String::new(),
+            }),
             chat: Chat {
                 id: chat_id,
                 kind: "private".to_string(),
@@ -2223,10 +2393,11 @@ printf 'OS: test\n'
     }
 
     fn callback_query(id: &str, message: Message, data: &str) -> CallbackQuery {
+        let chat_id = message.chat.id;
         CallbackQuery {
             id: id.to_string(),
             from: User {
-                id: 1,
+                id: chat_id,
                 username: String::new(),
             },
             message: Some(message),

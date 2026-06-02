@@ -38,6 +38,151 @@ pub fn split_telegram_message(text: &str) -> Vec<String> {
     parts
 }
 
+pub fn redact_private_data(text: &str) -> String {
+    let mut redacted = Vec::new();
+    let mut in_private_key = false;
+
+    for line in text.lines() {
+        if is_private_key_boundary(line, "begin") {
+            redacted.push("-----BEGIN <redacted> PRIVATE KEY-----".to_string());
+            in_private_key = true;
+            continue;
+        }
+        if in_private_key {
+            if is_private_key_boundary(line, "end") {
+                in_private_key = false;
+            }
+            continue;
+        }
+        redacted.push(redact_sensitive_line(line));
+    }
+
+    let mut out = redacted.join("\n");
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+fn redact_sensitive_line(line: &str) -> String {
+    let line = redact_bearer_token(line);
+    let line = redact_sensitive_assignment(&line);
+    redact_prefixed_tokens(&line)
+}
+
+fn redact_bearer_token(line: &str) -> String {
+    let Some(start) = find_ascii_case_insensitive(line, "Bearer ") else {
+        return line.to_string();
+    };
+    let token_start = start + "Bearer ".len();
+    let token_end = token_end(line, token_start);
+    if token_start == token_end {
+        return line.to_string();
+    }
+    format!("{}<redacted>{}", &line[..token_start], &line[token_end..])
+}
+
+fn redact_sensitive_assignment(line: &str) -> String {
+    if line.contains("<redacted>") {
+        return line.to_string();
+    }
+    let Some((index, separator)) = line
+        .char_indices()
+        .find(|(_, ch)| matches!(ch, '=' | ':'))
+        .map(|(index, ch)| (index, ch))
+    else {
+        return line.to_string();
+    };
+    let key = line[..index]
+        .trim()
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`'));
+    if !is_sensitive_key(key) {
+        return line.to_string();
+    }
+
+    let value = &line[index + separator.len_utf8()..];
+    let spacing: String = value.chars().take_while(|ch| ch.is_whitespace()).collect();
+    format!("{}{}{}<redacted>", &line[..index], separator, spacing)
+}
+
+fn redact_prefixed_tokens(line: &str) -> String {
+    let mut out = line.to_string();
+    for prefix in [
+        "sk-",
+        "sk-ant-",
+        "ghp_",
+        "gho_",
+        "github_pat_",
+        "xoxb-",
+        "xoxp-",
+    ] {
+        out = redact_tokens_with_prefix(&out, prefix);
+    }
+    out
+}
+
+fn redact_tokens_with_prefix(line: &str, prefix: &str) -> String {
+    let mut out = String::new();
+    let mut rest = line;
+    while let Some(index) = rest.find(prefix) {
+        out.push_str(&rest[..index]);
+        let token_start = index;
+        let token_end = token_end(rest, token_start);
+        if token_end - token_start >= prefix.len() + 8 {
+            out.push_str("<redacted>");
+        } else {
+            out.push_str(&rest[token_start..token_end]);
+        }
+        rest = &rest[token_end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn token_end(text: &str, start: usize) -> usize {
+    text[start..]
+        .char_indices()
+        .find_map(|(offset, ch)| {
+            (ch.is_whitespace() || matches!(ch, ',' | ';' | '"' | '\'' | '`' | '<' | '>'))
+                .then_some(start + offset)
+        })
+        .unwrap_or(text.len())
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    [
+        "api_key",
+        "apikey",
+        "authorization",
+        "auth_header",
+        "cookie",
+        "password",
+        "private_key",
+        "secret",
+        "seed_phrase",
+        "session_token",
+        "token",
+    ]
+    .iter()
+    .any(|part| normalized.contains(part))
+}
+
+fn is_private_key_boundary(line: &str, boundary: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains(&format!("-----{boundary}"))
+        && lower.contains("private key")
+        && lower.contains("-----")
+}
+
+fn find_ascii_case_insensitive(text: &str, needle: &str) -> Option<usize> {
+    text.to_ascii_lowercase().find(&needle.to_ascii_lowercase())
+}
+
 pub fn parse_command(text: &str) -> Option<String> {
     let first = text.split_whitespace().next()?;
     if !first.starts_with('/') {

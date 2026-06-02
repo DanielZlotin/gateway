@@ -18,7 +18,7 @@ cargo build --release
 
 ```zsh
 export GATEWAY_TELEGRAM_TOKEN=...
-export GATEWAY_TELEGRAM_CHAT_IDS=123456789,-1001234567890
+export GATEWAY_TELEGRAM_CHAT_IDS=123456789
 ```
 
 ⚙️ Optional:
@@ -90,6 +90,7 @@ gateway logs [lines]
 gateway paths
 gateway uninstall
 gateway run --prompt "Summarize status"
+gateway run --chat 123456789 --prompt "Summarize status"
 gateway run --prompt-file ./prompt.txt
 printf '%s\n' "Summarize status" | gateway run
 ```
@@ -99,8 +100,12 @@ printf '%s\n' "Summarize status" | gateway run
 1. 💬 Prompt input comes from `--prompt`, then `--prompt-file`, then stdin.
 2. 🆕 Each invocation starts a fresh Codex session.
 3. 🤖 `--model NAME` overrides the default model for that run.
-4. 📤 Final text is printed to stdout.
-5. 📬 Non-empty, non-`OK` final text is also sent to allowed Telegram chats.
+4. 📤 Final text is always printed to stdout.
+5. 📬 Non-empty, non-`OK` final text is sent to one Telegram chat.
+6. 🎯 Without `--chat`, Telegram output goes to the first configured private
+   chat ID.
+7. 💬 With `--chat ID`, Telegram output goes only to that ID, and the ID must
+   already be listed in `GATEWAY_TELEGRAM_CHAT_IDS`.
 
 🧭 Other commands:
 
@@ -111,8 +116,8 @@ printf '%s\n' "Summarize status" | gateway run
 
 ## 🤖 Telegram Bot
 
-Allowed chats can send text messages or captions as Codex prompts. Sessions are
-kept separately per chat/thread, and commands are case-insensitive.
+Allowed private chats can send text messages or captions as Codex prompts.
+Sessions are kept separately per chat, and commands are case-insensitive.
 
 ```text
 ❔ /help - show supported gateway directives

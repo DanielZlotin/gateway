@@ -2,7 +2,7 @@ use crate::cli::RunArgs;
 use crate::codex::{run_codex, CodexConfig};
 use crate::config::Config;
 use crate::telegram::TelegramClient;
-use crate::text::{is_ok_response, split_telegram_message};
+use crate::text::{is_ok_response, redact_private_data, split_telegram_message};
 use std::fs;
 use std::io::Read;
 
@@ -32,6 +32,23 @@ fn should_send_telegram_result(text: &str) -> bool {
     !text.is_empty() && !is_ok_response(text)
 }
 
+fn target_chat_id(args: &RunArgs, cfg: &Config) -> Result<i64, String> {
+    let Some(chat_id) = args.chat else {
+        return cfg
+            .telegram_chat_ids
+            .first()
+            .copied()
+            .ok_or_else(|| "GATEWAY_TELEGRAM_CHAT_IDS must include at least one id".to_string());
+    };
+    if cfg.telegram_chat_ids.contains(&chat_id) {
+        Ok(chat_id)
+    } else {
+        Err(format!(
+            "chat {chat_id} is not in GATEWAY_TELEGRAM_CHAT_IDS"
+        ))
+    }
+}
+
 pub fn run(args: RunArgs, cfg: Config) -> Result<String, String> {
     run_with_sender(args, cfg, |bot_token, chat_id, text| {
         let tg = TelegramClient::new(bot_token);
@@ -50,6 +67,7 @@ fn run_with_sender(
         .model
         .as_deref()
         .unwrap_or(&default_provider_model.model);
+    let chat_id = target_chat_id(&args, &cfg)?;
     let output = run_codex(
         &CodexConfig::from(&cfg),
         &prompt,
@@ -60,10 +78,9 @@ fn run_with_sender(
         &cfg.state_dir,
     )?;
     if should_send_telegram_result(&output.final_text) {
-        for chat_id in &cfg.telegram_chat_ids {
-            for part in split_telegram_message(&output.final_text) {
-                send_telegram(&cfg.bot_token, *chat_id, &part)?;
-            }
+        let telegram_text = redact_private_data(&output.final_text);
+        for part in split_telegram_message(&telegram_text) {
+            send_telegram(&cfg.bot_token, chat_id, &part)?;
         }
     }
     Ok(output.final_text)
@@ -85,6 +102,7 @@ mod tests {
             prompt: None,
             prompt_file: None,
             model: None,
+            chat: None,
         }
     }
 
@@ -179,6 +197,7 @@ printf 'session id: session-cli\n' >&2
     fn run_mode_sends_non_ok_results_without_saving_session_state() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = test_config(dir.path());
+        cfg.telegram_chat_ids = vec![42, 77];
         cfg.codex_bin = executable(
             dir.path().join("codex-final"),
             r#"#!/bin/sh
@@ -199,6 +218,7 @@ printf 'session id: session-run\n' >&2
             prompt: Some("work".to_string()),
             prompt_file: None,
             model: Some("gpt-override".to_string()),
+            chat: None,
         };
 
         let output = run_with_sender(args, cfg.clone(), move |token, chat_id, text| {
@@ -215,6 +235,111 @@ printf 'session id: session-run\n' >&2
             vec![("token".to_string(), 42, "done".to_string())]
         );
         assert!(!cfg.chat_state_dir.exists());
+    }
+
+    #[test]
+    fn run_mode_sends_to_requested_allowed_chat_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_config(dir.path());
+        cfg.telegram_chat_ids = vec![42, 77];
+        cfg.codex_bin = executable(
+            dir.path().join("codex-final"),
+            r#"#!/bin/sh
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--output-last-message" ]; then out="$arg"; fi
+  prev="$arg"
+done
+cat >/dev/null
+printf 'done\n' > "$out"
+"#,
+        );
+        let sends = Arc::new(Mutex::new(Vec::new()));
+        let sent = sends.clone();
+        let args = RunArgs {
+            prompt: Some("work".to_string()),
+            prompt_file: None,
+            model: None,
+            chat: Some(77),
+        };
+
+        let output = run_with_sender(args, cfg, move |token, chat_id, text| {
+            sent.lock()
+                .unwrap()
+                .push((token.to_string(), chat_id, text.to_string()));
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(output, "done");
+        assert_eq!(
+            *sends.lock().unwrap(),
+            vec![("token".to_string(), 77, "done".to_string())]
+        );
+    }
+
+    #[test]
+    fn run_mode_rejects_requested_chat_outside_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_config(dir.path());
+        cfg.telegram_chat_ids = vec![42];
+        let mut args = base_args();
+        args.chat = Some(77);
+
+        let err = target_chat_id(&args, &cfg).unwrap_err();
+
+        assert!(err.contains("not in GATEWAY_TELEGRAM_CHAT_IDS"));
+    }
+
+    #[test]
+    fn run_mode_rejects_unconfigured_chat_before_starting_codex() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_config(dir.path());
+        cfg.telegram_chat_ids = vec![42];
+        cfg.codex_bin = dir.path().join("missing-codex");
+        let mut args = base_args();
+        args.prompt = Some("work".to_string());
+        args.chat = Some(77);
+
+        let err = run_with_sender(args, cfg, |_, _, _| Ok(())).unwrap_err();
+
+        assert!(err.contains("not in GATEWAY_TELEGRAM_CHAT_IDS"));
+        assert!(!err.contains("start codex"));
+    }
+
+    #[test]
+    fn run_mode_redacts_telegram_result_without_changing_stdout() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_config(dir.path());
+        cfg.codex_bin = executable(
+            dir.path().join("codex-secret"),
+            r#"#!/bin/sh
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--output-last-message" ]; then out="$arg"; fi
+  prev="$arg"
+done
+cat >/dev/null
+printf 'OPENAI_API_KEY=sk-test-secret-value\n' > "$out"
+"#,
+        );
+        let sends = Arc::new(Mutex::new(Vec::new()));
+        let sent = sends.clone();
+        let mut args = base_args();
+        args.prompt = Some("work".to_string());
+
+        let output = run_with_sender(args, cfg, move |_, _, text| {
+            sent.lock().unwrap().push(text.to_string());
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(output.contains("sk-test-secret-value"));
+        let sent = sends.lock().unwrap().join("\n");
+        assert!(!sent.contains("sk-test-secret-value"));
+        assert!(sent.contains("OPENAI_API_KEY=<redacted>"));
     }
 
     #[test]
