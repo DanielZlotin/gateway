@@ -23,10 +23,8 @@ pub struct Config {
     pub xdg_data_home: PathBuf,
     pub xdg_state_home: PathBuf,
     pub gateway_config_file: PathBuf,
-    pub codex_bin: PathBuf,
     pub codex_workdir: PathBuf,
     pub models: Vec<ProviderModel>,
-    pub fastfetch_bin: PathBuf,
     pub state_dir: PathBuf,
     pub chat_state_dir: PathBuf,
     pub offset_file: PathBuf,
@@ -80,10 +78,8 @@ pub fn load_from_env(env: &BTreeMap<String, String>) -> Result<Config, String> {
         xdg_data_home,
         xdg_state_home,
         gateway_config_file,
-        codex_bin: PathBuf::from("codex"),
         codex_workdir: path(env, "GATEWAY_CODEX_WORKDIR", xdg_config_home),
         models: gateway_config.models,
-        fastfetch_bin: PathBuf::from("fastfetch"),
         state_dir: state_dir.clone(),
         chat_state_dir,
         offset_file: state_dir.join("telegram.offset"),
@@ -274,14 +270,12 @@ impl Config {
             path_line("xdg_state_home", &self.xdg_state_home),
             path_line("gateway_config_file", &self.gateway_config_file),
             path_line("gateway_executable", &gateway_executable),
-            path_line("codex_bin", &self.codex_bin),
             path_line("codex_workdir", &self.codex_workdir),
         ];
         for (index, model) in self.models.iter().enumerate() {
-            lines.extend(model_lines(index, model));
+            lines.push(model_line(index, model));
         }
         lines.extend([
-            path_line("fastfetch_bin", &self.fastfetch_bin),
             path_line("state_dir", &self.state_dir),
             path_line("chat_state_dir", &self.chat_state_dir),
             path_line("offset_file", &self.offset_file),
@@ -295,18 +289,16 @@ impl Config {
             value_line("poll_timeout_sec", self.poll_timeout_sec),
             value_line("queue_depth", self.queue_depth),
             value_line("codex_timeout_sec", self.codex_timeout.as_secs()),
-            value_line("telegram_token", token_status(&self.bot_token)),
-            value_line("telegram_chat_ids", join_i64s(&self.telegram_chat_ids)),
         ]);
         format_report(lines)
     }
 }
 
-fn model_lines(index: usize, model: &ProviderModel) -> [(String, String); 2] {
-    [
-        value_line(&format!("models[{index}].provider"), model.provider.label()),
-        value_line(&format!("models[{index}].model"), &model.model),
-    ]
+fn model_line(index: usize, model: &ProviderModel) -> (String, String) {
+    value_line(
+        &format!("models[{index}]"),
+        format!("{}:{}", model.provider.key(), model.model),
+    )
 }
 
 fn path_line(name: &str, path: &Path) -> (String, String) {
@@ -315,22 +307,6 @@ fn path_line(name: &str, path: &Path) -> (String, String) {
 
 fn value_line(name: &str, value: impl Display) -> (String, String) {
     (name.to_string(), value.to_string())
-}
-
-fn token_status(token: &str) -> &'static str {
-    if token.trim().is_empty() {
-        "missing"
-    } else {
-        "set"
-    }
-}
-
-fn join_i64s(values: &[i64]) -> String {
-    values
-        .iter()
-        .map(i64::to_string)
-        .collect::<Vec<_>>()
-        .join(",")
 }
 
 fn format_report(lines: Vec<(String, String)>) -> String {
@@ -412,7 +388,6 @@ mod tests {
         assert!(cfg.xdg_cache_home.ends_with("cache"));
         assert!(cfg.xdg_data_home.ends_with("data"));
         assert!(cfg.xdg_state_home.ends_with("state"));
-        assert_eq!(cfg.codex_bin, PathBuf::from("codex"));
         assert_eq!(cfg.codex_workdir, cfg.xdg_config_home);
         assert_eq!(cfg.state_dir, cfg.xdg_state_home.join("gateway"));
         assert_eq!(cfg.gateway_log_file, cfg.state_dir.join("logs/gateway.log"));
@@ -470,15 +445,10 @@ mod tests {
                 "xdg_state_home",
                 "gateway_config_file",
                 "gateway_executable",
-                "codex_bin",
                 "codex_workdir",
-                "models[0].provider",
-                "models[0].model",
-                "models[1].provider",
-                "models[1].model",
-                "models[2].provider",
-                "models[2].model",
-                "fastfetch_bin",
+                "models[0]",
+                "models[1]",
+                "models[2]",
                 "state_dir",
                 "chat_state_dir",
                 "offset_file",
@@ -488,16 +458,15 @@ mod tests {
                 "poll_timeout_sec",
                 "queue_depth",
                 "codex_timeout_sec",
-                "telegram_token",
-                "telegram_chat_ids",
             ]
         );
-        assert!(report.contains("models[0].provider=Codex"));
-        assert!(report.contains("models[0].model=gpt-5.5"));
-        assert!(report.contains("models[1].provider=Claude"));
-        assert!(report.contains("models[2].provider=OpenRouter"));
-        assert!(report.contains("telegram_token=set"));
-        assert!(report.contains("telegram_chat_ids=42"));
+        assert!(report.contains("models[0]=codex:gpt-5.5"));
+        assert!(report.contains("models[1]=claude:claude-opus-4-8"));
+        assert!(report.contains("models[2]=openrouter:openai/gpt-5.5"));
+        assert!(!report.contains("telegram_token"));
+        assert!(!report.contains("telegram_chat_ids"));
+        assert!(!report.contains("codex_bin"));
+        assert!(!report.contains("fastfetch_bin"));
         assert!(!report.contains("bot_token=token"));
     }
 
@@ -518,9 +487,7 @@ mod tests {
             &root.join("config/gateway/config.json"),
         );
         assert!(report.contains("gateway_executable="));
-        assert!(report.contains("codex_bin=codex"));
         assert_path_line(&report, "codex_workdir", &root.join("config"));
-        assert!(report.contains("fastfetch_bin=fastfetch"));
         assert_path_line(&report, "state_dir", &root.join("state/gateway"));
         assert_path_line(&report, "chat_state_dir", &root.join("state/gateway/chats"));
         assert_path_line(
@@ -542,8 +509,13 @@ mod tests {
         assert!(report.contains("poll_timeout_sec=50"));
         assert!(report.contains("queue_depth=8"));
         assert!(report.contains("codex_timeout_sec=1800"));
-        assert!(report.contains("telegram_token=set"));
-        assert!(report.contains("telegram_chat_ids=42"));
+        assert!(report.contains("models[0]=codex:gpt-5.5"));
+        assert!(report.contains("models[1]=claude:claude-opus-4-8"));
+        assert!(report.contains("models[2]=openrouter:openai/gpt-5.5"));
+        assert!(!report.contains("telegram_token"));
+        assert!(!report.contains("telegram_chat_ids"));
+        assert!(!report.contains("codex_bin"));
+        assert!(!report.contains("fastfetch_bin"));
     }
 
     #[test]

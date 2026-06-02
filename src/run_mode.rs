@@ -59,6 +59,16 @@ pub fn run(args: RunArgs, cfg: Config) -> Result<String, String> {
 fn run_with_sender(
     args: RunArgs,
     cfg: Config,
+    send_telegram: impl FnMut(&str, i64, &str) -> Result<(), String>,
+) -> Result<String, String> {
+    let codex = CodexConfig::from(&cfg);
+    run_with_sender_and_codex(args, cfg, &codex, send_telegram)
+}
+
+fn run_with_sender_and_codex(
+    args: RunArgs,
+    cfg: Config,
+    codex: &CodexConfig,
     mut send_telegram: impl FnMut(&str, i64, &str) -> Result<(), String>,
 ) -> Result<String, String> {
     let prompt = load_prompt(&args, std::io::stdin())?;
@@ -69,7 +79,7 @@ fn run_with_sender(
         .unwrap_or(&default_provider_model.model);
     let chat_id = target_chat_id(&args, &cfg)?;
     let output = run_codex(
-        &CodexConfig::from(&cfg),
+        codex,
         &prompt,
         None,
         default_provider_model.provider,
@@ -160,10 +170,12 @@ mod tests {
     #[test]
     fn run_mode_returns_ok_and_sends_no_telegram_message() {
         let dir = tempfile::tempdir().unwrap();
-        let mut cfg = test_config(dir.path());
-        cfg.codex_bin = executable(
-            dir.path().join("codex-ok"),
-            r#"#!/bin/sh
+        let cfg = test_config(dir.path());
+        let codex = test_codex_config(
+            &cfg,
+            executable(
+                dir.path().join("codex-ok"),
+                r#"#!/bin/sh
 out=""
 prev=""
 for arg in "$@"; do
@@ -174,19 +186,21 @@ cat >/dev/null
 printf 'OK\n' > "$out"
 printf 'session id: session-cli\n' >&2
 "#,
+            ),
         );
         let sends = Arc::new(Mutex::new(Vec::new()));
         let sent = sends.clone();
         let mut args = base_args();
         args.prompt = Some("finish quietly".to_string());
 
-        let output = run_with_sender(args, cfg.clone(), move |token, chat_id, text| {
-            sent.lock()
-                .unwrap()
-                .push((token.to_string(), chat_id, text.to_string()));
-            Ok(())
-        })
-        .unwrap();
+        let output =
+            run_with_sender_and_codex(args, cfg.clone(), &codex, move |token, chat_id, text| {
+                sent.lock()
+                    .unwrap()
+                    .push((token.to_string(), chat_id, text.to_string()));
+                Ok(())
+            })
+            .unwrap();
 
         assert_eq!(output, "OK");
         assert!(sends.lock().unwrap().is_empty());
@@ -198,9 +212,11 @@ printf 'session id: session-cli\n' >&2
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = test_config(dir.path());
         cfg.telegram_chat_ids = vec![42, 77];
-        cfg.codex_bin = executable(
-            dir.path().join("codex-final"),
-            r#"#!/bin/sh
+        let codex = test_codex_config(
+            &cfg,
+            executable(
+                dir.path().join("codex-final"),
+                r#"#!/bin/sh
 out=""
 prev=""
 for arg in "$@"; do
@@ -211,6 +227,7 @@ cat >/dev/null
 printf 'done\n' > "$out"
 printf 'session id: session-run\n' >&2
 "#,
+            ),
         );
         let sends = Arc::new(Mutex::new(Vec::new()));
         let sent = sends.clone();
@@ -221,13 +238,14 @@ printf 'session id: session-run\n' >&2
             chat: None,
         };
 
-        let output = run_with_sender(args, cfg.clone(), move |token, chat_id, text| {
-            sent.lock()
-                .unwrap()
-                .push((token.to_string(), chat_id, text.to_string()));
-            Ok(())
-        })
-        .unwrap();
+        let output =
+            run_with_sender_and_codex(args, cfg.clone(), &codex, move |token, chat_id, text| {
+                sent.lock()
+                    .unwrap()
+                    .push((token.to_string(), chat_id, text.to_string()));
+                Ok(())
+            })
+            .unwrap();
 
         assert_eq!(output, "done");
         assert_eq!(
@@ -242,9 +260,11 @@ printf 'session id: session-run\n' >&2
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = test_config(dir.path());
         cfg.telegram_chat_ids = vec![42, 77];
-        cfg.codex_bin = executable(
-            dir.path().join("codex-final"),
-            r#"#!/bin/sh
+        let codex = test_codex_config(
+            &cfg,
+            executable(
+                dir.path().join("codex-final"),
+                r#"#!/bin/sh
 out=""
 prev=""
 for arg in "$@"; do
@@ -254,6 +274,7 @@ done
 cat >/dev/null
 printf 'done\n' > "$out"
 "#,
+            ),
         );
         let sends = Arc::new(Mutex::new(Vec::new()));
         let sent = sends.clone();
@@ -264,7 +285,7 @@ printf 'done\n' > "$out"
             chat: Some(77),
         };
 
-        let output = run_with_sender(args, cfg, move |token, chat_id, text| {
+        let output = run_with_sender_and_codex(args, cfg, &codex, move |token, chat_id, text| {
             sent.lock()
                 .unwrap()
                 .push((token.to_string(), chat_id, text.to_string()));
@@ -297,7 +318,6 @@ printf 'done\n' > "$out"
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = test_config(dir.path());
         cfg.telegram_chat_ids = vec![42];
-        cfg.codex_bin = dir.path().join("missing-codex");
         let mut args = base_args();
         args.prompt = Some("work".to_string());
         args.chat = Some(77);
@@ -311,10 +331,12 @@ printf 'done\n' > "$out"
     #[test]
     fn run_mode_redacts_telegram_result_without_changing_stdout() {
         let dir = tempfile::tempdir().unwrap();
-        let mut cfg = test_config(dir.path());
-        cfg.codex_bin = executable(
-            dir.path().join("codex-secret"),
-            r#"#!/bin/sh
+        let cfg = test_config(dir.path());
+        let codex = test_codex_config(
+            &cfg,
+            executable(
+                dir.path().join("codex-secret"),
+                r#"#!/bin/sh
 out=""
 prev=""
 for arg in "$@"; do
@@ -324,13 +346,14 @@ done
 cat >/dev/null
 printf 'OPENAI_API_KEY=sk-test-secret-value\n' > "$out"
 "#,
+            ),
         );
         let sends = Arc::new(Mutex::new(Vec::new()));
         let sent = sends.clone();
         let mut args = base_args();
         args.prompt = Some("work".to_string());
 
-        let output = run_with_sender(args, cfg, move |_, _, text| {
+        let output = run_with_sender_and_codex(args, cfg, &codex, move |_, _, text| {
             sent.lock().unwrap().push(text.to_string());
             Ok(())
         })
@@ -345,22 +368,28 @@ printf 'OPENAI_API_KEY=sk-test-secret-value\n' > "$out"
     #[test]
     fn run_mode_propagates_codex_and_telegram_errors() {
         let dir = tempfile::tempdir().unwrap();
-        let mut cfg = test_config(dir.path());
-        cfg.codex_bin = executable(
-            dir.path().join("codex-fails"),
-            r#"#!/bin/sh
+        let cfg = test_config(dir.path());
+        let failing_codex = test_codex_config(
+            &cfg,
+            executable(
+                dir.path().join("codex-fails"),
+                r#"#!/bin/sh
 printf 'codex failed\n' >&2
 exit 2
 "#,
+            ),
         );
         let mut args = base_args();
         args.prompt = Some("work".to_string());
-        let err = run_with_sender(args, cfg.clone(), |_, _, _| Ok(())).unwrap_err();
+        let err = run_with_sender_and_codex(args, cfg.clone(), &failing_codex, |_, _, _| Ok(()))
+            .unwrap_err();
         assert!(err.contains("codex failed"));
 
-        cfg.codex_bin = executable(
-            dir.path().join("codex-final"),
-            r#"#!/bin/sh
+        let final_codex = test_codex_config(
+            &cfg,
+            executable(
+                dir.path().join("codex-final"),
+                r#"#!/bin/sh
 out=""
 prev=""
 for arg in "$@"; do
@@ -370,11 +399,14 @@ done
 cat >/dev/null
 printf 'done\n' > "$out"
 "#,
+            ),
         );
         let mut args = base_args();
         args.prompt = Some("work".to_string());
-        let err =
-            run_with_sender(args, cfg, |_, _, _| Err("telegram failed".to_string())).unwrap_err();
+        let err = run_with_sender_and_codex(args, cfg, &final_codex, |_, _, _| {
+            Err("telegram failed".to_string())
+        })
+        .unwrap_err();
         assert_eq!(err, "telegram failed");
     }
 
@@ -387,13 +419,11 @@ printf 'done\n' > "$out"
             xdg_data_home: root.join("data"),
             xdg_state_home: root.join("state"),
             gateway_config_file: root.join("config/gateway/config.json"),
-            codex_bin: root.join("codex"),
             codex_workdir: root.to_path_buf(),
             models: vec![crate::config::ProviderModel {
                 provider: crate::provider::Provider::Codex,
                 model: "gpt-test".to_string(),
             }],
-            fastfetch_bin: PathBuf::from("fastfetch"),
             state_dir: root.join("state/gateway"),
             chat_state_dir: root.join("state/gateway/chats"),
             offset_file: root.join("state/gateway/telegram.offset"),
@@ -402,6 +432,14 @@ printf 'done\n' > "$out"
             poll_timeout_sec: 50,
             queue_depth: 8,
             codex_timeout: std::time::Duration::from_secs(5),
+        }
+    }
+
+    fn test_codex_config(cfg: &Config, bin: PathBuf) -> CodexConfig {
+        CodexConfig {
+            bin,
+            workdir: cfg.codex_workdir.clone(),
+            default_model: cfg.default_provider_model().model.clone(),
         }
     }
 

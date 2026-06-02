@@ -85,7 +85,11 @@ pub fn codex_status(cfg: &Config) -> String {
     }
 }
 
-pub fn fastfetch_status(bin: &Path) -> String {
+pub fn fastfetch_status() -> String {
+    fastfetch_status_with_bin(Path::new("fastfetch"))
+}
+
+fn fastfetch_status_with_bin(bin: &Path) -> String {
     match run_fastfetch(bin, FASTFETCH_TIMEOUT) {
         Ok((raw, timed_out)) => format_fastfetch_status(&raw, timed_out),
         Err(err) => format!("🖥️ fastfetch: {err}"),
@@ -702,7 +706,7 @@ exit 2
 
     #[test]
     fn fastfetch_status_reports_start_errors_and_known_keys() {
-        let missing = fastfetch_status(Path::new("/definitely/missing/fastfetch"));
+        let missing = fastfetch_status_with_bin(Path::new("/definitely/missing/fastfetch"));
         assert!(missing.contains("🖥️ fastfetch:"));
 
         let raw = [

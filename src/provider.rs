@@ -10,6 +10,14 @@ pub enum Provider {
 }
 
 impl Provider {
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+            Self::Openrouter => "openrouter",
+        }
+    }
+
     pub const fn label(self) -> &'static str {
         match self {
             Self::Codex => "Codex",

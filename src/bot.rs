@@ -209,7 +209,7 @@ fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
         default_model.provider,
     );
     let status_codex = codex_status(&cfg);
-    let status_fetch = fastfetch_status(&cfg.fastfetch_bin);
+    let status_fetch = fastfetch_status();
     for chat_id in &cfg.telegram_chat_ids {
         let state = store.load(&SessionKey::Chat {
             chat_id: *chat_id,
@@ -397,6 +397,20 @@ fn handle_command(
     text: &str,
     command: &str,
 ) -> Result<(), String> {
+    let codex = CodexConfig::from(cfg);
+    handle_command_with_codex(cfg, &codex, tg, store, selections, msg, text, command)
+}
+
+fn handle_command_with_codex(
+    cfg: &Config,
+    codex: &CodexConfig,
+    tg: &impl TelegramApi,
+    store: &SessionStore,
+    selections: &RuntimeSelections,
+    msg: &Message,
+    text: &str,
+    command: &str,
+) -> Result<(), String> {
     let key = SessionKey::Chat {
         chat_id: msg.chat.id,
         thread_id: msg.message_thread_id,
@@ -406,7 +420,7 @@ fn handle_command(
             send_long_message(tg, msg.chat.id, &cfg.config_report(), msg.message_id)
         }
         Some(Directive::Log) => handle_log_command(cfg, tg, msg, text),
-        Some(Directive::New) => handle_new_command(cfg, tg, store, selections, msg, &key),
+        Some(Directive::New) => handle_new_command(cfg, codex, tg, store, selections, msg, &key),
         Some(Directive::Restart) => {
             tg.send_message(msg.chat.id, "🔄 Restarting gateway.", msg.message_id)?;
             restart_gateway(&cfg.launchd_target);
@@ -415,7 +429,7 @@ fn handle_command(
         Some(Directive::Update) => handle_update_command(cfg, tg, msg),
         Some(Directive::Model) => handle_model_command(cfg, tg, store, selections, msg, text, &key),
         Some(Directive::Resume) => handle_resume_command(tg, store, selections, msg, text, &key),
-        Some(Directive::Rename) => handle_rename_command(cfg, tg, store, msg, text, &key),
+        Some(Directive::Rename) => handle_rename_command(cfg, codex, tg, store, msg, text, &key),
         Some(Directive::List) => {
             send_long_message(tg, msg.chat.id, &store.list(&key), msg.message_id)
         }
@@ -440,6 +454,7 @@ fn handle_log_command(
 
 fn handle_new_command(
     cfg: &Config,
+    codex: &CodexConfig,
     tg: &impl TelegramApi,
     store: &SessionStore,
     selections: &RuntimeSelections,
@@ -447,7 +462,8 @@ fn handle_new_command(
     key: &SessionKey,
 ) -> Result<(), String> {
     let state = store.load(key);
-    if current_session_is_unnamed(&state) && !auto_rename_current_session(cfg, tg, store, msg, key)?
+    if current_session_is_unnamed(&state)
+        && !auto_rename_current_session(cfg, codex, tg, store, msg, key)?
     {
         return Ok(());
     }
@@ -715,6 +731,7 @@ fn send_resumed_session(
 
 fn handle_rename_command(
     cfg: &Config,
+    codex: &CodexConfig,
     tg: &impl TelegramApi,
     store: &SessionStore,
     msg: &Message,
@@ -723,23 +740,25 @@ fn handle_rename_command(
 ) -> Result<(), String> {
     let name = command_arg(text);
     if name.is_empty() {
-        return handle_auto_rename_command(cfg, tg, store, msg, key);
+        return handle_auto_rename_command(cfg, codex, tg, store, msg, key);
     }
     rename_session(tg, store, msg, key, &name)
 }
 
 fn handle_auto_rename_command(
     cfg: &Config,
+    codex: &CodexConfig,
     tg: &impl TelegramApi,
     store: &SessionStore,
     msg: &Message,
     key: &SessionKey,
 ) -> Result<(), String> {
-    auto_rename_current_session(cfg, tg, store, msg, key).map(|_| ())
+    auto_rename_current_session(cfg, codex, tg, store, msg, key).map(|_| ())
 }
 
 fn auto_rename_current_session(
     cfg: &Config,
+    codex: &CodexConfig,
     tg: &impl TelegramApi,
     store: &SessionStore,
     msg: &Message,
@@ -757,7 +776,7 @@ fn auto_rename_current_session(
     }
     tg.send_message(msg.chat.id, "🏷️ Naming current session…", msg.message_id)?;
     let output = match run_codex(
-        &CodexConfig::from(cfg),
+        codex,
         AUTO_RENAME_PROMPT,
         state.session_id.as_deref(),
         Provider::Codex,
@@ -884,7 +903,7 @@ fn handle_status_command(
         &format_status_message(
             &state_with_provider_model(&state, &selected_provider_model(cfg, selections, key)),
             &codex_status(cfg),
-            &fastfetch_status(&cfg.fastfetch_bin),
+            &fastfetch_status(),
         ),
         msg.message_id,
     )
@@ -921,6 +940,17 @@ fn run_job(
     store: &SessionStore,
     job: Job,
 ) -> Result<(), String> {
+    let codex = CodexConfig::from(cfg);
+    run_job_with_codex(cfg, &codex, tg, store, job)
+}
+
+fn run_job_with_codex(
+    cfg: &Config,
+    codex: &CodexConfig,
+    tg: &impl TelegramApi,
+    store: &SessionStore,
+    job: Job,
+) -> Result<(), String> {
     let started = Instant::now();
     let key = SessionKey::Chat {
         chat_id: job.chat_id,
@@ -944,7 +974,7 @@ fn run_job(
     let run_result = {
         let _typing = start_typing_loop(tg, job.chat_id);
         run_codex_stream(
-            &CodexConfig::from(cfg),
+            codex,
             CodexRun {
                 prompt: &job.prompt,
                 session_id: state.session_id.as_deref(),
@@ -1702,6 +1732,23 @@ mod tests {
         );
         let tg = FakeTelegram::new();
         let selections = RuntimeSelections::default();
+        let codex = test_codex_config(
+            &cfg,
+            executable(
+                dir.path().join("codex-invalid-title"),
+                r#"#!/bin/sh
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--output-last-message" ]; then out="$arg"; fi
+  prev="$arg"
+done
+cat >/dev/null
+printf 'OK\n' > "$out"
+printf 'session id: session-12345678\n' >&2
+"#,
+            ),
+        );
         let msg = message(42, 10, "/help");
         let key = SessionKey::Chat {
             chat_id: 42,
@@ -1740,7 +1787,17 @@ mod tests {
             "/resume",
         )
         .unwrap();
-        handle_command(&cfg, &tg, &store, &selections, &msg, "/rename", "/rename").unwrap();
+        handle_command_with_codex(
+            &cfg,
+            &codex,
+            &tg,
+            &store,
+            &selections,
+            &msg,
+            "/rename",
+            "/rename",
+        )
+        .unwrap();
         handle_command(
             &cfg,
             &tg,
@@ -1770,7 +1827,7 @@ mod tests {
 
         let sent = tg.sent_text();
         assert!(sent.iter().any(|text| {
-            text.contains("telegram_chat_ids=42") && text.contains("models[0].model=gpt-test")
+            text.contains("models[0]=codex:gpt-test") && !text.contains("telegram_chat_ids")
         }));
         assert!(!sent.iter().any(|text| text.contains("bot_token=token")));
         assert!(sent
@@ -1942,10 +1999,12 @@ mod tests {
     #[test]
     fn rename_without_name_asks_codex_for_session_name() {
         let dir = tempdir().unwrap();
-        let mut cfg = test_config(dir.path());
-        cfg.codex_bin = executable(
-            dir.path().join("codex-title"),
-            r#"#!/bin/sh
+        let cfg = test_config(dir.path());
+        let codex = test_codex_config(
+            &cfg,
+            executable(
+                dir.path().join("codex-title"),
+                r#"#!/bin/sh
 printf '%s\n' "$@" > codex-title.args
 out=""
 prev=""
@@ -1957,6 +2016,7 @@ cat > codex-title.prompt
 printf '  session-name  \n' > "$out"
 printf 'session id: aaaaaaaa-current\n' >&2
 "#,
+            ),
         );
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
@@ -1973,7 +2033,17 @@ printf 'session id: aaaaaaaa-current\n' >&2
         let selections = RuntimeSelections::default();
         let msg = message(42, 10, "/rename");
 
-        handle_command(&cfg, &tg, &store, &selections, &msg, "/rename", "/rename").unwrap();
+        handle_command_with_codex(
+            &cfg,
+            &codex,
+            &tg,
+            &store,
+            &selections,
+            &msg,
+            "/rename",
+            "/rename",
+        )
+        .unwrap();
 
         let state = store.load(&key);
         assert_eq!(state.sessions[0].name.as_deref(), Some("session-name"));
@@ -1995,10 +2065,12 @@ printf 'session id: aaaaaaaa-current\n' >&2
     #[test]
     fn rename_without_name_rejects_invalid_codex_session_name() {
         let dir = tempdir().unwrap();
-        let mut cfg = test_config(dir.path());
-        cfg.codex_bin = executable(
-            dir.path().join("codex-invalid-title"),
-            r#"#!/bin/sh
+        let cfg = test_config(dir.path());
+        let codex = test_codex_config(
+            &cfg,
+            executable(
+                dir.path().join("codex-invalid-title"),
+                r#"#!/bin/sh
 out=""
 prev=""
 for arg in "$@"; do
@@ -2009,6 +2081,7 @@ cat >/dev/null
 printf 'Generated Session Name\n' > "$out"
 printf 'session id: aaaaaaaa-current\n' >&2
 "#,
+            ),
         );
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
@@ -2025,7 +2098,17 @@ printf 'session id: aaaaaaaa-current\n' >&2
         let selections = RuntimeSelections::default();
         let msg = message(42, 10, "/rename");
 
-        handle_command(&cfg, &tg, &store, &selections, &msg, "/rename", "/rename").unwrap();
+        handle_command_with_codex(
+            &cfg,
+            &codex,
+            &tg,
+            &store,
+            &selections,
+            &msg,
+            "/rename",
+            "/rename",
+        )
+        .unwrap();
 
         let state = store.load(&key);
         assert_eq!(state.sessions[0].name, None);
@@ -2056,10 +2139,12 @@ printf 'session id: aaaaaaaa-current\n' >&2
     #[test]
     fn new_auto_renames_current_unnamed_session_before_reset() {
         let dir = tempdir().unwrap();
-        let mut cfg = test_config(dir.path());
-        cfg.codex_bin = executable(
-            dir.path().join("codex-title-new"),
-            r#"#!/bin/sh
+        let cfg = test_config(dir.path());
+        let codex = test_codex_config(
+            &cfg,
+            executable(
+                dir.path().join("codex-title-new"),
+                r#"#!/bin/sh
 out=""
 prev=""
 for arg in "$@"; do
@@ -2070,6 +2155,7 @@ cat >/dev/null
 printf 'session-name\n' > "$out"
 printf 'session id: aaaaaaaa-current\n' >&2
 "#,
+            ),
         );
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
@@ -2086,7 +2172,8 @@ printf 'session id: aaaaaaaa-current\n' >&2
         let selections = RuntimeSelections::default();
         let msg = message(42, 10, "/new");
 
-        handle_command(&cfg, &tg, &store, &selections, &msg, "/new", "/new").unwrap();
+        handle_command_with_codex(&cfg, &codex, &tg, &store, &selections, &msg, "/new", "/new")
+            .unwrap();
 
         let state = store.load(&key);
         assert_eq!(state.session_id, None);
@@ -2322,10 +2409,12 @@ printf 'session id: aaaaaaaa-current\n' >&2
     #[test]
     fn run_job_saves_sessions_and_uses_reaction_for_ok_results() {
         let dir = tempdir().unwrap();
-        let mut cfg = test_config(dir.path());
-        cfg.codex_bin = executable(
-            dir.path().join("codex-ok"),
-            r#"#!/bin/sh
+        let cfg = test_config(dir.path());
+        let codex = test_codex_config(
+            &cfg,
+            executable(
+                dir.path().join("codex-ok"),
+                r#"#!/bin/sh
 out=""
 prev=""
 for arg in "$@"; do
@@ -2336,6 +2425,7 @@ cat >/dev/null
 printf 'OK\n' > "$out"
 printf 'session id: session-ok\n' >&2
 "#,
+            ),
         );
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
@@ -2343,7 +2433,7 @@ printf 'session id: session-ok\n' >&2
         );
         let tg = FakeTelegram::new();
 
-        run_job(&cfg, &tg, &store, job("make it so")).unwrap();
+        run_job_with_codex(&cfg, &codex, &tg, &store, job("make it so")).unwrap();
 
         let calls = tg.calls();
         assert!(calls.contains(&Call::SendReturning {
@@ -2375,10 +2465,12 @@ printf 'session id: session-ok\n' >&2
     #[test]
     fn run_job_sends_final_message_and_falls_back_without_effect() {
         let dir = tempdir().unwrap();
-        let mut cfg = test_config(dir.path());
-        cfg.codex_bin = executable(
-            dir.path().join("codex-final"),
-            r#"#!/bin/sh
+        let cfg = test_config(dir.path());
+        let codex = test_codex_config(
+            &cfg,
+            executable(
+                dir.path().join("codex-final"),
+                r#"#!/bin/sh
 out=""
 prev=""
 for arg in "$@"; do
@@ -2388,6 +2480,7 @@ done
 cat >/dev/null
 printf 'final text\n' > "$out"
 "#,
+            ),
         );
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
@@ -2396,7 +2489,7 @@ printf 'final text\n' > "$out"
         let tg = FakeTelegram::new();
         tg.push_effect(Ok(message_with_effect(200, None)));
 
-        run_job(&cfg, &tg, &store, job("answer")).unwrap();
+        run_job_with_codex(&cfg, &codex, &tg, &store, job("answer")).unwrap();
 
         assert!(tg.calls().contains(&Call::Effect {
             chat_id: 42,
@@ -2407,7 +2500,7 @@ printf 'final text\n' > "$out"
 
         let tg = FakeTelegram::new();
         tg.push_effect(Err("effect failed".to_string()));
-        run_job(&cfg, &tg, &store, job("answer")).unwrap();
+        run_job_with_codex(&cfg, &codex, &tg, &store, job("answer")).unwrap();
 
         assert!(tg.sent_text().contains(&"final text".to_string()));
     }
@@ -2415,10 +2508,12 @@ printf 'final text\n' > "$out"
     #[test]
     fn run_job_redacts_final_text_before_sending_to_telegram() {
         let dir = tempdir().unwrap();
-        let mut cfg = test_config(dir.path());
-        cfg.codex_bin = executable(
-            dir.path().join("codex-secret"),
-            r#"#!/bin/sh
+        let cfg = test_config(dir.path());
+        let codex = test_codex_config(
+            &cfg,
+            executable(
+                dir.path().join("codex-secret"),
+                r#"#!/bin/sh
 out=""
 prev=""
 for arg in "$@"; do
@@ -2428,6 +2523,7 @@ done
 cat >/dev/null
 printf 'OPENAI_API_KEY=sk-test-secret-value\n' > "$out"
 "#,
+            ),
         );
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
@@ -2435,7 +2531,7 @@ printf 'OPENAI_API_KEY=sk-test-secret-value\n' > "$out"
         );
         let tg = FakeTelegram::new();
 
-        run_job(&cfg, &tg, &store, job("answer")).unwrap();
+        run_job_with_codex(&cfg, &codex, &tg, &store, job("answer")).unwrap();
 
         let delivered = tg
             .calls()
@@ -2452,12 +2548,14 @@ printf 'OPENAI_API_KEY=sk-test-secret-value\n' > "$out"
     #[test]
     fn run_job_edits_stream_preview_and_sends_split_final_parts() {
         let dir = tempdir().unwrap();
-        let mut cfg = test_config(dir.path());
+        let cfg = test_config(dir.path());
         let final_text = "a".repeat(crate::text::TELEGRAM_MESSAGE_LIMIT + 20);
-        cfg.codex_bin = executable(
-            dir.path().join("codex-streams"),
-            &format!(
-                r#"#!/bin/sh
+        let codex = test_codex_config(
+            &cfg,
+            executable(
+                dir.path().join("codex-streams"),
+                &format!(
+                    r#"#!/bin/sh
 out=""
 prev=""
 for arg in "$@"; do
@@ -2470,7 +2568,8 @@ sleep 2
 printf 'second\n'
 printf '%s\n' '{}' > "$out"
 "#,
-                final_text
+                    final_text
+                ),
             ),
         );
         let store = SessionStore::new(
@@ -2479,7 +2578,7 @@ printf '%s\n' '{}' > "$out"
         );
         let tg = FakeTelegram::new();
 
-        run_job(&cfg, &tg, &store, job("stream")).unwrap();
+        run_job_with_codex(&cfg, &codex, &tg, &store, job("stream")).unwrap();
 
         assert!(tg
             .calls()
@@ -2494,13 +2593,16 @@ printf '%s\n' '{}' > "$out"
     #[test]
     fn run_job_reports_codex_failures() {
         let dir = tempdir().unwrap();
-        let mut cfg = test_config(dir.path());
-        cfg.codex_bin = executable(
-            dir.path().join("codex-fails"),
-            r#"#!/bin/sh
+        let cfg = test_config(dir.path());
+        let codex = test_codex_config(
+            &cfg,
+            executable(
+                dir.path().join("codex-fails"),
+                r#"#!/bin/sh
 printf 'boom\n' >&2
 exit 2
 "#,
+            ),
         );
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
@@ -2508,7 +2610,7 @@ exit 2
         );
         let tg = FakeTelegram::new();
 
-        run_job(&cfg, &tg, &store, job("fail")).unwrap();
+        run_job_with_codex(&cfg, &codex, &tg, &store, job("fail")).unwrap();
 
         assert!(tg
             .sent_text()
@@ -2519,13 +2621,16 @@ exit 2
     #[test]
     fn run_job_propagates_codex_failure_delivery_errors() {
         let dir = tempdir().unwrap();
-        let mut cfg = test_config(dir.path());
-        cfg.codex_bin = executable(
-            dir.path().join("codex-fails"),
-            r#"#!/bin/sh
+        let cfg = test_config(dir.path());
+        let codex = test_codex_config(
+            &cfg,
+            executable(
+                dir.path().join("codex-fails"),
+                r#"#!/bin/sh
 printf 'boom\n' >&2
 exit 2
 "#,
+            ),
         );
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
@@ -2534,7 +2639,7 @@ exit 2
         let tg = FakeTelegram::new();
         tg.fail_sends("send failed");
 
-        let err = run_job(&cfg, &tg, &store, job("fail")).unwrap_err();
+        let err = run_job_with_codex(&cfg, &codex, &tg, &store, job("fail")).unwrap_err();
 
         assert_eq!(err, "send failed");
     }
@@ -2874,30 +2979,6 @@ exit 2
     }
 
     fn test_config(root: &Path) -> Config {
-        let codex = executable(
-            root.join("codex"),
-            r#"#!/bin/sh
-if [ "$1" = "doctor" ]; then
-  printf '{"overallStatus":"ok","codexVersion":"test","checks":{"auth.credentials":{"status":"ok"},"network.provider_reachability":{"status":"ok"}}}\n'
-  exit 0
-fi
-out=""
-prev=""
-for arg in "$@"; do
-  if [ "$prev" = "--output-last-message" ]; then out="$arg"; fi
-  prev="$arg"
-done
-cat >/dev/null
-printf 'OK\n' > "$out"
-"#,
-        );
-        let fastfetch = executable(
-            root.join("fastfetch"),
-            r#"#!/bin/sh
-cat >/dev/null
-printf 'OS: test\n'
-"#,
-        );
         Config {
             bot_token: "token".to_string(),
             telegram_chat_ids: vec![42],
@@ -2906,7 +2987,6 @@ printf 'OS: test\n'
             xdg_data_home: root.join("data"),
             xdg_state_home: root.join("state"),
             gateway_config_file: root.join("config/gateway/config.json"),
-            codex_bin: codex,
             codex_workdir: root.to_path_buf(),
             models: vec![
                 ProviderModel {
@@ -2922,7 +3002,6 @@ printf 'OS: test\n'
                     model: "openrouter/test".to_string(),
                 },
             ],
-            fastfetch_bin: fastfetch,
             state_dir: root.join("state/gateway"),
             chat_state_dir: root.join("state/gateway/chats"),
             offset_file: root.join("state/gateway/telegram.offset"),
@@ -2931,6 +3010,14 @@ printf 'OS: test\n'
             poll_timeout_sec: 50,
             queue_depth: 8,
             codex_timeout: Duration::from_secs(5),
+        }
+    }
+
+    fn test_codex_config(cfg: &Config, bin: PathBuf) -> CodexConfig {
+        CodexConfig {
+            bin,
+            workdir: cfg.codex_workdir.clone(),
+            default_model: cfg.default_provider_model().model.clone(),
         }
     }
 

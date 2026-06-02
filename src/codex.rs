@@ -20,7 +20,7 @@ pub struct CodexConfig {
 impl From<&Config> for CodexConfig {
     fn from(cfg: &Config) -> Self {
         Self {
-            bin: cfg.codex_bin.clone(),
+            bin: PathBuf::from("codex"),
             workdir: cfg.codex_workdir.clone(),
             default_model: cfg.default_provider_model().model.clone(),
         }
@@ -507,13 +507,11 @@ mod tests {
             xdg_data_home: PathBuf::from("/xdg/data"),
             xdg_state_home: PathBuf::from("/xdg/state"),
             gateway_config_file: PathBuf::from("/xdg/config/gateway/config.json"),
-            codex_bin: PathBuf::from("codex"),
             codex_workdir: PathBuf::from("/work"),
             models: vec![crate::config::ProviderModel {
                 provider: crate::provider::Provider::Codex,
                 model: "gpt-default".to_string(),
             }],
-            fastfetch_bin: PathBuf::from("fastfetch"),
             state_dir: PathBuf::from("/state/gateway"),
             chat_state_dir: PathBuf::from("/state/gateway/chats"),
             offset_file: PathBuf::from("/state/gateway/telegram.offset"),
