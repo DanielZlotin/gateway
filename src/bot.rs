@@ -1,7 +1,6 @@
 use crate::codex::{run_codex, run_codex_stream, CodexConfig, CodexRun};
 use crate::commands::{directive_help, is_allowed, unknown_directive_message};
 use crate::config::{Config, ProviderModel};
-#[cfg(test)]
 use crate::provider::Provider;
 use crate::session::{SessionKey, SessionStore};
 use crate::status::{codex_status, fastfetch_status, format_status_message};
@@ -340,7 +339,7 @@ fn handle_command(
     };
     match command {
         "/log" => handle_log_command(cfg, tg, msg, text),
-        "/new" => handle_new_command(tg, store, selections, msg, &key),
+        "/new" => handle_new_command(cfg, tg, store, selections, msg, &key),
         "/restart" => {
             tg.send_message(msg.chat.id, "🔄 Restarting gateway.", msg.message_id)?;
             restart_gateway(&cfg.launchd_target);
@@ -370,12 +369,18 @@ fn handle_log_command(
 }
 
 fn handle_new_command(
+    cfg: &Config,
     tg: &impl TelegramApi,
     store: &SessionStore,
     selections: &RuntimeSelections,
     msg: &Message,
     key: &SessionKey,
 ) -> Result<(), String> {
+    let state = store.load(key);
+    if current_session_is_unnamed(&state) && !auto_rename_current_session(cfg, tg, store, msg, key)?
+    {
+        return Ok(());
+    }
     match store.reset(key) {
         Ok(state) => {
             clear_selection(selections, key);
@@ -390,6 +395,21 @@ fn handle_new_command(
             &format!("⚠️ Failed to reset session: {err}"),
             msg.message_id,
         ),
+    }
+}
+
+fn current_session_is_unnamed(state: &crate::session::ChatSession) -> bool {
+    let Some(session_id) = state.session_id.as_deref() else {
+        return false;
+    };
+    match state
+        .sessions
+        .iter()
+        .find(|session| session.id == session_id)
+        .and_then(|session| session.name.as_deref())
+    {
+        Some(name) => name.trim().is_empty(),
+        None => true,
     }
 }
 
@@ -645,65 +665,118 @@ fn handle_auto_rename_command(
     msg: &Message,
     key: &SessionKey,
 ) -> Result<(), String> {
+    auto_rename_current_session(cfg, tg, store, msg, key).map(|_| ())
+}
+
+fn auto_rename_current_session(
+    cfg: &Config,
+    tg: &impl TelegramApi,
+    store: &SessionStore,
+    msg: &Message,
+    key: &SessionKey,
+) -> Result<bool, String> {
     let state = store.load(key);
     if state.session_id.is_none() {
-        return tg.send_message(
-            msg.chat.id,
-            "🏷️ No current session to rename. Send a normal message first.",
-            msg.message_id,
-        );
+        return tg
+            .send_message(
+                msg.chat.id,
+                "🏷️ No current session to rename. Send a normal message first.",
+                msg.message_id,
+            )
+            .map(|_| false);
     }
     tg.send_message(msg.chat.id, "🏷️ Naming current session…", msg.message_id)?;
     let output = match run_codex(
         &CodexConfig::from(cfg),
         AUTO_RENAME_PROMPT,
         state.session_id.as_deref(),
-        state.provider,
-        &state.model,
+        Provider::Codex,
+        AUTO_RENAME_MODEL,
         cfg.codex_timeout,
         &cfg.state_dir,
     ) {
         Ok(output) => output,
         Err(err) => {
-            return tg.send_message(
-                msg.chat.id,
-                &format!("⚠️ Failed to rename session: {err}"),
-                msg.message_id,
-            )
+            return tg
+                .send_message(
+                    msg.chat.id,
+                    &format!("⚠️ Failed to rename session: {err}"),
+                    msg.message_id,
+                )
+                .map(|_| false)
         }
     };
     let Some(name) = auto_session_name(&output.final_text) else {
-        return tg.send_message(
-            msg.chat.id,
-            "⚠️ Failed to rename session: Codex returned an empty name.",
-            msg.message_id,
-        );
+        return tg
+            .send_message(
+                msg.chat.id,
+                "⚠️ Failed to rename session: Codex returned an invalid session name.",
+                msg.message_id,
+            )
+            .map(|_| false);
     };
     if let Some(session_id) = output.session_id.as_deref() {
         if let Err(err) = store.save_current_session(key, state.generation, session_id) {
-            return tg.send_message(
-                msg.chat.id,
-                &format!("⚠️ Failed to save renamed session: {err}"),
-                msg.message_id,
-            );
+            return tg
+                .send_message(
+                    msg.chat.id,
+                    &format!("⚠️ Failed to save renamed session: {err}"),
+                    msg.message_id,
+                )
+                .map(|_| false);
         }
     }
-    rename_session(tg, store, msg, key, &name)
+    rename_current_session(tg, store, msg, key, &name)
 }
 
-const AUTO_RENAME_PROMPT: &str = "Create a concise name for this session. Return only the name, with no quotes, prefixes, markdown, or explanation. Use at most eight words.";
+fn rename_current_session(
+    tg: &impl TelegramApi,
+    store: &SessionStore,
+    msg: &Message,
+    key: &SessionKey,
+    name: &str,
+) -> Result<bool, String> {
+    match store.rename_current(key, name) {
+        Ok(state) => tg
+            .send_message(
+                msg.chat.id,
+                &format!(
+                    "🏷️ Renamed session {} to \"{name}\".",
+                    session_label(state.session_id.as_deref().unwrap_or(""))
+                ),
+                msg.message_id,
+            )
+            .map(|_| true),
+        Err(err) => tg
+            .send_message(msg.chat.id, &err, msg.message_id)
+            .map(|_| false),
+    }
+}
+
+const AUTO_RENAME_MODEL: &str = "gpt-5.4-mini";
+const AUTO_RENAME_PROMPT: &str = "Create a concise name for this session. Return only the name, with no quotes, prefixes, markdown, or explanation. Use a lowercase single-word name, or if multiple words are necessary, use a lowercase hyphenated name like session-name.";
 
 fn auto_session_name(text: &str) -> Option<String> {
     text.lines()
-        .map(|line| {
-            line.trim()
-                .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '*'))
+        .filter_map(|line| {
+            let name = line
                 .trim()
+                .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '*'))
+                .trim();
+            is_valid_session_name(name).then(|| name.to_string())
         })
-        .find(|line| !line.is_empty())
-        .map(|line| line.chars().take(80).collect::<String>())
-        .map(|line| line.trim().to_string())
-        .filter(|line| !line.is_empty())
+        .next()
+}
+
+fn is_valid_session_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 80
+        && name.split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .chars()
+                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
+        })
 }
 
 fn rename_session(
@@ -1427,7 +1500,7 @@ mod tests {
             .any(|text| text.contains("🏷️ Naming current session")));
         assert!(sent
             .iter()
-            .any(|text| text.contains("🏷️ Renamed session session- to \"OK\".")));
+            .any(|text| text.contains("invalid session name")));
         assert!(sent.iter().any(|text| text.contains("🏷️ Renamed session")));
         assert!(sent.iter().any(|text| text.contains("💾 Saved sessions:")));
         assert!(sent.iter().any(|text| text.contains("/status")));
@@ -1509,14 +1582,15 @@ mod tests {
         cfg.codex_bin = executable(
             dir.path().join("codex-title"),
             r#"#!/bin/sh
+printf '%s\n' "$@" > codex-title.args
 out=""
 prev=""
 for arg in "$@"; do
   if [ "$prev" = "--output-last-message" ]; then out="$arg"; fi
   prev="$arg"
 done
-cat >/dev/null
-printf '  Generated Session Name  \n' > "$out"
+cat > codex-title.prompt
+printf '  session-name  \n' > "$out"
 printf 'session id: aaaaaaaa-current\n' >&2
 "#,
         );
@@ -1538,13 +1612,136 @@ printf 'session id: aaaaaaaa-current\n' >&2
         handle_command(&cfg, &tg, &store, &selections, &msg, "/rename", "/rename").unwrap();
 
         let state = store.load(&key);
-        assert_eq!(
-            state.sessions[0].name.as_deref(),
-            Some("Generated Session Name")
+        assert_eq!(state.sessions[0].name.as_deref(), Some("session-name"));
+        let args = fs::read_to_string(dir.path().join("codex-title.args")).unwrap();
+        assert!(args
+            .lines()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|pair| pair == ["-m", "gpt-5.4-mini"]));
+        let prompt = fs::read_to_string(dir.path().join("codex-title.prompt")).unwrap();
+        assert!(prompt.contains("lowercase single-word"));
+        assert!(prompt.contains("session-name"));
+        assert!(tg
+            .sent_text()
+            .iter()
+            .any(|text| text.contains("🏷️ Renamed session aaaaaaaa to \"session-name\".")));
+    }
+
+    #[test]
+    fn rename_without_name_rejects_invalid_codex_session_name() {
+        let dir = tempdir().unwrap();
+        let mut cfg = test_config(dir.path());
+        cfg.codex_bin = executable(
+            dir.path().join("codex-invalid-title"),
+            r#"#!/bin/sh
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--output-last-message" ]; then out="$arg"; fi
+  prev="$arg"
+done
+cat >/dev/null
+printf 'Generated Session Name\n' > "$out"
+printf 'session id: aaaaaaaa-current\n' >&2
+"#,
         );
-        assert!(tg.sent_text().iter().any(
-            |text| text.contains("🏷️ Renamed session aaaaaaaa to \"Generated Session Name\".")
-        ));
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let key = SessionKey::Chat {
+            chat_id: 42,
+            thread_id: None,
+        };
+        assert!(store
+            .save_current_session(&key, 0, "aaaaaaaa-current")
+            .unwrap());
+        let tg = FakeTelegram::new();
+        let selections = RuntimeSelections::default();
+        let msg = message(42, 10, "/rename");
+
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/rename", "/rename").unwrap();
+
+        let state = store.load(&key);
+        assert_eq!(state.sessions[0].name, None);
+        assert!(tg
+            .sent_text()
+            .iter()
+            .any(|text| text.contains("invalid session name")));
+    }
+
+    #[test]
+    fn auto_session_name_validates_lowercase_hyphenated_names() {
+        assert_eq!(auto_session_name("session"), Some("session".to_string()));
+        assert_eq!(
+            auto_session_name("session2-name3"),
+            Some("session2-name3".to_string())
+        );
+        assert_eq!(
+            auto_session_name("`session-name`"),
+            Some("session-name".to_string())
+        );
+        assert_eq!(auto_session_name("Session Name"), None);
+        assert_eq!(auto_session_name("session_name"), None);
+        assert_eq!(auto_session_name("session--name"), None);
+        assert_eq!(auto_session_name("-session"), None);
+        assert_eq!(auto_session_name("session-"), None);
+    }
+
+    #[test]
+    fn new_auto_renames_current_unnamed_session_before_reset() {
+        let dir = tempdir().unwrap();
+        let mut cfg = test_config(dir.path());
+        cfg.codex_bin = executable(
+            dir.path().join("codex-title-new"),
+            r#"#!/bin/sh
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--output-last-message" ]; then out="$arg"; fi
+  prev="$arg"
+done
+cat >/dev/null
+printf 'session-name\n' > "$out"
+printf 'session id: aaaaaaaa-current\n' >&2
+"#,
+        );
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let key = SessionKey::Chat {
+            chat_id: 42,
+            thread_id: None,
+        };
+        assert!(store
+            .save_current_session(&key, 0, "aaaaaaaa-current")
+            .unwrap());
+        let tg = FakeTelegram::new();
+        let selections = RuntimeSelections::default();
+        let msg = message(42, 10, "/new");
+
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/new", "/new").unwrap();
+
+        let state = store.load(&key);
+        assert_eq!(state.session_id, None);
+        let saved = state
+            .sessions
+            .iter()
+            .find(|session| session.id == "aaaaaaaa-current")
+            .unwrap();
+        assert_eq!(saved.name.as_deref(), Some("session-name"));
+        let sent = tg.sent_text();
+        assert!(sent
+            .iter()
+            .any(|text| text.contains("🏷️ Naming current session")));
+        assert!(sent
+            .iter()
+            .any(|text| text.contains("🏷️ Renamed session aaaaaaaa to \"session-name\".")));
+        assert!(sent
+            .iter()
+            .any(|text| text.contains("🆕 New session ready")));
     }
 
     #[test]
