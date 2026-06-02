@@ -18,12 +18,29 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const TYPING_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 const POLL_CONFLICT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const POLL_REQUEST_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const TELEGRAM_GET_UPDATES_CONFLICT_MARKER: &str = "terminated by other getUpdates request";
+const GATEWAY_UPDATE_JOB_LABEL: &str = "ai.gateway.update";
+const GATEWAY_UPDATE_PENDING_LOCK_TTL_SECS: u64 = 300;
+const GATEWAY_UPDATE_SCRIPT: &str = r#"gateway_update_label="$1"
+gateway_update_lock="$2"
+gateway_update_root="$3"
+gateway_update_log="${gateway_update_lock:h}/logs/update.log"
+mkdir -p "${gateway_update_log:h}"
+print -r -- "$$" > "$gateway_update_lock"
+{
+  print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] starting gateway update"
+  cd "$gateway_update_root" && git pull && ./setup
+  gateway_update_code=$?
+  print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] gateway update exited $gateway_update_code"
+} >>"$gateway_update_log" 2>&1
+rm -f "$gateway_update_lock"
+/bin/launchctl remove "$gateway_update_label" >/dev/null 2>&1 || true
+exit 0"#;
 
 trait TelegramApi: Clone + Send + 'static {
     fn get_updates(&self, offset: i64, timeout_sec: u64) -> Result<Vec<Update>, String>;
@@ -395,7 +412,7 @@ fn handle_command(
             restart_gateway(&cfg.launchd_target);
             Ok(())
         }
-        Some(Directive::Update) => handle_update_command(tg, msg),
+        Some(Directive::Update) => handle_update_command(cfg, tg, msg),
         Some(Directive::Model) => handle_model_command(cfg, tg, store, selections, msg, text, &key),
         Some(Directive::Resume) => handle_resume_command(tg, store, selections, msg, text, &key),
         Some(Directive::Rename) => handle_rename_command(cfg, tg, store, msg, text, &key),
@@ -1105,13 +1122,18 @@ fn send_long_message(
     Ok(())
 }
 
-fn handle_update_command(tg: &impl TelegramApi, msg: &Message) -> Result<(), String> {
-    tg.send_message(
-        msg.chat.id,
-        "⬆️ Updating gateway. Running `git pull`, then `./setup`.",
-        msg.message_id,
-    )?;
-    start_gateway_update();
+fn handle_update_command(cfg: &Config, tg: &impl TelegramApi, msg: &Message) -> Result<(), String> {
+    let message = match start_gateway_update(cfg) {
+        Ok(GatewayUpdateStart::Started) => {
+            "⬆️ Updating gateway in the background. Running `git pull`, then `./setup`. Details go to `gateway/logs/update.log`.".to_string()
+        }
+        Ok(GatewayUpdateStart::AlreadyRunning) => {
+            "⏳ Gateway update already running. Details go to `gateway/logs/update.log`."
+                .to_string()
+        }
+        Err(err) => format!("⚠️ Gateway update failed to start: {err}"),
+    };
+    tg.send_message(msg.chat.id, &message, msg.message_id)?;
     Ok(())
 }
 
@@ -1123,25 +1145,149 @@ fn restart_gateway(launchd_target: &str) {
         .spawn();
 }
 
-fn gateway_update_command() -> Command {
-    let mut command = Command::new("/bin/zsh");
+#[derive(Debug, PartialEq, Eq)]
+enum GatewayUpdateStart {
+    Started,
+    AlreadyRunning,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum GatewayUpdateLockStatus {
+    Absent,
+    Active,
+    Stale,
+}
+
+fn start_gateway_update(cfg: &Config) -> Result<GatewayUpdateStart, String> {
+    let lock_file = gateway_update_lock_file(cfg);
+    if gateway_update_lock_status(&lock_file)? == GatewayUpdateLockStatus::Active {
+        return Ok(GatewayUpdateStart::AlreadyRunning);
+    }
+
+    remove_gateway_update_lock(&lock_file)?;
+    fs::create_dir_all(&cfg.state_dir).map_err(|err| format!("create update state dir: {err}"))?;
+    fs::write(&lock_file, format!("pending {}\n", current_unix_seconds()))
+        .map_err(|err| format!("write update lock: {err}"))?;
+
+    if let Err(err) = submit_gateway_update(&lock_file) {
+        let _ = fs::remove_file(&lock_file);
+        return Err(err);
+    }
+
+    Ok(GatewayUpdateStart::Started)
+}
+
+fn gateway_update_lock_file(cfg: &Config) -> std::path::PathBuf {
+    cfg.state_dir.join("update.lock")
+}
+
+fn gateway_update_lock_status(lock_file: &Path) -> Result<GatewayUpdateLockStatus, String> {
+    let text = match fs::read_to_string(lock_file) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(GatewayUpdateLockStatus::Absent);
+        }
+        Err(err) => return Err(format!("read update lock: {err}")),
+    };
+    let mut parts = text.split_whitespace();
+    let kind = parts.next().unwrap_or_default();
+    let value = parts.next().unwrap_or_default();
+
+    match kind {
+        "pid" => Ok(value
+            .parse::<u32>()
+            .ok()
+            .filter(|pid| process_is_running(*pid))
+            .map(|_| GatewayUpdateLockStatus::Active)
+            .unwrap_or(GatewayUpdateLockStatus::Stale)),
+        "pending" => Ok(value
+            .parse::<u64>()
+            .ok()
+            .filter(|seconds| {
+                current_unix_seconds().saturating_sub(*seconds)
+                    < GATEWAY_UPDATE_PENDING_LOCK_TTL_SECS
+            })
+            .map(|_| GatewayUpdateLockStatus::Active)
+            .unwrap_or(GatewayUpdateLockStatus::Stale)),
+        _ => Ok(GatewayUpdateLockStatus::Stale),
+    }
+}
+
+fn remove_gateway_update_lock(lock_file: &Path) -> Result<(), String> {
+    match fs::remove_file(lock_file) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!("remove update lock: {err}")),
+    }
+}
+
+fn process_is_running(pid: u32) -> bool {
+    Command::new("/bin/kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn current_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+#[cfg(not(test))]
+fn submit_gateway_update(lock_file: &Path) -> Result<(), String> {
+    let _ = Command::new("/bin/launchctl")
+        .args(["remove", GATEWAY_UPDATE_JOB_LABEL])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let status = gateway_update_command(lock_file)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|err| format!("run launchctl submit: {err}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("launchctl submit exited with {status}"))
+    }
+}
+
+#[cfg(test)]
+fn submit_gateway_update(_lock_file: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+fn gateway_update_command(lock_file: &Path) -> Command {
+    let mut command = Command::new("/bin/launchctl");
     command
-        .args(["-lc", "nohup /bin/zsh -lc 'git pull && ./setup' &"])
-        .current_dir(gateway_root());
+        .args([
+            "submit",
+            "-l",
+            GATEWAY_UPDATE_JOB_LABEL,
+            "-o",
+            "/dev/null",
+            "-e",
+            "/dev/null",
+            "--",
+            "/bin/zsh",
+            "-lc",
+            GATEWAY_UPDATE_SCRIPT,
+            "gateway-update",
+            GATEWAY_UPDATE_JOB_LABEL,
+        ])
+        .arg(lock_file)
+        .arg(gateway_root());
     command
 }
 
 fn gateway_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
-
-#[cfg(not(test))]
-fn start_gateway_update() {
-    let _ = gateway_update_command().stdin(Stdio::null()).spawn();
-}
-
-#[cfg(test)]
-fn start_gateway_update() {}
 
 pub const fn typing_refresh_interval() -> Duration {
     TYPING_REFRESH_INTERVAL
@@ -1654,9 +1800,8 @@ mod tests {
         assert!(sent.iter().any(|text| text.contains("🏷️ Renamed session")));
         assert!(sent.iter().any(|text| text.contains("💾 Saved sessions:")));
         assert!(sent.iter().any(|text| text.contains("/status")));
-        assert!(sent.iter().any(|text| {
-            text == "⬆️ Updating gateway. Running `git pull`, then `./setup`."
-        }));
+        assert!(sent.iter().any(|text| text
+            == "⬆️ Updating gateway in the background. Running `git pull`, then `./setup`. Details go to `gateway/logs/update.log`."));
         assert!(!sent.iter().any(|text| text.contains("/commands")));
         assert_eq!(
             sent.iter()
@@ -1672,22 +1817,69 @@ mod tests {
     }
 
     #[test]
-    fn gateway_update_command_runs_git_pull_then_setup_from_repo_root() {
-        let command = gateway_update_command();
+    fn update_command_reports_existing_active_update_lock() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        fs::create_dir_all(&cfg.state_dir).unwrap();
+        fs::write(
+            gateway_update_lock_file(&cfg),
+            format!("pid {}\n", std::process::id()),
+        )
+        .unwrap();
+        let tg = FakeTelegram::new();
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let selections = RuntimeSelections::default();
+        let msg = message(42, 10, "/update");
+
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/update", "/update").unwrap();
+
+        assert!(tg.sent_text().iter().any(|text| {
+            text == "⏳ Gateway update already running. Details go to `gateway/logs/update.log`."
+        }));
+    }
+
+    #[test]
+    fn gateway_update_command_submits_stable_launchd_job_with_lock_cleanup() {
+        let lock_file = Path::new("/tmp/gateway-state/update.lock");
+        let command = gateway_update_command(lock_file);
         let args = command.get_args().collect::<Vec<_>>();
 
-        assert_eq!(command.get_program(), OsStr::new("/bin/zsh"));
+        assert_eq!(command.get_program(), OsStr::new("/bin/launchctl"));
         assert_eq!(
-            args,
+            &args[..8],
             vec![
-                OsStr::new("-lc"),
-                OsStr::new("nohup /bin/zsh -lc 'git pull && ./setup' &"),
+                OsStr::new("submit"),
+                OsStr::new("-l"),
+                OsStr::new("ai.gateway.update"),
+                OsStr::new("-o"),
+                OsStr::new("/dev/null"),
+                OsStr::new("-e"),
+                OsStr::new("/dev/null"),
+                OsStr::new("--"),
             ]
         );
-        assert_eq!(
-            command.get_current_dir(),
-            Some(Path::new(env!("CARGO_MANIFEST_DIR")))
-        );
+        assert_eq!(args[8], OsStr::new("/bin/zsh"));
+        assert_eq!(args[9], OsStr::new("-lc"));
+        let script = args[10].to_string_lossy();
+        assert!(script.contains("gateway_update_label=\"$1\""));
+        assert!(script.contains("gateway_update_lock=\"$2\""));
+        assert!(script.contains("gateway_update_root=\"$3\""));
+        assert!(script.contains("print -r -- \"$$\" > \"$gateway_update_lock\""));
+        assert!(script.contains("cd \"$gateway_update_root\" && git pull && ./setup"));
+        assert!(script.contains("gateway_update_code=$?"));
+        assert!(script.contains("gateway_update_log=\"${gateway_update_lock:h}/logs/update.log\""));
+        let lock_cleanup = script.find("rm -f \"$gateway_update_lock\"").unwrap();
+        let label_cleanup = script
+            .find("/bin/launchctl remove \"$gateway_update_label\"")
+            .unwrap();
+        assert!(lock_cleanup < label_cleanup);
+        assert_eq!(args[11], OsStr::new("gateway-update"));
+        assert_eq!(args[12], OsStr::new("ai.gateway.update"));
+        assert_eq!(args[13], OsStr::new("/tmp/gateway-state/update.lock"));
+        assert_eq!(args[14], OsStr::new(env!("CARGO_MANIFEST_DIR")));
     }
 
     #[test]
