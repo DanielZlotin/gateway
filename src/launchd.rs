@@ -79,7 +79,7 @@ mod tests {
         fs::create_dir_all(gateway_bin.parent().unwrap()).unwrap();
         fs::write(
             &gateway_bin,
-            "#!/bin/zsh\nprint -- \"stub args=$* token=$GATEWAY_TELEGRAM_TOKEN chats=$GATEWAY_TELEGRAM_CHAT_IDS state=$XDG_STATE_HOME\"\n",
+            "#!/bin/zsh\nif [[ \"${1:-}\" == version ]]; then\n  print -- \"gateway 9.8.7-test\"\n  exit 0\nfi\nprint -- \"stub args=$* token=$GATEWAY_TELEGRAM_TOKEN chats=$GATEWAY_TELEGRAM_CHAT_IDS state=$XDG_STATE_HOME\"\n",
         )
         .unwrap();
         fs::set_permissions(&gateway_bin, fs::Permissions::from_mode(0o700)).unwrap();
@@ -114,6 +114,7 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         let log = fs::read_to_string(state_dir.join("gateway/logs/gateway.log")).unwrap();
+        assert!(log.contains("starting gateway 9.8.7-test"));
         assert!(log.contains("stub args=bot token=token chats=42"));
         assert!(log.contains(&format!("state={}/state", root.display())));
     }
@@ -132,7 +133,7 @@ mod tests {
         fs::create_dir_all(gateway_bin.parent().unwrap()).unwrap();
         fs::write(
             &gateway_bin,
-            "#!/bin/zsh\nprint -- \"state=${XDG_STATE_HOME-unset} config=${XDG_CONFIG_HOME-unset} cache=${XDG_CACHE_HOME-unset} data=${XDG_DATA_HOME-unset}\"\n",
+            "#!/bin/zsh\nif [[ \"${1:-}\" == version ]]; then\n  print -- \"gateway 9.8.7-test\"\n  exit 0\nfi\nprint -- \"state=${XDG_STATE_HOME-unset} config=${XDG_CONFIG_HOME-unset} cache=${XDG_CACHE_HOME-unset} data=${XDG_DATA_HOME-unset}\"\n",
         )
         .unwrap();
         fs::set_permissions(&gateway_bin, fs::Permissions::from_mode(0o700)).unwrap();

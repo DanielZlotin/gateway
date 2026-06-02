@@ -16,5 +16,7 @@ fi
 
 mkdir -p "${gateway_log_file:h}"
 exec >>"$gateway_log_file" 2>&1
-print -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] starting gateway"
+gateway_version="$("$gateway_bin" version 2>/dev/null || true)"
+[[ -n "${gateway_version//[[:space:]]/}" ]] || gateway_version="gateway version unknown"
+print -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] starting $gateway_version"
 exec "$gateway_bin" bot

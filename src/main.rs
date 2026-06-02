@@ -29,5 +29,9 @@ fn run() -> Result<(), String> {
             println!("{}", gateway::launchd::uninstall()?);
             Ok(())
         }
+        Mode::Version => {
+            println!("gateway {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
     }
 }

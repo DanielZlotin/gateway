@@ -89,6 +89,7 @@ gateway bot
 gateway logs [lines]
 gateway paths
 gateway uninstall
+gateway version
 gateway run --prompt "Summarize status"
 gateway run --chat 123456789 --prompt "Summarize status"
 gateway run --prompt-file ./prompt.txt
@@ -113,6 +114,7 @@ printf '%s\n' "Summarize status" | gateway run
 2. 📁 `gateway paths` prints resolved config, state, log, executable, and
    LaunchAgent paths.
 3. 🧹 `gateway uninstall` stops the LaunchAgent and removes its plist.
+4. 🧾 `gateway version` prints the running binary version.
 
 ## 🤖 Telegram Bot
 

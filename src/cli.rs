@@ -10,6 +10,7 @@ pub enum Mode {
     Paths,
     Run(RunArgs),
     Uninstall,
+    Version,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -34,6 +35,7 @@ enum Command {
     Paths,
     Run(RunCli),
     Uninstall,
+    Version,
 }
 
 #[derive(Debug, Args)]
@@ -70,6 +72,7 @@ where
             chat: args.chat,
         }),
         Some(Command::Uninstall) => Mode::Uninstall,
+        Some(Command::Version) => Mode::Version,
     })
 }
 
@@ -118,6 +121,12 @@ mod tests {
     fn parses_uninstall_mode() {
         let mode = parse_args_from(["gateway", "uninstall"]).unwrap();
         assert_eq!(mode, Mode::Uninstall);
+    }
+
+    #[test]
+    fn parses_version_mode() {
+        let mode = parse_args_from(["gateway", "version"]).unwrap();
+        assert_eq!(mode, Mode::Version);
     }
 
     #[test]
