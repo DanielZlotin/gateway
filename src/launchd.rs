@@ -92,7 +92,7 @@ mod tests {
         fs::create_dir_all(gateway_bin.parent().unwrap()).unwrap();
         fs::write(
             &gateway_bin,
-            "#!/bin/zsh\nif [[ \"${1:-}\" == version ]]; then\n  print -- \"gateway 9.8.7-test\"\n  exit 0\nfi\nprint -- \"stub args=$* token=$GATEWAY_TELEGRAM_TOKEN chats=$GATEWAY_TELEGRAM_CHAT_IDS state=$XDG_STATE_HOME\"\n",
+            "#!/bin/zsh\nif [[ \"${1:-}\" == version ]]; then\n  print -- \"gateway 9.8.7-test\"\n  exit 0\nfi\nprint -- \"stub args=$* token=$GATEWAY_TELEGRAM_TOKEN chats=$GATEWAY_TELEGRAM_CHAT_IDS state=$XDG_STATE_HOME\"\nprint -u2 -- \"stderr probe\"\n",
         )
         .unwrap();
         fs::set_permissions(&gateway_bin, fs::Permissions::from_mode(0o700)).unwrap();
@@ -127,8 +127,10 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         let log = fs::read_to_string(state_dir.join("gateway/logs/gateway.log")).unwrap();
-        assert!(log.contains("starting gateway 9.8.7-test"));
-        assert!(log.contains("stub args=bot token=token chats=42"));
+        assert_gateway_log_format(&log, "9.8.7-test");
+        assert!(log.contains("level=INFO icon=ℹ️ starting gateway"));
+        assert!(log.contains("level=INFO icon=ℹ️ stub args=bot token=token chats=42"));
+        assert!(log.contains("level=ERROR icon=❌ stderr probe"));
         assert!(log.contains(&format!("state={}/state", root.display())));
     }
 
@@ -174,6 +176,7 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         let log = fs::read_to_string(root.join(".local/state/gateway/logs/gateway.log")).unwrap();
+        assert_gateway_log_format(&log, "9.8.7-test");
         assert!(log.contains("state=unset config=unset cache=unset data=unset"));
     }
 
@@ -238,5 +241,15 @@ mod tests {
         assert!(launchctl_log.contains("bootout"));
         assert!(launchctl_log.contains("sleep 1\nbootstrap"));
         assert!(launchctl_log.contains("sleep 1\nkickstart"));
+    }
+
+    fn assert_gateway_log_format(log: &str, version: &str) {
+        let expected = format!("] gateway version={version} level=");
+        assert!(
+            log.lines().all(|line| line.starts_with('[')
+                && line.contains(&expected)
+                && line.contains(" icon=")),
+            "log lines did not share the gateway envelope:\n{log}"
+        );
     }
 }

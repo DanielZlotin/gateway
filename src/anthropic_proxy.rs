@@ -1,3 +1,4 @@
+use crate::logs;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -58,7 +59,7 @@ fn serve(server: Arc<Server>, running: Arc<AtomicBool>, timeout: Duration) {
         match server.recv() {
             Ok(request) => {
                 if let Err(err) = handle_request(request, timeout) {
-                    eprintln!("[gateway] Anthropic proxy request failed: {err}");
+                    logs::warn(format_args!("Anthropic proxy request failed: {err}"));
                 }
             }
             Err(_) => break,

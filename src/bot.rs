@@ -3,6 +3,7 @@ use crate::commands::{
     directive_from_command, directive_help, is_allowed, unknown_directive_message, Directive,
 };
 use crate::config::{Config, ProviderModel};
+use crate::logs;
 use crate::provider::Provider;
 use crate::session::{SessionKey, SessionStore};
 use crate::status::{codex_status, fastfetch_status, format_status_message};
@@ -21,6 +22,7 @@ use std::time::{Duration, Instant};
 
 const TYPING_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 const POLL_CONFLICT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+const POLL_REQUEST_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const TELEGRAM_GET_UPDATES_CONFLICT_MARKER: &str = "terminated by other getUpdates request";
 
 trait TelegramApi: Clone + Send + 'static {
@@ -179,7 +181,9 @@ fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
         .map_err(|err| format!("create chat state dir: {err}"))?;
 
     if let Err(err) = tg.sync_my_commands(&cfg.telegram_chat_ids) {
-        eprintln!("telegram command sync failed; continuing without command refresh: {err}");
+        logs::warn(format_args!(
+            "telegram command sync failed; continuing without command refresh: {err}"
+        ));
     }
     let default_model = cfg.default_provider_model().clone();
     let store = SessionStore::new_with_provider(
@@ -200,7 +204,9 @@ fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
             &format_status_message(&state, &status_codex, &status_fetch),
             0,
         ) {
-            eprintln!("telegram startup status send failed for chat {chat_id}: {err}");
+            logs::warn(format_args!(
+                "telegram startup status send failed for chat {chat_id}: {err}"
+            ));
         }
     }
 
@@ -222,11 +228,19 @@ fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
         let updates = match tg.get_updates(offset, cfg.poll_timeout_sec) {
             Ok(updates) => updates,
             Err(err) if is_get_updates_conflict(&err) => {
-                eprintln!(
-                    "[gateway] telegram getUpdates conflict; another bot instance is polling this token; retrying in {}s: {err}",
+                logs::warn(format_args!(
+                    "telegram getUpdates conflict; another bot instance is polling this token; retrying in {}s: {err}",
                     POLL_CONFLICT_RETRY_INTERVAL.as_secs()
-                );
+                ));
                 sleep_after_get_updates_conflict();
+                continue;
+            }
+            Err(err) if is_transient_get_updates_error(&err) => {
+                logs::warn(format_args!(
+                    "telegram getUpdates request failed; retrying in {}s: {err}",
+                    POLL_REQUEST_RETRY_INTERVAL.as_secs()
+                ));
+                sleep_after_get_updates_request_failure();
                 continue;
             }
             Err(err) => return Err(err),
@@ -236,14 +250,14 @@ fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
             write_offset(&cfg.offset_file, offset)?;
             if let Some(message) = update.message {
                 if let Err(err) = handle_message(&cfg, &tg, &store, &selections, &tx, message) {
-                    eprintln!("[gateway] message handler failed: {err}");
+                    logs::warn(format_args!("message handler failed: {err}"));
                 }
             }
             if let Some(callback_query) = update.callback_query {
                 if let Err(err) =
                     handle_callback_query(&cfg, &tg, &store, &selections, callback_query)
                 {
-                    eprintln!("[gateway] callback handler failed: {err}");
+                    logs::warn(format_args!("callback handler failed: {err}"));
                 }
             }
         }
@@ -254,9 +268,18 @@ fn is_get_updates_conflict(err: &str) -> bool {
     err.starts_with("Conflict:") && err.contains(TELEGRAM_GET_UPDATES_CONFLICT_MARKER)
 }
 
+fn is_transient_get_updates_error(err: &str) -> bool {
+    err.starts_with("telegram getUpdates request failed:")
+}
+
 fn sleep_after_get_updates_conflict() {
     #[cfg(not(test))]
     thread::sleep(POLL_CONFLICT_RETRY_INTERVAL);
+}
+
+fn sleep_after_get_updates_request_failure() {
+    #[cfg(not(test))]
+    thread::sleep(POLL_REQUEST_RETRY_INTERVAL);
 }
 
 pub fn read_offset(path: &Path) -> i64 {
@@ -870,7 +893,7 @@ fn worker_loop(cfg: Config, rx: mpsc::Receiver<Job>) {
     );
     for job in rx {
         if let Err(err) = run_job(&cfg, &tg, &store, job) {
-            eprintln!("[gateway] job handler failed: {err}");
+            logs::error(format_args!("job handler failed: {err}"));
         }
     }
 }
@@ -887,8 +910,8 @@ fn run_job(
         thread_id: job.thread_id,
     };
     let state = store.load(&key);
-    eprintln!(
-        "[gateway] job start chat={} reply_to={} provider={} model={} session={} prompt_chars={} timeout_secs={}",
+    logs::info(format_args!(
+        "job start chat={} reply_to={} provider={} model={} session={} prompt_chars={} timeout_secs={}",
         job.chat_id,
         job.reply_to_message_id,
         job.provider_model.provider.label(),
@@ -896,7 +919,7 @@ fn run_job(
         session_label(state.session_id.as_deref().unwrap_or("")),
         job.prompt.chars().count(),
         cfg.codex_timeout.as_secs()
-    );
+    ));
     let stream_message_id =
         tg.send_message_returning(job.chat_id, "🫧 Thinking…", job.reply_to_message_id)?;
     let mut streamed = String::new();
@@ -929,13 +952,13 @@ fn run_job(
     let output = match run_result {
         Ok(output) => output,
         Err(err) => {
-            eprintln!(
-                "[gateway] job provider failed chat={} provider={} elapsed_ms={} error={}",
+            logs::warn(format_args!(
+                "job provider failed chat={} provider={} elapsed_ms={} error={}",
                 job.chat_id,
                 job.provider_model.provider.label(),
                 started.elapsed().as_millis(),
                 single_line(&err)
-            );
+            ));
             send_long_message(
                 tg,
                 job.chat_id,
@@ -948,13 +971,13 @@ fn run_job(
     if let Some(session_id) = output.session_id.as_deref() {
         store.save_current_session(&key, state.generation, session_id)?;
     }
-    eprintln!(
-        "[gateway] job success chat={} elapsed_ms={} final_chars={} session={}",
+    logs::info(format_args!(
+        "job success chat={} elapsed_ms={} final_chars={} session={}",
         job.chat_id,
         started.elapsed().as_millis(),
         output.final_text.chars().count(),
         session_label(output.session_id.as_deref().unwrap_or(""))
-    );
+    ));
     match final_delivery(&output.final_text) {
         FinalDelivery::Reaction => {
             let _ = tg.delete_message(job.chat_id, stream_message_id);
@@ -992,21 +1015,21 @@ fn send_final_message(
     ) {
         Ok(message) => {
             if message.effect_id.as_deref() != Some(FINAL_MESSAGE_EFFECT_ID) {
-                eprintln!(
-                    "[gateway] telegram final effect missing chat={} message={} requested_effect={} returned_effect={}",
+                logs::warn(format_args!(
+                    "telegram final effect missing chat={} message={} requested_effect={} returned_effect={}",
                     job.chat_id,
                     message.message_id,
                     FINAL_MESSAGE_EFFECT_ID,
                     message.effect_id.as_deref().unwrap_or("<none>")
-                );
+                ));
             }
             Ok(())
         }
         Err(err) => {
-            eprintln!(
-                "[gateway] telegram final effect failed chat={} effect={} error={}",
+            logs::warn(format_args!(
+                "telegram final effect failed chat={} effect={} error={}",
                 job.chat_id, FINAL_MESSAGE_EFFECT_ID, err
-            );
+            ));
             tg.send_message(job.chat_id, &first, job.reply_to_message_id)
         }
     }
@@ -1341,6 +1364,36 @@ mod tests {
         tg.push_update(Ok(Vec::new()));
         tg.push_update(Err(
             "Conflict: terminated by other getUpdates request; make sure that only one bot instance is running"
+                .to_string(),
+        ));
+        tg.push_update(Err("stop".to_string()));
+
+        let err = run_with_client(cfg, tg.clone()).unwrap_err();
+
+        assert_eq!(err, "stop");
+        assert_eq!(
+            tg.calls()
+                .iter()
+                .filter(|call| matches!(
+                    call,
+                    Call::GetUpdates {
+                        offset: 0,
+                        timeout: 50
+                    }
+                ))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn run_with_client_retries_transient_telegram_get_updates_request_failures() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let tg = FakeTelegram::new();
+        tg.push_update(Ok(Vec::new()));
+        tg.push_update(Err(
+            "telegram getUpdates request failed: Network Error: timed out reading response"
                 .to_string(),
         ));
         tg.push_update(Err("stop".to_string()));

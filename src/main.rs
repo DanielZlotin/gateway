@@ -2,7 +2,7 @@ use gateway::cli::{parse_cli_from, CliAction, Mode};
 
 fn main() {
     if let Err(err) = run() {
-        eprintln!("{err}");
+        gateway::logs::error(format_args!("{err}"));
         std::process::exit(1);
     }
 }

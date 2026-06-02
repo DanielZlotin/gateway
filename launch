@@ -15,8 +15,45 @@ if [[ ! -x "$gateway_bin" ]]; then
 fi
 
 mkdir -p "${gateway_log_file:h}"
-exec >>"$gateway_log_file" 2>&1
+exec >>"$gateway_log_file"
 gateway_version="$("$gateway_bin" version 2>/dev/null || true)"
-[[ -n "${gateway_version//[[:space:]]/}" ]] || gateway_version="gateway version unknown"
-print -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] starting $gateway_version"
-exec "$gateway_bin" bot
+gateway_version="${gateway_version#gateway }"
+[[ -n "${gateway_version//[[:space:]]/}" ]] || gateway_version="unknown"
+
+gateway_log_icon() {
+  local gateway_level="$1"
+  case "$gateway_level" in
+    INFO) print -r -- "ℹ️" ;;
+    WARN) print -r -- "⚠️" ;;
+    ERROR) print -r -- "❌" ;;
+    *) print -r -- "🧾" ;;
+  esac
+}
+
+gateway_log_line() {
+  local gateway_level="$1"
+  shift
+  local gateway_line="$*"
+  local gateway_icon
+  gateway_icon="$(gateway_log_icon "$gateway_level")"
+  if [[ "$gateway_line" == \[????-??-??T??:??:??Z\]\ gateway\ version=*\ icon=* ]]; then
+    print -r -- "$gateway_line"
+  else
+    print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] gateway version=$gateway_version level=$gateway_level icon=$gateway_icon $gateway_line"
+  fi
+}
+
+gateway_prefix_stream() {
+  local gateway_level="$1"
+  local gateway_line
+  while IFS= read -r gateway_line || [[ -n "$gateway_line" ]]; do
+    gateway_log_line "$gateway_level" "$gateway_line"
+  done
+}
+
+gateway_log_line INFO "starting gateway"
+gateway_exit_code=0
+"$gateway_bin" bot \
+  > >(gateway_prefix_stream INFO) \
+  2> >(gateway_prefix_stream ERROR) || gateway_exit_code=$?
+exit "$gateway_exit_code"
