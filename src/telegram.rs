@@ -457,7 +457,7 @@ pub fn supported_bot_commands() -> Vec<BotCommand> {
     DIRECTIVE_SPECS
         .iter()
         .map(|spec| BotCommand {
-            command: spec.command.to_string(),
+            command: spec.command().to_string(),
             description: spec.bot_description.to_string(),
         })
         .collect()

@@ -164,6 +164,7 @@ fn mode_from_cli(cli: Cli) -> Mode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     fn help_from(args: &[&str]) -> String {
         match parse_cli_from(args.iter().copied()).unwrap() {
@@ -176,6 +177,14 @@ mod tests {
         for item in expected {
             assert!(text.contains(item), "missing {item:?} in:\n{text}");
         }
+    }
+
+    fn explicit_subcommands() -> Vec<String> {
+        Cli::command()
+            .get_subcommands()
+            .map(|command| command.get_name().to_string())
+            .filter(|name| name != "help")
+            .collect()
     }
 
     #[test]
@@ -267,6 +276,29 @@ mod tests {
         ] {
             let help = help_from(args);
             assert!(help.contains("Usage:"), "missing usage in:\n{help}");
+        }
+    }
+
+    #[test]
+    fn top_level_help_examples_cover_executable_subcommands() {
+        let help = help_from(&["gateway", "-h"]);
+        let examples = help
+            .split_once("Examples:")
+            .map(|(_, examples)| examples)
+            .expect("top-level help must include examples");
+
+        for command in explicit_subcommands() {
+            let example = format!("gateway {command}");
+            assert!(
+                examples.contains(&example),
+                "missing {example:?} example in:\n{examples}"
+            );
+
+            let args = ["gateway", command.as_str(), "-h"];
+            assert!(
+                help_from(&args).contains("Usage:"),
+                "missing subcommand help for {command}"
+            );
         }
     }
 

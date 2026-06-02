@@ -1,5 +1,7 @@
 use crate::codex::{run_codex, run_codex_stream, CodexConfig, CodexRun};
-use crate::commands::{directive_help, is_allowed, unknown_directive_message};
+use crate::commands::{
+    directive_from_command, directive_help, is_allowed, unknown_directive_message, Directive,
+};
 use crate::config::{Config, ProviderModel};
 use crate::provider::Provider;
 use crate::session::{SessionKey, SessionStore};
@@ -359,22 +361,26 @@ fn handle_command(
         chat_id: msg.chat.id,
         thread_id: msg.message_thread_id,
     };
-    match command {
-        "/config" => send_long_message(tg, msg.chat.id, &cfg.config_report(), msg.message_id),
-        "/log" => handle_log_command(cfg, tg, msg, text),
-        "/new" => handle_new_command(cfg, tg, store, selections, msg, &key),
-        "/restart" => {
+    match directive_from_command(command) {
+        Some(Directive::Config) => {
+            send_long_message(tg, msg.chat.id, &cfg.config_report(), msg.message_id)
+        }
+        Some(Directive::Log) => handle_log_command(cfg, tg, msg, text),
+        Some(Directive::New) => handle_new_command(cfg, tg, store, selections, msg, &key),
+        Some(Directive::Restart) => {
             tg.send_message(msg.chat.id, "🔄 Restarting gateway.", msg.message_id)?;
             restart_gateway(&cfg.launchd_target);
             Ok(())
         }
-        "/model" => handle_model_command(cfg, tg, store, selections, msg, text, &key),
-        "/resume" => handle_resume_command(tg, store, selections, msg, text, &key),
-        "/rename" => handle_rename_command(cfg, tg, store, msg, text, &key),
-        "/list" => send_long_message(tg, msg.chat.id, &store.list(&key), msg.message_id),
-        "/help" => tg.send_message(msg.chat.id, &directive_help(), msg.message_id),
-        "/status" => handle_status_command(cfg, tg, store, selections, msg, &key),
-        _ => tg.send_message(msg.chat.id, &unknown_directive_message(), msg.message_id),
+        Some(Directive::Model) => handle_model_command(cfg, tg, store, selections, msg, text, &key),
+        Some(Directive::Resume) => handle_resume_command(tg, store, selections, msg, text, &key),
+        Some(Directive::Rename) => handle_rename_command(cfg, tg, store, msg, text, &key),
+        Some(Directive::List) => {
+            send_long_message(tg, msg.chat.id, &store.list(&key), msg.message_id)
+        }
+        Some(Directive::Help) => tg.send_message(msg.chat.id, &directive_help(), msg.message_id),
+        Some(Directive::Status) => handle_status_command(cfg, tg, store, selections, msg, &key),
+        None => tg.send_message(msg.chat.id, &unknown_directive_message(), msg.message_id),
     }
 }
 
