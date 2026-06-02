@@ -57,7 +57,8 @@ const FASTFETCH_CONFIG: &str = r#"{
 
 pub fn status_header(state: &ChatSession) -> String {
     format!(
-        "🔌 Provider: {}\n🤖 Model: {}\n🧵 Session: {}",
+        "📦 Gateway version: {}\n🔌 Provider: {}\n🤖 Model: {}\n🧵 Session: {}",
+        env!("CARGO_PKG_VERSION"),
         state.provider.label(),
         state.model,
         session_label(state.session_id.as_deref().unwrap_or(""))
@@ -440,6 +441,15 @@ mod tests {
     use std::net::TcpListener;
     use std::os::unix::fs::PermissionsExt;
     use std::thread;
+
+    #[test]
+    fn status_header_prints_gateway_version_first() {
+        let state = ChatSession::default();
+        let got = status_header(&state);
+        let expected = format!("📦 Gateway version: {}", env!("CARGO_PKG_VERSION"));
+
+        assert_eq!(got.lines().next(), Some(expected.as_str()));
+    }
 
     #[test]
     fn status_header_does_not_include_command_help() {
