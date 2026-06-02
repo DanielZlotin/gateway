@@ -128,9 +128,11 @@ mod tests {
         );
         let log = fs::read_to_string(state_dir.join("gateway/logs/gateway.log")).unwrap();
         assert_gateway_log_format(&log, "9.8.7-test");
-        assert!(log.contains("level=INFO icon=ℹ️ starting gateway"));
-        assert!(log.contains("level=INFO icon=ℹ️ stub args=bot token=token chats=42"));
-        assert!(log.contains("level=ERROR icon=❌ stderr probe"));
+        assert!(log.contains("ℹ️ ") && log.contains(" v=9.8.7-test starting gateway"));
+        assert!(
+            log.contains("ℹ️ ") && log.contains(" v=9.8.7-test stub args=bot token=token chats=42")
+        );
+        assert!(log.contains("❌ ") && log.contains(" v=9.8.7-test stderr probe"));
         assert!(log.contains(&format!("state={}/state", root.display())));
     }
 
@@ -244,12 +246,23 @@ mod tests {
     }
 
     fn assert_gateway_log_format(log: &str, version: &str) {
-        let expected = format!("] gateway version={version} level=");
+        let expected = format!(" v={version} ");
         assert!(
-            log.lines().all(|line| line.starts_with('[')
-                && line.contains(&expected)
-                && line.contains(" icon=")),
-            "log lines did not share the gateway envelope:\n{log}"
+            log.lines().all(|line| {
+                let Some((icon, rest)) = line.split_once(' ') else {
+                    return false;
+                };
+                let bytes = rest.as_bytes();
+                !icon.is_empty()
+                    && !icon.chars().all(|ch| ch.is_ascii_alphanumeric())
+                    && !line.contains("gateway version=")
+                    && !line.contains("level=")
+                    && !line.contains("icon=")
+                    && rest.contains(&expected)
+                    && bytes.get(10) == Some(&b' ')
+                    && bytes.get(19) == Some(&b' ')
+            }),
+            "log lines did not use the compact gateway envelope:\n{log}"
         );
     }
 }

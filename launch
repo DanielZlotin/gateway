@@ -36,10 +36,13 @@ gateway_log_line() {
   local gateway_line="$*"
   local gateway_icon
   gateway_icon="$(gateway_log_icon "$gateway_level")"
-  if [[ "$gateway_line" == \[????-??-??T??:??:??Z\]\ gateway\ version=*\ icon=* ]]; then
+  if [[ "$gateway_line" == "ℹ️ "????-??-??" "??:??:??" v="* ]] \
+    || [[ "$gateway_line" == "⚠️ "????-??-??" "??:??:??" v="* ]] \
+    || [[ "$gateway_line" == "❌ "????-??-??" "??:??:??" v="* ]] \
+    || [[ "$gateway_line" == "🧾 "????-??-??" "??:??:??" v="* ]]; then
     print -r -- "$gateway_line"
   else
-    print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] gateway version=$gateway_version level=$gateway_level icon=$gateway_icon $gateway_line"
+    print -r -- "$gateway_icon $(date -u '+%Y-%m-%d %H:%M:%S') v=$gateway_version $gateway_line"
   fi
 }
 

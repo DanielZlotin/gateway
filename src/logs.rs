@@ -43,7 +43,7 @@ fn write(level: &str, args: Arguments<'_>) {
 pub fn format_log_line(timestamp: &str, version: &str, level: &str, message: &str) -> String {
     let level = level.trim();
     format!(
-        "[{timestamp}] gateway version={version} level={level} icon={} {}",
+        "{} {timestamp} v={version} {}",
         log_icon(level),
         one_line(message)
     )
@@ -74,7 +74,7 @@ fn format_utc_timestamp(seconds: u64) -> String {
     let second = seconds_of_day % 60;
     let (year, month, day) = civil_from_unix_days(days);
 
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}")
 }
 
 fn civil_from_unix_days(days: i64) -> (i64, i64, i64) {
@@ -108,38 +108,34 @@ mod tests {
 
     #[test]
     fn format_log_line_includes_timestamp_version_level_icon_and_message() {
-        let line = format_log_line("2026-06-02T15:30:43Z", "0.1.6", "WARN", "poll failed");
+        let line = format_log_line("2026-06-02 15:30:43", "0.1.6", "WARN", "poll failed");
 
-        assert_eq!(
-            line,
-            "[2026-06-02T15:30:43Z] gateway version=0.1.6 level=WARN icon=⚠️ poll failed"
-        );
+        assert_eq!(line, "⚠️ 2026-06-02 15:30:43 v=0.1.6 poll failed");
     }
 
     #[test]
     fn format_log_line_flattens_multiline_messages() {
-        let line = format_log_line("2026-06-02T15:30:43Z", "0.1.6", " WARN ", "one\ntwo");
+        let line = format_log_line("2026-06-02 15:30:43", "0.1.6", " WARN ", "one\ntwo");
 
-        assert_eq!(
-            line,
-            "[2026-06-02T15:30:43Z] gateway version=0.1.6 level=WARN icon=⚠️ one | two"
-        );
+        assert_eq!(line, "⚠️ 2026-06-02 15:30:43 v=0.1.6 one | two");
     }
 
     #[test]
     fn format_log_line_uses_level_icons() {
-        assert!(
-            format_log_line("2026-06-02T15:30:43Z", "0.1.6", "INFO", "started").contains("icon=ℹ️")
+        assert_eq!(
+            format_log_line("2026-06-02 15:30:43", "0.1.6", "INFO", "started"),
+            "ℹ️ 2026-06-02 15:30:43 v=0.1.6 started"
         );
-        assert!(
-            format_log_line("2026-06-02T15:30:43Z", "0.1.6", "ERROR", "failed").contains("icon=❌")
+        assert_eq!(
+            format_log_line("2026-06-02 15:30:43", "0.1.6", "ERROR", "failed"),
+            "❌ 2026-06-02 15:30:43 v=0.1.6 failed"
         );
     }
 
     #[test]
     fn format_utc_timestamp_handles_epoch_and_leap_days() {
-        assert_eq!(format_utc_timestamp(0), "1970-01-01T00:00:00Z");
-        assert_eq!(format_utc_timestamp(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(format_utc_timestamp(0), "1970-01-01 00:00:00");
+        assert_eq!(format_utc_timestamp(951_782_400), "2000-02-29 00:00:00");
     }
 
     #[test]
