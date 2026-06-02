@@ -18,6 +18,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const TYPING_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
+const POLL_CONFLICT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+const TELEGRAM_GET_UPDATES_CONFLICT_MARKER: &str = "terminated by other getUpdates request";
 
 trait TelegramApi: Clone + Send + 'static {
     fn get_updates(&self, offset: i64, timeout_sec: u64) -> Result<Vec<Update>, String>;
@@ -215,7 +217,18 @@ fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
         }
     }
     loop {
-        let updates = tg.get_updates(offset, cfg.poll_timeout_sec)?;
+        let updates = match tg.get_updates(offset, cfg.poll_timeout_sec) {
+            Ok(updates) => updates,
+            Err(err) if is_get_updates_conflict(&err) => {
+                eprintln!(
+                    "[gateway] telegram getUpdates conflict; another bot instance is polling this token; retrying in {}s: {err}",
+                    POLL_CONFLICT_RETRY_INTERVAL.as_secs()
+                );
+                sleep_after_get_updates_conflict();
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
         for update in updates {
             offset = advance_offset(offset, update.update_id);
             write_offset(&cfg.offset_file, offset)?;
@@ -233,6 +246,15 @@ fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
             }
         }
     }
+}
+
+fn is_get_updates_conflict(err: &str) -> bool {
+    err.starts_with("Conflict:") && err.contains(TELEGRAM_GET_UPDATES_CONFLICT_MARKER)
+}
+
+fn sleep_after_get_updates_conflict() {
+    #[cfg(not(test))]
+    thread::sleep(POLL_CONFLICT_RETRY_INTERVAL);
 }
 
 pub fn read_offset(path: &Path) -> i64 {
@@ -1270,6 +1292,36 @@ mod tests {
         let err = run_with_client(cfg, tg).unwrap_err();
 
         assert_eq!(err, "stop");
+    }
+
+    #[test]
+    fn run_with_client_retries_telegram_get_updates_conflicts() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let tg = FakeTelegram::new();
+        tg.push_update(Ok(Vec::new()));
+        tg.push_update(Err(
+            "Conflict: terminated by other getUpdates request; make sure that only one bot instance is running"
+                .to_string(),
+        ));
+        tg.push_update(Err("stop".to_string()));
+
+        let err = run_with_client(cfg, tg.clone()).unwrap_err();
+
+        assert_eq!(err, "stop");
+        assert_eq!(
+            tg.calls()
+                .iter()
+                .filter(|call| matches!(
+                    call,
+                    Call::GetUpdates {
+                        offset: 0,
+                        timeout: 50
+                    }
+                ))
+                .count(),
+            2
+        );
     }
 
     #[test]
