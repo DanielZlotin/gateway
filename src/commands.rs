@@ -6,6 +6,7 @@ pub enum Directive {
     Log,
     New,
     Restart,
+    Update,
     Model,
     Resume,
     Rename,
@@ -21,6 +22,7 @@ impl Directive {
             Directive::Log => "log",
             Directive::New => "new",
             Directive::Restart => "restart",
+            Directive::Update => "update",
             Directive::Model => "model",
             Directive::Resume => "resume",
             Directive::Rename => "rename",
@@ -95,6 +97,13 @@ pub const DIRECTIVE_SPECS: &[DirectiveSpec] = &[
         usage: "",
         summary: "restart the gateway service",
         bot_description: "🔄 Restart the gateway service.",
+    },
+    DirectiveSpec {
+        directive: Directive::Update,
+        icon: "⬆️",
+        usage: "",
+        summary: "pull latest gateway code and run setup",
+        bot_description: "⬆️ Pull latest gateway code and run setup.",
     },
     DirectiveSpec {
         directive: Directive::Model,
@@ -173,6 +182,7 @@ mod tests {
         }
         assert!(help.contains("📊 /status"));
         assert!(help.contains("⚙️ /config"));
+        assert!(help.contains("⬆️ /update"));
         assert!(!help.contains("/commands"));
         assert!(!help.contains("/start"));
     }

@@ -541,8 +541,8 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "help", "status", "config", "log", "new", "restart", "model", "resume", "rename",
-                "list",
+                "help", "status", "config", "log", "new", "restart", "update", "model", "resume",
+                "rename", "list",
             ]
         );
         assert!(!names.contains(&"commands"));
@@ -552,6 +552,9 @@ mod tests {
         assert!(commands
             .iter()
             .any(|command| command.command == "config" && command.description.starts_with("⚙️ ")));
+        assert!(commands
+            .iter()
+            .any(|command| command.command == "update" && command.description.starts_with("⬆️ ")));
         assert!(
             commands
                 .iter()

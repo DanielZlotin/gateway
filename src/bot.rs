@@ -372,6 +372,7 @@ fn handle_command(
             restart_gateway(&cfg.launchd_target);
             Ok(())
         }
+        Some(Directive::Update) => handle_update_command(tg, msg),
         Some(Directive::Model) => handle_model_command(cfg, tg, store, selections, msg, text, &key),
         Some(Directive::Resume) => handle_resume_command(tg, store, selections, msg, text, &key),
         Some(Directive::Rename) => handle_rename_command(cfg, tg, store, msg, text, &key),
@@ -1081,6 +1082,16 @@ fn send_long_message(
     Ok(())
 }
 
+fn handle_update_command(tg: &impl TelegramApi, msg: &Message) -> Result<(), String> {
+    tg.send_message(
+        msg.chat.id,
+        "⬆️ Updating gateway. Running `git pull`, then `./setup`.",
+        msg.message_id,
+    )?;
+    start_gateway_update();
+    Ok(())
+}
+
 fn restart_gateway(launchd_target: &str) {
     let _ = Command::new("/bin/launchctl")
         .args(["kickstart", "-k", launchd_target])
@@ -1088,6 +1099,26 @@ fn restart_gateway(launchd_target: &str) {
         .stderr(Stdio::null())
         .spawn();
 }
+
+fn gateway_update_command() -> Command {
+    let mut command = Command::new("/bin/zsh");
+    command
+        .args(["-lc", "nohup /bin/zsh -lc 'git pull && ./setup' &"])
+        .current_dir(gateway_root());
+    command
+}
+
+fn gateway_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+}
+
+#[cfg(not(test))]
+fn start_gateway_update() {
+    let _ = gateway_update_command().stdin(Stdio::null()).spawn();
+}
+
+#[cfg(test)]
+fn start_gateway_update() {}
 
 pub const fn typing_refresh_interval() -> Duration {
     TYPING_REFRESH_INTERVAL
@@ -1098,6 +1129,7 @@ mod tests {
     use super::*;
     use crate::telegram::{Chat, User};
     use std::collections::VecDeque;
+    use std::ffi::OsStr;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::os::unix::fs::PermissionsExt;
@@ -1522,6 +1554,7 @@ mod tests {
         .unwrap();
         handle_command(&cfg, &tg, &store, &selections, &msg, "/list", "/list").unwrap();
         handle_command(&cfg, &tg, &store, &selections, &msg, "/help", "/help").unwrap();
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/update", "/update").unwrap();
         handle_command(
             &cfg,
             &tg,
@@ -1568,6 +1601,9 @@ mod tests {
         assert!(sent.iter().any(|text| text.contains("🏷️ Renamed session")));
         assert!(sent.iter().any(|text| text.contains("💾 Saved sessions:")));
         assert!(sent.iter().any(|text| text.contains("/status")));
+        assert!(sent.iter().any(|text| {
+            text == "⬆️ Updating gateway. Running `git pull`, then `./setup`."
+        }));
         assert!(!sent.iter().any(|text| text.contains("/commands")));
         assert_eq!(
             sent.iter()
@@ -1580,6 +1616,25 @@ mod tests {
         assert!(sent
             .iter()
             .any(|text| text.contains("❓ Unknown directive")));
+    }
+
+    #[test]
+    fn gateway_update_command_runs_git_pull_then_setup_from_repo_root() {
+        let command = gateway_update_command();
+        let args = command.get_args().collect::<Vec<_>>();
+
+        assert_eq!(command.get_program(), OsStr::new("/bin/zsh"));
+        assert_eq!(
+            args,
+            vec![
+                OsStr::new("-lc"),
+                OsStr::new("nohup /bin/zsh -lc 'git pull && ./setup' &"),
+            ]
+        );
+        assert_eq!(
+            command.get_current_dir(),
+            Some(Path::new(env!("CARGO_MANIFEST_DIR")))
+        );
     }
 
     #[test]
