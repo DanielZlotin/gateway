@@ -3,6 +3,7 @@ use crate::launchd;
 use crate::provider::Provider;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fmt::Display;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -92,6 +93,11 @@ pub fn load_from_env(env: &BTreeMap<String, String>) -> Result<Config, String> {
         queue_depth: 8,
         codex_timeout: Duration::from_secs(timeout_secs(gateway_config.timeout_mins)?),
     })
+}
+
+pub fn config_report_from_env(env: &BTreeMap<String, String>) -> Result<String, String> {
+    let cfg = load_from_env(env)?;
+    Ok(cfg.config_report_with_launch_agent(Some(launchd::plist_path_from_env(env)?)))
 }
 
 pub fn load_gateway_config(path: &Path) -> Result<GatewayConfigFile, String> {
@@ -254,29 +260,85 @@ impl Config {
         self.models.get(index)
     }
 
-    pub fn paths_report(&self) -> String {
-        let mut lines: Vec<String> = [
-            ("xdg_config_home", self.xdg_config_home.as_path()),
-            ("xdg_cache_home", self.xdg_cache_home.as_path()),
-            ("xdg_data_home", self.xdg_data_home.as_path()),
-            ("xdg_state_home", self.xdg_state_home.as_path()),
-            ("gateway_config_file", self.gateway_config_file.as_path()),
-            ("codex_bin", self.codex_bin.as_path()),
-            ("codex_workdir", self.codex_workdir.as_path()),
-            ("fastfetch_bin", self.fastfetch_bin.as_path()),
-            ("state_dir", self.state_dir.as_path()),
-            ("chat_state_dir", self.chat_state_dir.as_path()),
-            ("offset_file", self.offset_file.as_path()),
-            ("gateway_log_file", self.gateway_log_file.as_path()),
-        ]
-        .into_iter()
-        .map(|(name, path)| format!("{name}={}", path.display()))
-        .collect();
-        if let Ok(path) = launchd::plist_path() {
-            lines.push(format!("launch_agent_plist={}", path.display()));
-        }
-        lines.join("\n")
+    pub fn config_report(&self) -> String {
+        self.config_report_with_launch_agent(launchd::plist_path().ok())
     }
+
+    fn config_report_with_launch_agent(&self, launch_agent_plist: Option<PathBuf>) -> String {
+        let gateway_executable =
+            std::env::current_exe().unwrap_or_else(|_| PathBuf::from("gateway"));
+        let mut lines = vec![
+            path_line("xdg_config_home", &self.xdg_config_home),
+            path_line("xdg_cache_home", &self.xdg_cache_home),
+            path_line("xdg_data_home", &self.xdg_data_home),
+            path_line("xdg_state_home", &self.xdg_state_home),
+            path_line("gateway_config_file", &self.gateway_config_file),
+            path_line("gateway_executable", &gateway_executable),
+            path_line("codex_bin", &self.codex_bin),
+            path_line("codex_workdir", &self.codex_workdir),
+        ];
+        for (index, model) in self.models.iter().enumerate() {
+            lines.extend(model_lines(index, model));
+        }
+        lines.extend([
+            path_line("fastfetch_bin", &self.fastfetch_bin),
+            path_line("state_dir", &self.state_dir),
+            path_line("chat_state_dir", &self.chat_state_dir),
+            path_line("offset_file", &self.offset_file),
+            path_line("gateway_log_file", &self.gateway_log_file),
+        ]);
+        if let Some(path) = launch_agent_plist {
+            lines.push(path_line("launch_agent_plist", &path));
+        }
+        lines.extend([
+            value_line("launchd_target", &self.launchd_target),
+            value_line("poll_timeout_sec", self.poll_timeout_sec),
+            value_line("queue_depth", self.queue_depth),
+            value_line("codex_timeout_sec", self.codex_timeout.as_secs()),
+            value_line("telegram_token", token_status(&self.bot_token)),
+            value_line("telegram_chat_ids", join_i64s(&self.telegram_chat_ids)),
+        ]);
+        format_report(lines)
+    }
+}
+
+fn model_lines(index: usize, model: &ProviderModel) -> [(String, String); 2] {
+    [
+        value_line(&format!("models[{index}].provider"), model.provider.label()),
+        value_line(&format!("models[{index}].model"), &model.model),
+    ]
+}
+
+fn path_line(name: &str, path: &Path) -> (String, String) {
+    value_line(name, path.display())
+}
+
+fn value_line(name: &str, value: impl Display) -> (String, String) {
+    (name.to_string(), value.to_string())
+}
+
+fn token_status(token: &str) -> &'static str {
+    if token.trim().is_empty() {
+        "missing"
+    } else {
+        "set"
+    }
+}
+
+fn join_i64s(values: &[i64]) -> String {
+    values
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn format_report(lines: Vec<(String, String)>) -> String {
+    lines
+        .into_iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn normalize_models(models: &mut Vec<ProviderModel>) -> Result<(), String> {
@@ -308,6 +370,10 @@ mod tests {
             (GATEWAY_TELEGRAM_TOKEN_ENV.to_string(), "token".to_string()),
             ("GATEWAY_TELEGRAM_CHAT_IDS".to_string(), "42".to_string()),
             (
+                "HOME".to_string(),
+                root.join("home").to_string_lossy().to_string(),
+            ),
+            (
                 "XDG_CONFIG_HOME".to_string(),
                 root.join("config").to_string_lossy().to_string(),
             ),
@@ -325,6 +391,14 @@ mod tests {
             ),
         ]);
         (dir, env)
+    }
+
+    fn assert_path_line(report: &str, name: &str, path: &Path) {
+        let expected = format!("{name}={}", path.display());
+        assert!(
+            report.contains(&expected),
+            "missing {expected:?} in:\n{report}"
+        );
     }
 
     #[test]
@@ -377,11 +451,11 @@ mod tests {
     }
 
     #[test]
-    fn paths_report_lists_runtime_paths() {
+    fn config_report_lists_loaded_runtime_config() {
         let (_dir, env) = env_with_token();
         let cfg = load_from_env(&env).unwrap();
 
-        let report = cfg.paths_report();
+        let report = cfg.config_report();
 
         let labels = report
             .lines()
@@ -395,16 +469,91 @@ mod tests {
                 "xdg_data_home",
                 "xdg_state_home",
                 "gateway_config_file",
+                "gateway_executable",
                 "codex_bin",
                 "codex_workdir",
+                "models[0].provider",
+                "models[0].model",
+                "models[1].provider",
+                "models[1].model",
+                "models[2].provider",
+                "models[2].model",
                 "fastfetch_bin",
                 "state_dir",
                 "chat_state_dir",
                 "offset_file",
                 "gateway_log_file",
                 "launch_agent_plist",
+                "launchd_target",
+                "poll_timeout_sec",
+                "queue_depth",
+                "codex_timeout_sec",
+                "telegram_token",
+                "telegram_chat_ids",
             ]
         );
+        assert!(report.contains("models[0].provider=Codex"));
+        assert!(report.contains("models[0].model=gpt-5.5"));
+        assert!(report.contains("models[1].provider=Claude"));
+        assert!(report.contains("models[2].provider=OpenRouter"));
+        assert!(report.contains("telegram_token=set"));
+        assert!(report.contains("telegram_chat_ids=42"));
+        assert!(!report.contains("bot_token=token"));
+    }
+
+    #[test]
+    fn config_report_from_env_loads_config_and_paths() {
+        let (dir, env) = env_with_token();
+        let root = dir.path();
+
+        let report = config_report_from_env(&env).unwrap();
+
+        assert_path_line(&report, "xdg_config_home", &root.join("config"));
+        assert_path_line(&report, "xdg_cache_home", &root.join("cache"));
+        assert_path_line(&report, "xdg_data_home", &root.join("data"));
+        assert_path_line(&report, "xdg_state_home", &root.join("state"));
+        assert_path_line(
+            &report,
+            "gateway_config_file",
+            &root.join("config/gateway/config.json"),
+        );
+        assert!(report.contains("gateway_executable="));
+        assert!(report.contains("codex_bin=codex"));
+        assert_path_line(&report, "codex_workdir", &root.join("config"));
+        assert!(report.contains("fastfetch_bin=fastfetch"));
+        assert_path_line(&report, "state_dir", &root.join("state/gateway"));
+        assert_path_line(&report, "chat_state_dir", &root.join("state/gateway/chats"));
+        assert_path_line(
+            &report,
+            "offset_file",
+            &root.join("state/gateway/telegram.offset"),
+        );
+        assert_path_line(
+            &report,
+            "gateway_log_file",
+            &root.join("state/gateway/logs/gateway.log"),
+        );
+        assert_path_line(
+            &report,
+            "launch_agent_plist",
+            &root.join("home/Library/LaunchAgents/ai.gateway.plist"),
+        );
+        assert!(report.contains("launchd_target=gui/"));
+        assert!(report.contains("poll_timeout_sec=50"));
+        assert!(report.contains("queue_depth=8"));
+        assert!(report.contains("codex_timeout_sec=1800"));
+        assert!(report.contains("telegram_token=set"));
+        assert!(report.contains("telegram_chat_ids=42"));
+    }
+
+    #[test]
+    fn config_report_from_env_requires_loaded_bot_credentials() {
+        let (_dir, mut env) = env_with_token();
+        env.remove(GATEWAY_TELEGRAM_TOKEN_ENV);
+
+        let err = config_report_from_env(&env).unwrap_err();
+
+        assert!(err.contains(GATEWAY_TELEGRAM_TOKEN_ENV));
     }
 
     #[test]

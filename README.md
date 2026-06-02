@@ -87,7 +87,7 @@ it with these defaults:
 gateway
 gateway bot
 gateway logs [lines]
-gateway paths
+gateway config
 gateway uninstall
 gateway version
 gateway run --prompt "Summarize status"
@@ -111,8 +111,7 @@ printf '%s\n' "Summarize status" | gateway run
 🧭 Other commands:
 
 1. 📜 `gateway logs [lines]` prints recent logs; default `10`, max `200`.
-2. 📁 `gateway paths` prints resolved config, state, log, executable, and
-   LaunchAgent paths.
+2. ⚙️ `gateway config` prints loaded gateway config with secrets redacted.
 3. 🧹 `gateway uninstall` stops the LaunchAgent and removes its plist.
 4. 🧾 `gateway version` prints the running binary version.
 
@@ -124,6 +123,7 @@ Sessions are kept separately per chat, and commands are case-insensitive.
 ```text
 ❔ /help - show supported gateway directives
 📊 /status - show Codex, gateway, and system status
+⚙️ /config - show loaded gateway config with secrets redacted
 📜 /log [lines] - send recent gateway logs
 🆕 /new - start a fresh Codex session
 🔄 /restart - restart the gateway service

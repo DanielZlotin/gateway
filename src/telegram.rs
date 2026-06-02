@@ -1,3 +1,4 @@
+use crate::commands::DIRECTIVE_SPECS;
 use crate::text::redact_private_data;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::time::Duration;
@@ -453,23 +454,13 @@ fn should_retry_plain_text(err: &str) -> bool {
 }
 
 pub fn supported_bot_commands() -> Vec<BotCommand> {
-    [
-        ("help", "❔ Show supported gateway directives."),
-        ("status", "📊 Show Codex, gateway, and system status."),
-        ("log", "📜 Send recent gateway logs."),
-        ("new", "🆕 Start a fresh Codex session."),
-        ("restart", "🔄 Restart the gateway service."),
-        ("model", "🤖 Choose a configured provider/model."),
-        ("resume", "↩️ Resume a saved session."),
-        ("rename", "🏷️ Rename the current session."),
-        ("list", "💾 List saved sessions."),
-    ]
-    .into_iter()
-    .map(|(command, description)| BotCommand {
-        command: command.to_string(),
-        description: description.to_string(),
-    })
-    .collect()
+    DIRECTIVE_SPECS
+        .iter()
+        .map(|spec| BotCommand {
+            command: spec.command.to_string(),
+            description: spec.bot_description.to_string(),
+        })
+        .collect()
 }
 
 pub fn command_scope_targets(chat_ids: &[i64]) -> Vec<CommandScopeTarget> {
@@ -549,12 +540,18 @@ mod tests {
 
         assert_eq!(
             names,
-            vec!["help", "status", "log", "new", "restart", "model", "resume", "rename", "list"]
+            vec![
+                "help", "status", "config", "log", "new", "restart", "model", "resume", "rename",
+                "list",
+            ]
         );
         assert!(!names.contains(&"commands"));
         assert!(commands
             .iter()
             .any(|command| command.command == "status" && command.description.starts_with("📊 ")));
+        assert!(commands
+            .iter()
+            .any(|command| command.command == "config" && command.description.starts_with("⚙️ ")));
         assert!(
             commands
                 .iter()

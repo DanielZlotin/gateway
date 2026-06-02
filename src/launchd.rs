@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -23,6 +24,18 @@ pub fn plist_path() -> Result<PathBuf, String> {
     let home = std::env::var("HOME")
         .map_err(|_| "HOME is required".to_string())
         .map(|value| value.trim().to_string())?;
+    plist_path_from_home(&home)
+}
+
+pub fn plist_path_from_env(env: &BTreeMap<String, String>) -> Result<PathBuf, String> {
+    let home = env
+        .get("HOME")
+        .map(|value| value.trim().to_string())
+        .ok_or_else(|| "HOME is required".to_string())?;
+    plist_path_from_home(&home)
+}
+
+fn plist_path_from_home(home: &str) -> Result<PathBuf, String> {
     if home.is_empty() {
         return Err("HOME is required".to_string());
     }

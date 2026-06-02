@@ -1,4 +1,4 @@
-use gateway::cli::{parse_args_from, Mode};
+use gateway::cli::{parse_cli_from, CliAction, Mode};
 
 fn main() {
     if let Err(err) = run() {
@@ -8,16 +8,25 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    let mode = parse_args_from(std::env::args_os())?;
+    let mode = match parse_cli_from(std::env::args_os())? {
+        CliAction::Execute(mode) => mode,
+        CliAction::Help(help) => {
+            print!("{help}");
+            return Ok(());
+        }
+    };
     match mode {
         Mode::Bot => gateway::bot::run(gateway::config::load()?),
+        Mode::Config => {
+            println!(
+                "{}",
+                gateway::config::config_report_from_env(&gateway::config::current_env())?
+            );
+            Ok(())
+        }
         Mode::Logs(lines) => {
             let output = gateway::logs::read_gateway_logs(&gateway::config::current_env(), lines)?;
             println!("{output}");
-            Ok(())
-        }
-        Mode::Paths => {
-            println!("{}", gateway::config::load()?.paths_report());
             Ok(())
         }
         Mode::Run(args) => {

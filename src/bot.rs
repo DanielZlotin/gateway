@@ -360,6 +360,7 @@ fn handle_command(
         thread_id: msg.message_thread_id,
     };
     match command {
+        "/config" => send_long_message(tg, msg.chat.id, &cfg.config_report(), msg.message_id),
         "/log" => handle_log_command(cfg, tg, msg, text),
         "/new" => handle_new_command(cfg, tg, store, selections, msg, &key),
         "/restart" => {
@@ -1470,6 +1471,7 @@ mod tests {
             thread_id: None,
         };
 
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/config", "/config").unwrap();
         handle_command(&cfg, &tg, &store, &selections, &msg, "/log", "/log").unwrap();
         fs::create_dir_all(cfg.gateway_log_file.parent().unwrap()).unwrap();
         fs::write(&cfg.gateway_log_file, "one\ntwo\nthree\n").unwrap();
@@ -1529,6 +1531,10 @@ mod tests {
         handle_command(&cfg, &tg, &store, &selections, &msg, "/wat", "/wat").unwrap();
 
         let sent = tg.sent_text();
+        assert!(sent.iter().any(|text| {
+            text.contains("telegram_chat_ids=42") && text.contains("models[0].model=gpt-test")
+        }));
+        assert!(!sent.iter().any(|text| text.contains("bot_token=token")));
         assert!(sent
             .iter()
             .any(|text| text == "📭 No gateway log available."));
