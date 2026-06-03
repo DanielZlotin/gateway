@@ -46,6 +46,8 @@ pub struct CodexRun<'a> {
     pub cancel: Option<Arc<AtomicBool>>,
 }
 
+pub const LIGHTWEIGHT_CODEX_MODEL: &str = "gpt-5.4-mini";
+
 const GATEWAY_DEVELOPER_INSTRUCTIONS: &str = include_str!("SYSTEM.md");
 
 pub fn codex_args(

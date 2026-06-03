@@ -1,4 +1,4 @@
-use crate::codex::{run_codex, run_codex_stream, CodexConfig, CodexRun};
+use crate::codex::{run_codex, run_codex_stream, CodexConfig, CodexRun, LIGHTWEIGHT_CODEX_MODEL};
 use crate::commands::{
     directive_from_command, directive_help, is_allowed, unknown_directive_message, Directive,
 };
@@ -244,10 +244,10 @@ fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
         default_model.model.clone(),
         default_model.provider,
     );
-    let status_codex = codex_status(&cfg);
-    let status_git = git_status(&cfg);
-    let status_fetch = fastfetch_status();
     let codex = CodexConfig::from(&cfg);
+    let status_codex = codex_status(&cfg);
+    let status_git = git_status(&cfg, &codex);
+    let status_fetch = fastfetch_status();
     for chat_id in &cfg.telegram_chat_ids {
         let key = SessionKey::Chat {
             chat_id: *chat_id,
@@ -908,7 +908,7 @@ fn auto_rename_session(
         AUTO_RENAME_PROMPT,
         state.session_id.as_deref(),
         Provider::Codex,
-        AUTO_RENAME_MODEL,
+        LIGHTWEIGHT_CODEX_MODEL,
         cfg.codex_timeout,
         &cfg.state_dir,
     ) {
@@ -971,7 +971,6 @@ fn rename_current_session_for_chat(
     }
 }
 
-const AUTO_RENAME_MODEL: &str = "gpt-5.4-mini";
 const AUTO_RENAME_PROMPT: &str = "Create a concise name for this session. Return only the name, with no quotes, prefixes, markdown, or explanation. Use a lowercase single-word name, or if multiple words are necessary, use a lowercase hyphenated name like session-name.";
 
 fn auto_session_name(text: &str) -> Option<String> {
@@ -1039,7 +1038,7 @@ fn handle_status_command(
         &format_status_message(
             &state_with_provider_model(&state, &selected_provider_model(cfg, selections, key)),
             &codex_status(cfg),
-            &git_status(cfg),
+            &git_status(cfg, codex),
             &fastfetch_status(),
         ),
         msg.message_id,

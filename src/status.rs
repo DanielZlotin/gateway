@@ -1,6 +1,8 @@
+use crate::codex::{run_codex, CodexConfig, LIGHTWEIGHT_CODEX_MODEL};
 use crate::config::Config;
+use crate::provider::Provider;
 use crate::session::ChatSession;
-use crate::text::session_label;
+use crate::text::{redact_private_data, session_label};
 use serde::Deserialize;
 use serde_json::Value;
 use std::fs;
@@ -13,6 +15,8 @@ const CODEX_USAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const FASTFETCH_TIMEOUT: Duration = Duration::from_secs(5);
 const GIT_STATUS_TIMEOUT: Duration = Duration::from_secs(2);
+const GIT_SUMMARY_TIMEOUT: Duration = Duration::from_secs(20);
+const MAX_GIT_SUMMARY_INPUT_CHARS: usize = 12_000;
 const FASTFETCH_CONFIG: &str = r#"{
   "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
   "modules": [
@@ -105,17 +109,17 @@ pub fn fastfetch_status() -> String {
     fastfetch_status_with_bin(Path::new("fastfetch"))
 }
 
-pub fn git_status(cfg: &Config) -> String {
-    let gateway = gateway_repo_status().unwrap_or_else(|err| format!("error: {err}"));
-    let xdg_config = git_status_short_summary(&cfg.xdg_config_home);
+pub fn git_status(cfg: &Config, codex: &CodexConfig) -> String {
+    let gateway = gateway_repo_status(cfg, codex).unwrap_or_else(|err| format!("error: {err}"));
+    let xdg_config = git_status_short_summary(codex, cfg, "xdg config", &cfg.xdg_config_home);
     format!("🧾 Git\n• gateway: {gateway}\n• xdg config: {xdg_config}")
 }
 
-fn gateway_repo_status() -> Result<String, String> {
+fn gateway_repo_status(cfg: &Config, codex: &CodexConfig) -> Result<String, String> {
     let exe = std::env::current_exe().map_err(|err| err.to_string())?;
     let start = exe.parent().unwrap_or_else(|| Path::new("."));
     let root = git_toplevel(start)?;
-    Ok(git_status_short_summary(&root))
+    Ok(git_status_short_summary(codex, cfg, "gateway", &root))
 }
 
 fn git_toplevel(path: &Path) -> Result<PathBuf, String> {
@@ -145,11 +149,120 @@ fn git_toplevel(path: &Path) -> Result<PathBuf, String> {
     })
 }
 
-fn git_status_short_summary(path: &Path) -> String {
+fn git_status_short_summary(codex: &CodexConfig, cfg: &Config, label: &str, path: &Path) -> String {
     match run_git_status_short(path) {
         Ok(lines) if lines.is_empty() => "clean".to_string(),
-        Ok(lines) => summarize_git_status_lines(&lines),
+        Ok(lines) => summarize_git_status_with_codex(codex, cfg, label, path, &lines),
         Err(err) => format!("error: {err}"),
+    }
+}
+
+fn summarize_git_status_with_codex(
+    codex: &CodexConfig,
+    cfg: &Config,
+    label: &str,
+    path: &Path,
+    lines: &[String],
+) -> String {
+    let fallback = summarize_git_status_lines(lines);
+    let input = git_summary_input(path, lines).unwrap_or_else(|_| lines.join("\n"));
+    let prompt = git_summary_prompt(label, &input);
+    match run_codex(
+        codex,
+        &prompt,
+        None,
+        Provider::Codex,
+        LIGHTWEIGHT_CODEX_MODEL,
+        GIT_SUMMARY_TIMEOUT.min(cfg.codex_timeout),
+        &cfg.state_dir,
+    ) {
+        Ok(output) => concise_git_summary(&output.final_text).unwrap_or(fallback),
+        Err(_) => fallback,
+    }
+}
+
+fn git_summary_input(path: &Path, lines: &[String]) -> Result<String, String> {
+    let mut sections = vec![format!("status:\n{}", lines.join("\n"))];
+    push_git_output_section(
+        path,
+        &mut sections,
+        "staged stat",
+        &["diff", "--cached", "--stat"],
+    )?;
+    push_git_output_section(path, &mut sections, "unstaged stat", &["diff", "--stat"])?;
+    push_git_output_section(path, &mut sections, "staged patch", &["diff", "--cached"])?;
+    push_git_output_section(path, &mut sections, "unstaged patch", &["diff"])?;
+    Ok(limit_git_summary_input(&redact_private_data(
+        &sections.join("\n\n"),
+    )))
+}
+
+fn push_git_output_section(
+    path: &Path,
+    sections: &mut Vec<String>,
+    label: &str,
+    args: &[&str],
+) -> Result<(), String> {
+    let output = run_git_text(path, args)?;
+    let output = output.trim();
+    if !output.is_empty() {
+        sections.push(format!("{label}:\n{output}"));
+    }
+    Ok(())
+}
+
+fn run_git_text(path: &Path, args: &[&str]) -> Result<String, String> {
+    let (output, timed_out) = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| err.to_string())
+        .and_then(|child| wait_with_timeout(child, GIT_STATUS_TIMEOUT))?;
+    if timed_out {
+        return Err("timed out".to_string());
+    }
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!("exited with {}", output.status)
+        } else {
+            stderr
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn limit_git_summary_input(text: &str) -> String {
+    let mut limited: String = text.chars().take(MAX_GIT_SUMMARY_INPUT_CHARS).collect();
+    if text.chars().count() > MAX_GIT_SUMMARY_INPUT_CHARS {
+        limited.push_str("\n\n[diff truncated]");
+    }
+    limited
+}
+
+fn git_summary_prompt(label: &str, input: &str) -> String {
+    format!(
+        "Summarize the actual content changes in this git diff bundle for the {label} repo in one concise fragment.\n\
+Return only the summary, with no prefix, quotes, markdown, or explanation.\n\
+Focus on what changed behaviorally or structurally, not file names or dirty-status codes.\n\
+If there is only untracked metadata and no patch content, say that concisely.\n\n{input}"
+    )
+}
+
+fn concise_git_summary(text: &str) -> Option<String> {
+    let summary = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '*'))
+        .trim();
+    if summary.is_empty() {
+        None
+    } else {
+        Some(summary.chars().take(180).collect())
     }
 }
 
@@ -183,16 +296,70 @@ fn run_git_status_short(path: &Path) -> Result<Vec<String>, String> {
 }
 
 fn summarize_git_status_lines(lines: &[String]) -> String {
-    const MAX_LINES: usize = 6;
-    let mut summary = format!("{} changed", lines.len());
-    for line in lines.iter().take(MAX_LINES) {
-        summary.push_str("\n  ");
-        summary.push_str(line);
+    let counts = git_status_counts(lines);
+    let mut parts = Vec::new();
+    push_count(&mut parts, counts.modified, "modified");
+    push_count(&mut parts, counts.added, "added");
+    push_count(&mut parts, counts.deleted, "deleted");
+    push_count(&mut parts, counts.renamed, "renamed");
+    push_count(&mut parts, counts.copied, "copied");
+    push_count(&mut parts, counts.untracked, "untracked");
+    push_count(&mut parts, counts.conflicted, "conflicted");
+    push_count(&mut parts, counts.other, "other");
+    format!("{} changed: {}", lines.len(), parts.join(", "))
+}
+
+#[derive(Default)]
+struct GitStatusCounts {
+    modified: usize,
+    added: usize,
+    deleted: usize,
+    renamed: usize,
+    copied: usize,
+    untracked: usize,
+    conflicted: usize,
+    other: usize,
+}
+
+fn git_status_counts(lines: &[String]) -> GitStatusCounts {
+    let mut counts = GitStatusCounts::default();
+    for line in lines {
+        let code = line.get(..2).unwrap_or(line.as_str());
+        if code == "??" {
+            counts.untracked += 1;
+            continue;
+        }
+        if is_conflicted_status(code) {
+            counts.conflicted += 1;
+            continue;
+        }
+        let mut counted = false;
+        for status in code.chars().filter(|ch| *ch != ' ') {
+            counted = true;
+            match status {
+                'M' => counts.modified += 1,
+                'A' => counts.added += 1,
+                'D' => counts.deleted += 1,
+                'R' => counts.renamed += 1,
+                'C' => counts.copied += 1,
+                _ => counts.other += 1,
+            }
+        }
+        if !counted {
+            counts.other += 1;
+        }
     }
-    if lines.len() > MAX_LINES {
-        summary.push_str(&format!("\n  … {} more", lines.len() - MAX_LINES));
+    counts
+}
+
+fn is_conflicted_status(code: &str) -> bool {
+    matches!(code, "DD" | "AU" | "UD" | "UA" | "DU" | "AA" | "UU")
+}
+
+fn push_count(parts: &mut Vec<String>, count: usize, label: &str) {
+    if count > 0 {
+        parts.push(format!("{count} {label}"));
     }
-    summary
 }
 
 fn fastfetch_status_with_bin(bin: &Path) -> String {
@@ -617,22 +784,58 @@ mod tests {
     }
 
     #[test]
-    fn git_status_summary_limits_dirty_lines() {
+    fn git_status_summary_counts_change_types() {
         let lines = vec![
             " M Cargo.toml".to_string(),
             " M src/status.rs".to_string(),
             "?? tmp".to_string(),
-            " M a".to_string(),
-            " M b".to_string(),
-            " M c".to_string(),
-            " M d".to_string(),
+            "A  new-file".to_string(),
+            "D  old-file".to_string(),
+            "R  old -> new".to_string(),
+            "UU conflicted".to_string(),
         ];
 
         let got = summarize_git_status_lines(&lines);
 
         assert!(got.starts_with("7 changed"));
-        assert!(got.contains(" M Cargo.toml"));
-        assert!(got.contains("… 1 more"));
+        assert!(got.contains("2 modified"));
+        assert!(got.contains("1 untracked"));
+        assert!(got.contains("1 added"));
+        assert!(got.contains("1 deleted"));
+        assert!(got.contains("1 renamed"));
+        assert!(got.contains("1 conflicted"));
+        assert!(!got.contains("Cargo.toml"));
+    }
+
+    #[test]
+    fn git_summary_prompt_asks_for_content_change_summary() {
+        let input = "status:\n M src/status.rs\n\nunstaged patch:\n+new behavior";
+
+        let got = git_summary_prompt("gateway", input);
+
+        assert!(got.contains("actual content changes"));
+        assert!(got.contains("one concise fragment"));
+        assert!(got.contains("not file names or dirty-status codes"));
+        assert!(got.contains("unstaged patch:\n+new behavior"));
+    }
+
+    #[test]
+    fn limit_git_summary_input_marks_truncated_text() {
+        let text = "a".repeat(MAX_GIT_SUMMARY_INPUT_CHARS + 1);
+
+        let got = limit_git_summary_input(&text);
+
+        assert!(got.ends_with("[diff truncated]"));
+        assert!(got.len() > MAX_GIT_SUMMARY_INPUT_CHARS);
+    }
+
+    #[test]
+    fn concise_git_summary_uses_first_non_empty_clean_line() {
+        assert_eq!(
+            concise_git_summary("\n  `status summary`  \nextra"),
+            Some("status summary".to_string())
+        );
+        assert_eq!(concise_git_summary(" \n\t"), None);
     }
 
     #[test]
