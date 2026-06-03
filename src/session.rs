@@ -123,23 +123,17 @@ impl SessionStore {
         Ok(state)
     }
 
-    pub fn resume_relative(&self, key: &SessionKey, back: usize) -> Result<ChatSession, String> {
+    pub fn resume_index(&self, key: &SessionKey, index: usize) -> Result<ChatSession, String> {
         let mut state = self.load(key);
-        let current_id = state
-            .session_id
-            .as_deref()
-            .ok_or_else(|| "🔎 No current session to step back from.".to_string())?;
-        let current_index = state
-            .sessions
-            .iter()
-            .position(|item| item.id == current_id)
-            .ok_or_else(|| "🔎 Current session is not in saved sessions.".to_string())?;
-        let target_index = current_index + back;
+        if index == 0 {
+            return Err("🔎 Session list indexes start at 1.".to_string());
+        }
+        let target_index = index - 1;
         let found = state
             .sessions
             .get(target_index)
             .cloned()
-            .ok_or_else(|| format!("🔎 No saved session {back} sessions back."))?;
+            .ok_or_else(|| format!("🔎 No saved session at list index {index}."))?;
         apply_resumed_session(&mut state, found);
         self.save(key, &state)?;
         Ok(state)
@@ -199,7 +193,7 @@ impl SessionStore {
             return "📭 No saved sessions yet. Send a normal message to create one.".to_string();
         }
         let mut lines = vec!["💾 Saved sessions:".to_string()];
-        for item in state.sessions {
+        for (index, item) in state.sessions.into_iter().enumerate() {
             let marker = if Some(item.id.as_str()) == state.session_id.as_deref() {
                 "⭐"
             } else {
@@ -212,7 +206,8 @@ impl SessionStore {
                 item.model.as_str()
             };
             lines.push(format!(
-                "{marker} {} {} {model} {name}",
+                "{}. {marker} {} {} {model} {name}",
+                index + 1,
                 item.provider.label(),
                 session_label(&item.id)
             ));
@@ -473,8 +468,8 @@ mod tests {
         let list = store.list(&key);
 
         assert!(list.contains("💾 Saved sessions:"));
-        assert!(list.contains("⭐ Codex session- gpt-default (unnamed)"));
-        assert!(list.contains("▫️ Codex session- gpt-default (unnamed)"));
+        assert!(list.contains("1. ⭐ Codex session- gpt-default (unnamed)"));
+        assert!(list.contains("2. ▫️ Codex session- gpt-default (unnamed)"));
         assert!(dir.path().join("chats/7-thread-99.json").exists());
     }
 
