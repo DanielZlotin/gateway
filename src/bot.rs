@@ -6,7 +6,7 @@ use crate::config::{Config, ProviderModel};
 use crate::logs;
 use crate::provider::Provider;
 use crate::session::{SessionKey, SessionStore};
-use crate::status::{codex_status, fastfetch_status, format_status_message};
+use crate::status::{codex_status, fastfetch_status, format_status_message, git_status};
 use crate::telegram::{CallbackQuery, InlineKeyboardButton, Message, TelegramClient, Update};
 use crate::text::{
     command_arg, is_ok_response, log_line_count, parse_command, redact_private_data, session_label,
@@ -245,6 +245,7 @@ fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
         default_model.provider,
     );
     let status_codex = codex_status(&cfg);
+    let status_git = git_status(&cfg);
     let status_fetch = fastfetch_status();
     let codex = CodexConfig::from(&cfg);
     for chat_id in &cfg.telegram_chat_ids {
@@ -261,7 +262,7 @@ fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
         if let Err(err) = send_long_message(
             &tg,
             *chat_id,
-            &format_status_message(&state, &status_codex, &status_fetch),
+            &format_status_message(&state, &status_codex, &status_git, &status_fetch),
             0,
         ) {
             logs::warn(format_args!(
@@ -1038,6 +1039,7 @@ fn handle_status_command(
         &format_status_message(
             &state_with_provider_model(&state, &selected_provider_model(cfg, selections, key)),
             &codex_status(cfg),
+            &git_status(cfg),
             &fastfetch_status(),
         ),
         msg.message_id,

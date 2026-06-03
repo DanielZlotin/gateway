@@ -5,13 +5,14 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 const CODEX_USAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const FASTFETCH_TIMEOUT: Duration = Duration::from_secs(5);
+const GIT_STATUS_TIMEOUT: Duration = Duration::from_secs(2);
 const FASTFETCH_CONFIG: &str = r#"{
   "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
   "modules": [
@@ -80,9 +81,9 @@ fn current_session_label(state: &ChatSession) -> String {
         .unwrap_or(label)
 }
 
-pub fn format_status_message(state: &ChatSession, codex: &str, fetch: &str) -> String {
+pub fn format_status_message(state: &ChatSession, codex: &str, git: &str, fetch: &str) -> String {
     let mut sections = vec![status_header(state)];
-    for section in [codex, fetch] {
+    for section in [codex, git, fetch] {
         let section = section.trim();
         if !section.is_empty() {
             sections.push(section.to_string());
@@ -102,6 +103,96 @@ pub fn codex_status(cfg: &Config) -> String {
 
 pub fn fastfetch_status() -> String {
     fastfetch_status_with_bin(Path::new("fastfetch"))
+}
+
+pub fn git_status(cfg: &Config) -> String {
+    let gateway = gateway_repo_status().unwrap_or_else(|err| format!("error: {err}"));
+    let xdg_config = git_status_short_summary(&cfg.xdg_config_home);
+    format!("🧾 Git\n• gateway: {gateway}\n• xdg config: {xdg_config}")
+}
+
+fn gateway_repo_status() -> Result<String, String> {
+    let exe = std::env::current_exe().map_err(|err| err.to_string())?;
+    let start = exe.parent().unwrap_or_else(|| Path::new("."));
+    let root = git_toplevel(start)?;
+    Ok(git_status_short_summary(&root))
+}
+
+fn git_toplevel(path: &Path) -> Result<PathBuf, String> {
+    let output = Command::new("git")
+        .args(["-C"])
+        .arg(path)
+        .args(["rev-parse", "--show-toplevel"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| err.to_string())
+        .and_then(|child| wait_with_timeout(child, GIT_STATUS_TIMEOUT))?;
+    if output.1 {
+        return Err("timed out".to_string());
+    }
+    if output.0.status.success() {
+        let root = String::from_utf8_lossy(&output.0.stdout).trim().to_string();
+        if !root.is_empty() {
+            return Ok(PathBuf::from(root));
+        }
+    }
+    let stderr = String::from_utf8_lossy(&output.0.stderr).trim().to_string();
+    Err(if stderr.is_empty() {
+        "not a git repo".to_string()
+    } else {
+        stderr
+    })
+}
+
+fn git_status_short_summary(path: &Path) -> String {
+    match run_git_status_short(path) {
+        Ok(lines) if lines.is_empty() => "clean".to_string(),
+        Ok(lines) => summarize_git_status_lines(&lines),
+        Err(err) => format!("error: {err}"),
+    }
+}
+
+fn run_git_status_short(path: &Path) -> Result<Vec<String>, String> {
+    let (output, timed_out) = Command::new("git")
+        .args(["-C"])
+        .arg(path)
+        .args(["status", "--short"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| err.to_string())
+        .and_then(|child| wait_with_timeout(child, GIT_STATUS_TIMEOUT))?;
+    if timed_out {
+        return Err("timed out".to_string());
+    }
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!("exited with {}", output.status)
+        } else {
+            stderr
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+fn summarize_git_status_lines(lines: &[String]) -> String {
+    const MAX_LINES: usize = 6;
+    let mut summary = format!("{} changed", lines.len());
+    for line in lines.iter().take(MAX_LINES) {
+        summary.push_str("\n  ");
+        summary.push_str(line);
+    }
+    if lines.len() > MAX_LINES {
+        summary.push_str(&format!("\n  … {} more", lines.len() - MAX_LINES));
+    }
+    summary
 }
 
 fn fastfetch_status_with_bin(bin: &Path) -> String {
@@ -505,19 +596,43 @@ mod tests {
     }
 
     #[test]
-    fn format_status_message_appends_codex_before_fetch() {
+    fn format_status_message_appends_codex_and_git_before_fetch() {
         let state = ChatSession {
             session_id: Some("12345678".to_string()),
             model: "gpt-test".to_string(),
             ..ChatSession::default()
         };
 
-        let got = format_status_message(&state, "🧠 Codex: ok", "OS: test");
+        let got = format_status_message(
+            &state,
+            "🧠 Codex: ok",
+            "🧾 Git\n• gateway: clean",
+            "OS: test",
+        );
 
         assert!(got.contains("🤖 Model: gpt-test"));
-        assert!(got.contains("🧠 Codex: ok\n\nOS: test"));
+        assert!(got.contains("🧠 Codex: ok\n\n🧾 Git\n• gateway: clean\n\nOS: test"));
         assert!(got.contains("OS: test"));
         assert!(!got.contains("Gateway restarted."));
+    }
+
+    #[test]
+    fn git_status_summary_limits_dirty_lines() {
+        let lines = vec![
+            " M Cargo.toml".to_string(),
+            " M src/status.rs".to_string(),
+            "?? tmp".to_string(),
+            " M a".to_string(),
+            " M b".to_string(),
+            " M c".to_string(),
+            " M d".to_string(),
+        ];
+
+        let got = summarize_git_status_lines(&lines);
+
+        assert!(got.starts_with("7 changed"));
+        assert!(got.contains(" M Cargo.toml"));
+        assert!(got.contains("… 1 more"));
     }
 
     #[test]
