@@ -99,7 +99,8 @@ printf '%s\n' "Summarize status" | gateway run
 
 ## 🤖 Telegram Bot
 
-Allowed private chats can send text messages or captions as Codex prompts.
+Allowed private chats can send text, captions, photos, and documents as Codex
+prompts.
 Sessions are kept separately per chat, and commands are case-insensitive.
 
 ```text
@@ -124,3 +125,5 @@ Sessions are kept separately per chat, and commands are case-insensitive.
 3. 🏷️ `/rename` without a name asks Codex to create one.
 4. 🫧 Bot prompts stream progress, split long final answers, and return provider
    failures to the requesting chat.
+5. 📎 Photos and image documents are attached to Codex as images; other documents
+   are downloaded and listed as local file paths in the prompt.

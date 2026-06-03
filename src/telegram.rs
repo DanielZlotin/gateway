@@ -1,6 +1,9 @@
 use crate::commands::DIRECTIVE_SPECS;
 use crate::text::redact_private_data;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::fs;
+use std::io::Read;
+use std::path::Path;
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +35,12 @@ pub struct TelegramResponse<T> {
 }
 
 #[derive(Debug, Deserialize)]
+struct TelegramFile {
+    #[serde(default)]
+    file_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Update {
     pub update_id: i64,
     pub message: Option<Message>,
@@ -54,6 +63,30 @@ pub struct Message {
     pub text: String,
     #[serde(default)]
     pub caption: String,
+    #[serde(default)]
+    pub photo: Vec<PhotoSize>,
+    #[serde(default)]
+    pub document: Option<Document>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PhotoSize {
+    pub file_id: String,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    #[serde(default)]
+    pub file_size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Document {
+    pub file_id: String,
+    #[serde(default)]
+    pub file_name: String,
+    #[serde(default)]
+    pub mime_type: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,6 +118,7 @@ pub struct Chat {
 #[derive(Clone)]
 pub struct TelegramClient {
     base_url: String,
+    file_base_url: String,
     agent: ureq::Agent,
 }
 
@@ -97,6 +131,7 @@ impl TelegramClient {
             .build();
         Self {
             base_url: format!("https://api.telegram.org/bot{token}"),
+            file_base_url: format!("https://api.telegram.org/file/bot{token}"),
             agent,
         }
     }
@@ -106,7 +141,11 @@ impl TelegramClient {
         let agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(5))
             .build();
-        Self { base_url, agent }
+        Self {
+            file_base_url: file_base_url_for(&base_url),
+            base_url,
+            agent,
+        }
     }
 
     pub fn get_updates(&self, offset: i64, timeout_sec: u64) -> Result<Vec<Update>, String> {
@@ -227,6 +266,31 @@ impl TelegramClient {
         ];
         let _: bool = self.post_form("sendChatAction", &values)?;
         Ok(())
+    }
+
+    pub fn download_file(&self, file_id: &str, path: &Path) -> Result<(), String> {
+        let values = [("file_id", file_id.to_string())];
+        let file: TelegramFile = self.post_form("getFile", &values)?;
+        let file_path = file
+            .file_path
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "telegram getFile returned no file_path".to_string())?;
+        let url = format!("{}/{}", self.file_base_url, file_path.trim_start_matches('/'));
+        let response = self.agent.get(&url).call().map_err(|err| {
+            format!(
+                "telegram download file request failed: {}",
+                redact_file_token(&self.file_base_url, &err.to_string())
+            )
+        })?;
+        let mut bytes = Vec::new();
+        response
+            .into_reader()
+            .read_to_end(&mut bytes)
+            .map_err(|err| format!("read telegram file download: {err}"))?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|err| format!("create download dir: {err}"))?;
+        }
+        fs::write(path, bytes).map_err(|err| format!("write telegram file download: {err}"))
     }
 
     pub fn sync_my_commands(&self, chat_ids: &[i64]) -> Result<(), String> {
@@ -511,6 +575,18 @@ pub fn redact_token(base_url: &str, value: &str) -> String {
     value.replace(base_url, "https://api.telegram.org/bot<redacted>")
 }
 
+fn redact_file_token(file_base_url: &str, value: &str) -> String {
+    value.replace(file_base_url, "https://api.telegram.org/file/bot<redacted>")
+}
+
+#[cfg(test)]
+fn file_base_url_for(base_url: &str) -> String {
+    if let Some((prefix, token)) = base_url.rsplit_once("/bot") {
+        return format!("{prefix}/file/bot{token}");
+    }
+    format!("{}/file", base_url.trim_end_matches('/'))
+}
+
 fn target(name: &str, scope_type: &str, chat_id: Option<i64>, set: bool) -> CommandScopeTarget {
     CommandScopeTarget {
         name: name.to_string(),
@@ -669,6 +745,10 @@ mod tests {
         let client = TelegramClient::new("secret");
 
         assert_eq!(client.base_url, "https://api.telegram.org/botsecret");
+        assert_eq!(
+            client.file_base_url,
+            "https://api.telegram.org/file/botsecret"
+        );
     }
 
     #[test]
@@ -691,6 +771,27 @@ mod tests {
         assert!(!first.path.contains("offset="));
         assert!(second.path.contains("timeout=5"));
         assert!(second.path.contains("offset=12"));
+    }
+
+    #[test]
+    fn download_file_resolves_telegram_file_path_and_writes_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = TestServer::new(vec![
+            json_response(r#"{"ok":true,"result":{"file_id":"file-1","file_path":"docs/report.txt"}}"#),
+            binary_response("downloaded bytes"),
+        ]);
+        let client = server.client();
+        let target = dir.path().join("report.txt");
+
+        client.download_file("file-1", &target).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "downloaded bytes");
+        let get_file = server.request();
+        let download = server.request();
+        assert_eq!(get_file.path, "/botsecret/getFile");
+        assert!(get_file.body.contains("file_id=file-1"));
+        assert_eq!(download.method, "GET");
+        assert_eq!(download.path, "/file/botsecret/docs/report.txt");
     }
 
     #[test]
@@ -838,6 +939,7 @@ mod tests {
 
         let missing = TelegramClient {
             base_url: "http://127.0.0.1:1/botsecret".to_string(),
+            file_base_url: "http://127.0.0.1:1/file/botsecret".to_string(),
             agent: ureq::AgentBuilder::new()
                 .timeout(std::time::Duration::from_millis(50))
                 .build(),
@@ -942,6 +1044,7 @@ mod tests {
         fn client(&self) -> TelegramClient {
             TelegramClient {
                 base_url: self.base_url.clone(),
+                file_base_url: file_base_url_for(&self.base_url),
                 agent: ureq::AgentBuilder::new()
                     .timeout(std::time::Duration::from_secs(5))
                     .build(),
@@ -1000,6 +1103,14 @@ mod tests {
     fn http_response(body: &str) -> String {
         format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+    }
+
+    fn binary_response(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
             body
         )

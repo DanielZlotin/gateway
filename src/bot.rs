@@ -12,7 +12,7 @@ use crate::text::{
 };
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -82,6 +82,7 @@ trait TelegramApi: Clone + Send + 'static {
     ) -> Result<(), String>;
     fn edit_message_text(&self, chat_id: i64, message_id: i64, text: &str) -> Result<(), String>;
     fn send_chat_action(&self, chat_id: i64, action: &str) -> Result<(), String>;
+    fn download_file(&self, file_id: &str, path: &Path) -> Result<(), String>;
 }
 
 impl TelegramApi for TelegramClient {
@@ -153,17 +154,44 @@ impl TelegramApi for TelegramClient {
     fn send_chat_action(&self, chat_id: i64, action: &str) -> Result<(), String> {
         self.send_chat_action(chat_id, action)
     }
+
+    fn download_file(&self, file_id: &str, path: &Path) -> Result<(), String> {
+        self.download_file(file_id, path)
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct Job {
     bot_token: String,
     chat_id: i64,
     thread_id: Option<i64>,
     reply_to_message_id: i64,
     prompt: String,
+    _attachment_dir: Option<tempfile::TempDir>,
+    image_paths: Vec<PathBuf>,
+    file_paths: Vec<PathBuf>,
     provider_model: ProviderModel,
     cancel_epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AttachmentKind {
+    Image,
+    File,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AttachmentSpec {
+    file_id: String,
+    file_name: String,
+    kind: AttachmentKind,
+}
+
+#[derive(Debug, Default)]
+struct DownloadedAttachments {
+    dir: Option<tempfile::TempDir>,
+    image_paths: Vec<PathBuf>,
+    file_paths: Vec<PathBuf>,
 }
 
 type RuntimeSelections = Arc<Mutex<HashMap<SessionKey, ProviderModel>>>;
@@ -371,6 +399,142 @@ pub fn message_text(text: &str, caption: &str) -> Result<String, String> {
     Err("📝 Text messages only.".to_string())
 }
 
+fn message_prompt_text(msg: &Message, attachments: &[AttachmentSpec]) -> Result<String, String> {
+    match message_text(&msg.text, &msg.caption) {
+        Ok(text) => Ok(text),
+        Err(err) if attachments.is_empty() => Err(err),
+        Err(_) => Ok(default_attachment_prompt(attachments)),
+    }
+}
+
+fn message_attachment_specs(msg: &Message) -> Vec<AttachmentSpec> {
+    let mut attachments = Vec::new();
+    if let Some(photo) = msg.photo.iter().max_by_key(|photo| {
+        (
+            photo.file_size.unwrap_or(0),
+            u64::from(photo.width) * u64::from(photo.height),
+        )
+    }) {
+        attachments.push(AttachmentSpec {
+            file_id: photo.file_id.clone(),
+            file_name: format!("photo-{}.jpg", msg.message_id),
+            kind: AttachmentKind::Image,
+        });
+    }
+    if let Some(document) = msg.document.as_ref() {
+        let kind = if document.mime_type.to_ascii_lowercase().starts_with("image/") {
+            AttachmentKind::Image
+        } else {
+            AttachmentKind::File
+        };
+        let fallback = match kind {
+            AttachmentKind::Image => format!("image-{}", msg.message_id),
+            AttachmentKind::File => format!("file-{}", msg.message_id),
+        };
+        attachments.push(AttachmentSpec {
+            file_id: document.file_id.clone(),
+            file_name: document_file_name(&document.file_name, &fallback),
+            kind,
+        });
+    }
+    attachments
+}
+
+fn document_file_name(name: &str, fallback: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() {
+        fallback.to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+fn default_attachment_prompt(attachments: &[AttachmentSpec]) -> String {
+    let has_image = attachments
+        .iter()
+        .any(|attachment| attachment.kind == AttachmentKind::Image);
+    let has_file = attachments
+        .iter()
+        .any(|attachment| attachment.kind == AttachmentKind::File);
+    match (has_image, has_file) {
+        (true, true) => "Please review the attached Telegram images and files.".to_string(),
+        (true, false) => "Please review the attached Telegram image.".to_string(),
+        (false, true) => "Please review the attached Telegram file.".to_string(),
+        (false, false) => "Please review this Telegram message.".to_string(),
+    }
+}
+
+fn download_message_attachments(
+    cfg: &Config,
+    tg: &impl TelegramApi,
+    attachments: &[AttachmentSpec],
+) -> Result<DownloadedAttachments, String> {
+    if attachments.is_empty() {
+        return Ok(DownloadedAttachments::default());
+    }
+    fs::create_dir_all(&cfg.state_dir).map_err(|err| format!("create state dir: {err}"))?;
+    let dir = tempfile::Builder::new()
+        .prefix("attach-")
+        .tempdir_in(&cfg.state_dir)
+        .map_err(|err| format!("create attachment dir: {err}"))?;
+    let mut image_paths = Vec::new();
+    let mut file_paths = Vec::new();
+    for (index, attachment) in attachments.iter().enumerate() {
+        let path = dir.path().join(local_attachment_file_name(
+            index,
+            &attachment.file_name,
+        ));
+        tg.download_file(&attachment.file_id, &path)?;
+        match attachment.kind {
+            AttachmentKind::Image => image_paths.push(path),
+            AttachmentKind::File => file_paths.push(path),
+        }
+    }
+    Ok(DownloadedAttachments {
+        dir: Some(dir),
+        image_paths,
+        file_paths,
+    })
+}
+
+fn local_attachment_file_name(index: usize, name: &str) -> String {
+    let name = name
+        .trim()
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or("attachment");
+    let cleaned = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let cleaned = cleaned.trim_matches('_');
+    let cleaned = if cleaned.is_empty() {
+        "attachment"
+    } else {
+        cleaned
+    };
+    format!("{:02}-{cleaned}", index + 1)
+}
+
+fn prompt_with_file_attachments(prompt: &str, file_paths: &[PathBuf]) -> String {
+    if file_paths.is_empty() {
+        return prompt.to_string();
+    }
+    let files = file_paths
+        .iter()
+        .map(|path| format!("- {}", path.display()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{}\n\nTelegram file attachments:\n{files}", prompt.trim())
+}
+
 fn prompt_with_reply_context(msg: &Message, text: &str) -> String {
     let Some(reply) = msg.reply_to_message.as_deref() else {
         return text.to_string();
@@ -409,7 +573,8 @@ fn handle_message(
     if !is_allowed_private_message(&cfg.telegram_chat_ids, &msg) {
         return Ok(());
     }
-    let text = match message_text(&msg.text, &msg.caption) {
+    let attachment_specs = message_attachment_specs(&msg);
+    let text = match message_prompt_text(&msg, &attachment_specs) {
         Ok(text) => text,
         Err(err) => {
             tg.send_message(msg.chat.id, &err, msg.message_id)?;
@@ -433,13 +598,31 @@ fn handle_message(
         chat_id: msg.chat.id,
         thread_id: msg.message_thread_id,
     };
+    let attachments = match download_message_attachments(cfg, tg, &attachment_specs) {
+        Ok(attachments) => attachments,
+        Err(err) => {
+            tg.send_message(
+                msg.chat.id,
+                &format!("⚠️ Failed to download Telegram attachment: {err}"),
+                msg.message_id,
+            )?;
+            return Ok(());
+        }
+    };
+    let prompt = prompt_with_file_attachments(
+        &prompt_with_reply_context(&msg, &text),
+        &attachments.file_paths,
+    );
 
     let queued = tx.try_send(Job {
         bot_token: cfg.bot_token.clone(),
         chat_id: msg.chat.id,
         thread_id: msg.message_thread_id,
         reply_to_message_id: msg.message_id,
-        prompt: prompt_with_reply_context(&msg, &text),
+        prompt,
+        _attachment_dir: attachments.dir,
+        image_paths: attachments.image_paths,
+        file_paths: attachments.file_paths,
         provider_model: selected_provider_model(cfg, selections, &key),
         cancel_epoch: cancellation_epoch(cancellations, &key),
     });
@@ -1096,13 +1279,14 @@ fn run_job_with_codex(
     };
     let state = store.load(&key);
     logs::info(format_args!(
-        "job start chat={} reply_to={} provider={} model={} session={} prompt_chars={} timeout_secs={}",
+        "job start chat={} reply_to={} provider={} model={} session={} prompt_chars={} attachments={} timeout_secs={}",
         job.chat_id,
         job.reply_to_message_id,
         job.provider_model.provider.label(),
         job.provider_model.model,
         session_label(state.session_id.as_deref().unwrap_or("")),
         job.prompt.chars().count(),
+        job.image_paths.len() + job.file_paths.len(),
         cfg.codex_timeout.as_secs()
     ));
     let stream_message_id =
@@ -1119,6 +1303,7 @@ fn run_job_with_codex(
                 session_id: state.session_id.as_deref(),
                 provider: job.provider_model.provider,
                 model: &job.provider_model.model,
+                image_paths: &job.image_paths,
                 timeout: cfg.codex_timeout,
                 state_dir: &cfg.state_dir,
                 cancel: Some(cancel.clone()),
@@ -1533,7 +1718,7 @@ pub const fn typing_refresh_interval() -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telegram::{Chat, User};
+    use crate::telegram::{Chat, Document, PhotoSize, User};
     use std::collections::VecDeque;
     use std::ffi::OsStr;
     use std::io::{BufRead, BufReader, Read, Write};
@@ -1886,6 +2071,70 @@ mod tests {
             job.prompt,
             "Telegram reply context:\noriginal claim\n\nUser message:\nwhat do you think?"
         );
+    }
+
+    #[test]
+    fn handle_message_downloads_photo_and_document_for_codex() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let tg = FakeTelegram::new();
+        tg.push_download(Ok(b"photo bytes".to_vec()));
+        tg.push_download(Ok(b"document bytes".to_vec()));
+        let selections = RuntimeSelections::default();
+        let (tx, rx) = mpsc::sync_channel(1);
+        let mut msg = message(42, 6, "summarize these");
+        msg.photo = vec![
+            PhotoSize {
+                file_id: "photo-small".to_string(),
+                width: 32,
+                height: 32,
+                file_size: Some(100),
+            },
+            PhotoSize {
+                file_id: "photo-large".to_string(),
+                width: 640,
+                height: 480,
+                file_size: Some(1000),
+            },
+        ];
+        msg.document = Some(Document {
+            file_id: "doc-1".to_string(),
+            file_name: "notes.txt".to_string(),
+            mime_type: "text/plain".to_string(),
+        });
+
+        handle_message(&cfg, &tg, &store, &selections, &tx, msg).unwrap();
+
+        let job = rx.recv().unwrap();
+        assert_eq!(job.image_paths.len(), 1);
+        assert_eq!(job.file_paths.len(), 1);
+        let image_path = &job.image_paths[0];
+        let file_path = &job.file_paths[0];
+        let attachment_dir = image_path
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy();
+        assert!(attachment_dir.starts_with("attach-"));
+        assert!(!attachment_dir.starts_with("telegram-attachments-"));
+        assert_eq!(fs::read(image_path).unwrap(), b"photo bytes");
+        assert_eq!(fs::read(file_path).unwrap(), b"document bytes");
+        assert!(job.prompt.starts_with("summarize these"));
+        assert!(job.prompt.contains("Telegram file attachments:"));
+        assert!(job.prompt.contains(file_path.to_str().unwrap()));
+        assert!(tg.calls().contains(&Call::Download {
+            file_id: "photo-large".to_string(),
+            path: image_path.clone(),
+        }));
+        assert!(tg.calls().contains(&Call::Download {
+            file_id: "doc-1".to_string(),
+            path: file_path.clone(),
+        }));
     }
 
     #[test]
@@ -3073,6 +3322,10 @@ exit 2
             chat_id: i64,
             message_id: i64,
         },
+        Download {
+            file_id: String,
+            path: PathBuf,
+        },
         Reaction {
             chat_id: i64,
             message_id: i64,
@@ -3094,6 +3347,7 @@ exit 2
         calls: Vec<Call>,
         updates: VecDeque<Result<Vec<Update>, String>>,
         effects: VecDeque<Result<Message, String>>,
+        downloads: VecDeque<Result<Vec<u8>, String>>,
         sync_error: Option<String>,
         send_error: Option<String>,
         next_message_id: i64,
@@ -3121,6 +3375,10 @@ exit 2
 
         fn push_effect(&self, effect: Result<Message, String>) {
             self.state.lock().unwrap().effects.push_back(effect);
+        }
+
+        fn push_download(&self, download: Result<Vec<u8>, String>) {
+            self.state.lock().unwrap().downloads.push_back(download);
         }
 
         fn fail_sends(&self, err: &str) {
@@ -3306,6 +3564,25 @@ exit 2
             });
             Ok(())
         }
+
+        fn download_file(&self, file_id: &str, path: &Path) -> Result<(), String> {
+            let download = {
+                let mut state = self.state.lock().unwrap();
+                state.calls.push(Call::Download {
+                    file_id: file_id.to_string(),
+                    path: path.to_path_buf(),
+                });
+                state
+                    .downloads
+                    .pop_front()
+                    .unwrap_or_else(|| Ok(Vec::new()))
+            };
+            let bytes = download?;
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+            }
+            fs::write(path, bytes).map_err(|err| err.to_string())
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3483,6 +3760,8 @@ exit 2
             },
             text: text.to_string(),
             caption: String::new(),
+            photo: Vec::new(),
+            document: None,
         }
     }
 
@@ -3506,6 +3785,9 @@ exit 2
             thread_id: None,
             reply_to_message_id: 7,
             prompt: prompt.to_string(),
+            _attachment_dir: None,
+            image_paths: Vec::new(),
+            file_paths: Vec::new(),
             provider_model: ProviderModel {
                 provider: Provider::Codex,
                 model: "gpt-test".to_string(),
@@ -3528,6 +3810,8 @@ exit 2
             },
             text: String::new(),
             caption: String::new(),
+            photo: Vec::new(),
+            document: None,
         }
     }
 

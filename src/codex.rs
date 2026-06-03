@@ -41,6 +41,7 @@ pub struct CodexRun<'a> {
     pub session_id: Option<&'a str>,
     pub provider: Provider,
     pub model: &'a str,
+    pub image_paths: &'a [PathBuf],
     pub timeout: Duration,
     pub state_dir: &'a Path,
     pub cancel: Option<Arc<AtomicBool>>,
@@ -58,6 +59,7 @@ pub fn codex_args(
     default_model: &str,
     workdir: &Path,
     claude_proxy_base_url: Option<&str>,
+    image_paths: &[PathBuf],
 ) -> Result<Vec<String>, String> {
     let model = if model.trim().is_empty() {
         default_model
@@ -74,6 +76,7 @@ pub fn codex_args(
     if let Some(session_id) = session_id.filter(|value| !value.trim().is_empty()) {
         let mut args = strings(["--search", "exec", "resume"]);
         append_model_provider_config(&mut args, provider, claude_proxy_base_url)?;
+        append_image_args(&mut args, image_paths);
         args.extend(strings([
             "-c",
             &developer_instructions_config,
@@ -91,6 +94,7 @@ pub fn codex_args(
 
     let mut args = strings(["--search", "exec", "--color", "never"]);
     append_model_provider_config(&mut args, provider, claude_proxy_base_url)?;
+    append_image_args(&mut args, image_paths);
     args.extend(strings([
         "-c",
         &developer_instructions_config,
@@ -148,6 +152,7 @@ pub fn run_codex(
             session_id,
             provider,
             model,
+            image_paths: &[],
             timeout,
             state_dir,
             cancel: None,
@@ -177,6 +182,7 @@ pub fn run_codex_stream(
         &cfg.default_model,
         &cfg.workdir,
         claude_proxy.as_ref().map(|proxy| proxy.base_url()),
+        run.image_paths,
     )?;
 
     let mut child = Command::new(&cfg.bin)
@@ -316,6 +322,13 @@ fn strings<const N: usize>(values: [&str; N]) -> Vec<String> {
     values.iter().map(|value| (*value).to_string()).collect()
 }
 
+fn append_image_args(args: &mut Vec<String>, image_paths: &[PathBuf]) {
+    for path in image_paths {
+        args.push("-i".to_string());
+        args.push(path.to_string_lossy().to_string());
+    }
+}
+
 fn append_model_provider_config(
     args: &mut Vec<String>,
     provider: Provider,
@@ -388,6 +401,7 @@ mod tests {
             "gpt-5.5",
             Path::new("/work"),
             None,
+            &[],
         )
         .unwrap();
         let joined = args.join(" ");
@@ -413,6 +427,7 @@ mod tests {
             "gpt-5.5",
             Path::new("/work"),
             None,
+            &[],
         )
         .unwrap();
         let joined = args.join(" ");
@@ -438,6 +453,7 @@ mod tests {
             "gpt-5.5",
             Path::new("/work"),
             None,
+            &[],
         )
         .unwrap();
         let joined = args.join(" ");
@@ -453,6 +469,46 @@ mod tests {
     }
 
     #[test]
+    fn codex_args_attach_images_to_new_and_resumed_prompts() {
+        let image_paths = vec![PathBuf::from("/tmp/one.png"), PathBuf::from("/tmp/two.jpg")];
+        let new_args = codex_args(
+            Path::new("/tmp/out"),
+            None,
+            crate::provider::Provider::Codex,
+            "gpt-test",
+            "gpt-5.5",
+            Path::new("/work"),
+            None,
+            &image_paths,
+        )
+        .unwrap();
+        let resume_args = codex_args(
+            Path::new("/tmp/out"),
+            Some("session-123"),
+            crate::provider::Provider::Codex,
+            "gpt-test",
+            "gpt-5.5",
+            Path::new("/work"),
+            None,
+            &image_paths,
+        )
+        .unwrap();
+
+        assert!(new_args
+            .windows(2)
+            .any(|args| args == ["-i", "/tmp/one.png"]));
+        assert!(new_args
+            .windows(2)
+            .any(|args| args == ["-i", "/tmp/two.jpg"]));
+        assert!(resume_args
+            .windows(2)
+            .any(|args| args == ["-i", "/tmp/one.png"]));
+        assert!(resume_args
+            .windows(2)
+            .any(|args| args == ["-i", "/tmp/two.jpg"]));
+    }
+
+    #[test]
     fn codex_args_configure_claude_slot_through_anthropic_proxy() {
         let args = codex_args(
             Path::new("/tmp/out"),
@@ -462,6 +518,7 @@ mod tests {
             "gpt-5.5",
             Path::new("/work"),
             Some("http://127.0.0.1:12345/v1"),
+            &[],
         )
         .unwrap();
         let joined = args.join(" ");
@@ -487,6 +544,7 @@ mod tests {
             "gpt-5.5",
             Path::new("/work"),
             None,
+            &[],
         )
         .unwrap_err();
 
@@ -597,6 +655,7 @@ printf 'session id: session-123\n' >&2
                 session_id: None,
                 provider: Provider::Codex,
                 model: "",
+                image_paths: &[],
                 timeout: Duration::from_secs(5),
                 state_dir: &dir.path().join("state"),
                 cancel: None,
@@ -648,6 +707,7 @@ cat >/dev/null
                 session_id: None,
                 provider: Provider::Codex,
                 model: "",
+                image_paths: &[],
                 timeout: Duration::from_secs(5),
                 state_dir: &dir.path().join("state"),
                 cancel: None,
