@@ -61,8 +61,23 @@ pub fn status_header(state: &ChatSession) -> String {
         env!("CARGO_PKG_VERSION"),
         state.provider.label(),
         state.model,
-        session_label(state.session_id.as_deref().unwrap_or(""))
+        current_session_label(state)
     )
+}
+
+fn current_session_label(state: &ChatSession) -> String {
+    let Some(session_id) = state.session_id.as_deref() else {
+        return session_label("");
+    };
+    let label = session_label(session_id);
+    state
+        .sessions
+        .iter()
+        .find(|session| session.id == session_id)
+        .and_then(|session| session.name.as_deref())
+        .filter(|name| !name.trim().is_empty())
+        .map(|name| format!("{label} ({})", name.trim()))
+        .unwrap_or(label)
 }
 
 pub fn format_status_message(state: &ChatSession, codex: &str, fetch: &str) -> String {
@@ -468,6 +483,25 @@ mod tests {
         assert!(got.contains("🤖 Model: gpt-test"));
         assert!(got.contains("🧵 Session: 12345678"));
         assert!(!got.contains("/commands"));
+    }
+
+    #[test]
+    fn status_header_includes_current_session_name() {
+        let state = ChatSession {
+            session_id: Some("12345678-current".to_string()),
+            model: "gpt-test".to_string(),
+            sessions: vec![crate::session::SavedSession {
+                id: "12345678-current".to_string(),
+                name: Some("daily".to_string()),
+                model: "gpt-test".to_string(),
+                ..crate::session::SavedSession::default()
+            }],
+            ..ChatSession::default()
+        };
+
+        let got = status_header(&state);
+
+        assert!(got.contains("🧵 Session: 12345678 (daily)"));
     }
 
     #[test]
