@@ -8,7 +8,6 @@ const CLI_AFTER_HELP: &str = r#"Examples:
   gateway
   gateway bot
   gateway logs [lines]
-  gateway config
   gateway uninstall
   gateway version
   gateway run --prompt "Summarize status"
@@ -32,7 +31,6 @@ pub enum CliAction {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Mode {
     Bot,
-    Config,
     Logs(usize),
     Run(RunArgs),
     Uninstall,
@@ -62,8 +60,6 @@ struct Cli {
 enum Command {
     #[command(about = "Run the Telegram bot for allowed chats.")]
     Bot,
-    #[command(about = "Print loaded gateway config with secrets redacted.")]
-    Config,
     #[command(about = "Print recent gateway logs.")]
     Logs(LogsCli),
     #[command(
@@ -148,7 +144,6 @@ where
 fn mode_from_cli(cli: Cli) -> Mode {
     match cli.command {
         None | Some(Command::Bot) => Mode::Bot,
-        Some(Command::Config) => Mode::Config,
         Some(Command::Logs(args)) => Mode::Logs(normalize_log_line_count(args.lines)),
         Some(Command::Run(args)) => Mode::Run(RunArgs {
             prompt: args.prompt,
@@ -244,8 +239,6 @@ mod tests {
                 "Usage: gateway [COMMAND]",
                 "bot",
                 "Run the Telegram bot for allowed chats.",
-                "config",
-                "Print loaded gateway config with secrets redacted.",
                 "logs",
                 "Print recent gateway logs.",
                 "run",
@@ -257,10 +250,10 @@ mod tests {
                 "gateway run --prompt \"Summarize status\"",
                 "gateway run --chat 123456789 --prompt \"Summarize status\"",
                 "gateway run --prompt-file ./prompt.txt",
-                "gateway config",
                 "printf '%s\\n' \"Summarize status\" | gateway run",
             ],
         );
+        assert!(!explicit_subcommands().contains(&"config".to_string()));
     }
 
     #[test]
@@ -268,7 +261,6 @@ mod tests {
         for args in [
             &["gateway", "help"][..],
             &["gateway", "bot", "-h"],
-            &["gateway", "config", "-h"],
             &["gateway", "logs", "-h"],
             &["gateway", "run", "-h"],
             &["gateway", "uninstall", "-h"],
@@ -303,6 +295,35 @@ mod tests {
     }
 
     #[test]
+    fn readme_cli_examples_match_top_level_help_examples() {
+        let readme_examples = include_str!("../README.md")
+            .split_once("## 🧰 CLI\n\n```zsh\n")
+            .and_then(|(_, rest)| rest.split_once("\n```"))
+            .map(|(block, _)| block.lines().map(str::to_string).collect::<Vec<String>>())
+            .expect("README must include a CLI examples block");
+        let help_examples = help_from(&["gateway", "-h"])
+            .split_once("Examples:\n")
+            .map(|(_, examples)| {
+                examples
+                    .lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .map(|line| line.trim_start().to_string())
+                    .collect::<Vec<String>>()
+            })
+            .expect("top-level help must include examples");
+
+        assert_eq!(readme_examples, help_examples);
+    }
+
+    #[test]
+    fn readme_documents_telegram_env_vars_once() {
+        let readme = include_str!("../README.md");
+
+        assert_eq!(readme.matches("GATEWAY_TELEGRAM_TOKEN").count(), 1);
+        assert_eq!(readme.matches("GATEWAY_TELEGRAM_CHAT_ID").count(), 1);
+    }
+
+    #[test]
     fn run_help_documents_prompt_sources_and_telegram_targeting() {
         let help = help_from(&["gateway", "run", "-h"]);
 
@@ -325,9 +346,9 @@ mod tests {
     }
 
     #[test]
-    fn parses_config_mode() {
-        let mode = parse_args_from(["gateway", "config"]).unwrap();
-        assert_eq!(mode, Mode::Config);
+    fn removed_config_mode_is_rejected() {
+        let err = parse_args_from(["gateway", "config"]).unwrap_err();
+        assert!(err.contains("unrecognized subcommand 'config'"));
     }
 
     #[test]

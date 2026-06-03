@@ -9,6 +9,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const CODEX_USAGE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -96,6 +97,46 @@ pub fn format_status_message(state: &ChatSession, codex: &str, git: &str, fetch:
     sections.join("\n\n")
 }
 
+pub struct StatusSections {
+    pub codex: String,
+    pub git: String,
+    pub fetch: String,
+}
+
+pub fn status_sections(cfg: &Config, codex: &CodexConfig) -> StatusSections {
+    let codex_cfg = cfg.clone();
+    let git_cfg = cfg.clone();
+    let git_codex = codex.clone();
+    collect_status_sections(
+        move || codex_status(&codex_cfg),
+        move || git_status(&git_cfg, &git_codex),
+        fastfetch_status,
+    )
+}
+
+fn collect_status_sections<C, G, F>(codex: C, git: G, fetch: F) -> StatusSections
+where
+    C: FnOnce() -> String + Send + 'static,
+    G: FnOnce() -> String + Send + 'static,
+    F: FnOnce() -> String + Send + 'static,
+{
+    let codex = thread::spawn(codex);
+    let git = thread::spawn(git);
+    let fetch = thread::spawn(fetch);
+
+    StatusSections {
+        codex: join_status_worker(codex, "🧠 Codex"),
+        git: join_status_worker(git, "🧾 Git"),
+        fetch: join_status_worker(fetch, "🖥️ fastfetch"),
+    }
+}
+
+fn join_status_worker(handle: JoinHandle<String>, label: &str) -> String {
+    handle
+        .join()
+        .unwrap_or_else(|_| format!("{label}: status worker panicked"))
+}
+
 pub fn codex_status(cfg: &Config) -> String {
     match read_codex_backend_auth(&cfg.xdg_config_home.join("codex"))
         .and_then(|auth| fetch_codex_usage_backend(&auth, CODEX_USAGE_URL, CODEX_USAGE_TIMEOUT))
@@ -112,7 +153,11 @@ pub fn fastfetch_status() -> String {
 pub fn git_status(cfg: &Config, codex: &CodexConfig) -> String {
     let gateway = gateway_repo_status(cfg, codex).unwrap_or_else(|err| format!("error: {err}"));
     let xdg_config = git_status_short_summary(codex, cfg, "xdg config", &cfg.xdg_config_home);
-    format!("🧾 Git\n• gateway: {gateway}\n• xdg config: {xdg_config}")
+    format_git_status_section(&gateway, &xdg_config)
+}
+
+fn format_git_status_section(gateway: &str, xdg_config: &str) -> String {
+    format!("🧾 Git\n• 🌉 Gateway: {gateway}\n• 🛠️ XDG Config: {xdg_config}")
 }
 
 fn gateway_repo_status(cfg: &Config, codex: &CodexConfig) -> Result<String, String> {
@@ -717,6 +762,7 @@ mod tests {
     use std::io::{BufRead, BufReader, Write as IoWrite};
     use std::net::TcpListener;
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::{mpsc, Arc, Condvar, Mutex};
     use std::thread;
 
     #[test]
@@ -773,14 +819,70 @@ mod tests {
         let got = format_status_message(
             &state,
             "🧠 Codex: ok",
-            "🧾 Git\n• gateway: clean",
+            "🧾 Git\n• 🌉 Gateway: clean",
             "OS: test",
         );
 
         assert!(got.contains("🤖 Model: gpt-test"));
-        assert!(got.contains("🧠 Codex: ok\n\n🧾 Git\n• gateway: clean\n\nOS: test"));
+        assert!(got.contains("🧠 Codex: ok\n\n🧾 Git\n• 🌉 Gateway: clean\n\nOS: test"));
         assert!(got.contains("OS: test"));
         assert!(!got.contains("Gateway restarted."));
+    }
+
+    #[test]
+    fn git_status_section_formats_labels_with_icons_and_title_case() {
+        let got = format_git_status_section("clean", "2 changed");
+
+        assert_eq!(
+            got,
+            "🧾 Git\n• 🌉 Gateway: clean\n• 🛠️ XDG Config: 2 changed"
+        );
+    }
+
+    #[test]
+    fn collect_status_sections_runs_workers_concurrently() {
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let (started_tx, started_rx) = mpsc::channel();
+        let collector_gate = Arc::clone(&gate);
+        let collector = thread::spawn(move || {
+            collect_status_sections(
+                {
+                    let gate = Arc::clone(&collector_gate);
+                    let started_tx = started_tx.clone();
+                    move || gated_status("codex", gate, started_tx)
+                },
+                {
+                    let gate = Arc::clone(&collector_gate);
+                    let started_tx = started_tx.clone();
+                    move || gated_status("git", gate, started_tx)
+                },
+                {
+                    let gate = Arc::clone(&collector_gate);
+                    move || gated_status("fetch", gate, started_tx)
+                },
+            )
+        });
+
+        let mut started = Vec::new();
+        for _ in 0..3 {
+            match started_rx.recv_timeout(Duration::from_millis(500)) {
+                Ok(name) => started.push(name),
+                Err(err) => {
+                    release_status_workers(&gate);
+                    let _ = collector.join();
+                    panic!("status workers did not start concurrently: {err}");
+                }
+            }
+        }
+
+        release_status_workers(&gate);
+        let sections = collector.join().unwrap();
+        started.sort_unstable();
+
+        assert_eq!(started, vec!["codex", "fetch", "git"]);
+        assert_eq!(sections.codex, "codex done");
+        assert_eq!(sections.git, "git done");
+        assert_eq!(sections.fetch, "fetch done");
     }
 
     #[test]
@@ -1097,6 +1199,26 @@ exit 2
         assert!(formatted.contains("• 🌙 Moon Phase: New"));
         assert!(!formatted.contains("Ignored"));
         assert_eq!(typing_interval(), Duration::from_secs(4));
+    }
+
+    fn gated_status(
+        name: &'static str,
+        gate: Arc<(Mutex<bool>, Condvar)>,
+        started_tx: mpsc::Sender<&'static str>,
+    ) -> String {
+        started_tx.send(name).unwrap();
+        let (lock, cvar) = &*gate;
+        let mut released = lock.lock().unwrap();
+        while !*released {
+            released = cvar.wait(released).unwrap();
+        }
+        format!("{name} done")
+    }
+
+    fn release_status_workers(gate: &Arc<(Mutex<bool>, Condvar)>) {
+        let (lock, cvar) = &**gate;
+        *lock.lock().unwrap() = true;
+        cvar.notify_all();
     }
 
     fn executable(path: std::path::PathBuf, body: &str) -> std::path::PathBuf {

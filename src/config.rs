@@ -3,7 +3,6 @@ use crate::launchd;
 use crate::provider::Provider;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fmt::Display;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -102,11 +101,6 @@ pub fn load_from_env(env: &BTreeMap<String, String>) -> Result<Config, String> {
         queue_depth: 8,
         codex_timeout: Duration::from_secs(timeout_secs(gateway_config.timeout_mins)?),
     })
-}
-
-pub fn config_report_from_env(env: &BTreeMap<String, String>) -> Result<String, String> {
-    let cfg = load_from_env(env)?;
-    Ok(cfg.config_report_with_launch_agent(Some(launchd::plist_path_from_env(env)?)))
 }
 
 pub fn load_gateway_config(path: &Path) -> Result<GatewayConfigFile, String> {
@@ -334,66 +328,6 @@ impl Config {
     pub fn provider_model_at(&self, index: usize) -> Option<&ProviderModel> {
         self.models.get(index)
     }
-
-    pub fn config_report(&self) -> String {
-        self.config_report_with_launch_agent(launchd::plist_path().ok())
-    }
-
-    fn config_report_with_launch_agent(&self, launch_agent_plist: Option<PathBuf>) -> String {
-        let gateway_executable =
-            std::env::current_exe().unwrap_or_else(|_| PathBuf::from("gateway"));
-        let mut lines = vec![
-            path_line("xdg_config_home", &self.xdg_config_home),
-            path_line("xdg_cache_home", &self.xdg_cache_home),
-            path_line("xdg_data_home", &self.xdg_data_home),
-            path_line("xdg_state_home", &self.xdg_state_home),
-            path_line("gateway_config_file", &self.gateway_config_file),
-            path_line("gateway_executable", &gateway_executable),
-            path_line("codex_workdir", &self.codex_workdir),
-        ];
-        for (index, model) in self.models.iter().enumerate() {
-            lines.push(model_line(index, model));
-        }
-        lines.extend([
-            path_line("state_dir", &self.state_dir),
-            path_line("chat_state_dir", &self.chat_state_dir),
-            path_line("offset_file", &self.offset_file),
-            path_line("gateway_log_file", &self.gateway_log_file),
-        ]);
-        if let Some(path) = launch_agent_plist {
-            lines.push(path_line("launch_agent_plist", &path));
-        }
-        lines.extend([
-            value_line("launchd_target", &self.launchd_target),
-            value_line("poll_timeout_sec", self.poll_timeout_sec),
-            value_line("queue_depth", self.queue_depth),
-            value_line("codex_timeout_sec", self.codex_timeout.as_secs()),
-        ]);
-        format_report(lines)
-    }
-}
-
-fn model_line(index: usize, model: &ProviderModel) -> (String, String) {
-    value_line(
-        &format!("models[{index}]"),
-        format!("{}:{}", model.provider.key(), model.model),
-    )
-}
-
-fn path_line(name: &str, path: &Path) -> (String, String) {
-    value_line(name, path.display())
-}
-
-fn value_line(name: &str, value: impl Display) -> (String, String) {
-    (name.to_string(), value.to_string())
-}
-
-fn format_report(lines: Vec<(String, String)>) -> String {
-    lines
-        .into_iter()
-        .map(|(name, value)| format!("{name}={value}"))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn normalize_models(models: &mut Vec<ProviderModel>) -> Result<(), String> {
@@ -448,14 +382,6 @@ mod tests {
         (dir, env)
     }
 
-    fn assert_path_line(report: &str, name: &str, path: &Path) {
-        let expected = format!("{name}={}", path.display());
-        assert!(
-            report.contains(&expected),
-            "missing {expected:?} in:\n{report}"
-        );
-    }
-
     #[test]
     fn loads_required_env_and_gateway_config() {
         let (_dir, env) = env_with_token();
@@ -502,109 +428,6 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert!(value.get("provider").is_none());
         assert!(!text.contains(r#""claude_model""#));
-    }
-
-    #[test]
-    fn config_report_lists_loaded_runtime_config() {
-        let (_dir, env) = env_with_token();
-        let cfg = load_from_env(&env).unwrap();
-
-        let report = cfg.config_report();
-
-        let labels = report
-            .lines()
-            .map(|line| line.split_once('=').unwrap().0)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            labels,
-            vec![
-                "xdg_config_home",
-                "xdg_cache_home",
-                "xdg_data_home",
-                "xdg_state_home",
-                "gateway_config_file",
-                "gateway_executable",
-                "codex_workdir",
-                "models[0]",
-                "models[1]",
-                "models[2]",
-                "state_dir",
-                "chat_state_dir",
-                "offset_file",
-                "gateway_log_file",
-                "launch_agent_plist",
-                "launchd_target",
-                "poll_timeout_sec",
-                "queue_depth",
-                "codex_timeout_sec",
-            ]
-        );
-        assert!(report.contains("models[0]=codex:gpt-5.5"));
-        assert!(report.contains("models[1]=claude:claude-opus-4-8"));
-        assert!(report.contains("models[2]=openrouter:openai/gpt-5.5"));
-        assert!(!report.contains("telegram_token"));
-        assert!(!report.contains("telegram_chat_ids"));
-        assert!(!report.contains("codex_bin"));
-        assert!(!report.contains("fastfetch_bin"));
-        assert!(!report.contains("bot_token=token"));
-    }
-
-    #[test]
-    fn config_report_from_env_loads_config_and_paths() {
-        let (dir, env) = env_with_token();
-        let root = dir.path();
-
-        let report = config_report_from_env(&env).unwrap();
-
-        assert_path_line(&report, "xdg_config_home", &root.join("config"));
-        assert_path_line(&report, "xdg_cache_home", &root.join("cache"));
-        assert_path_line(&report, "xdg_data_home", &root.join("data"));
-        assert_path_line(&report, "xdg_state_home", &root.join("state"));
-        assert_path_line(
-            &report,
-            "gateway_config_file",
-            &root.join("config/gateway/config.json"),
-        );
-        assert!(report.contains("gateway_executable="));
-        assert_path_line(&report, "codex_workdir", &root.join("config"));
-        assert_path_line(&report, "state_dir", &root.join("state/gateway"));
-        assert_path_line(&report, "chat_state_dir", &root.join("state/gateway/chats"));
-        assert_path_line(
-            &report,
-            "offset_file",
-            &root.join("state/gateway/telegram.offset"),
-        );
-        assert_path_line(
-            &report,
-            "gateway_log_file",
-            &root.join("state/gateway/logs/gateway.log"),
-        );
-        assert_path_line(
-            &report,
-            "launch_agent_plist",
-            &root.join("home/Library/LaunchAgents/ai.gateway.plist"),
-        );
-        assert!(report.contains("launchd_target=gui/"));
-        assert!(report.contains("poll_timeout_sec=50"));
-        assert!(report.contains("queue_depth=8"));
-        assert!(report.contains("codex_timeout_sec=1800"));
-        assert!(report.contains("models[0]=codex:gpt-5.5"));
-        assert!(report.contains("models[1]=claude:claude-opus-4-8"));
-        assert!(report.contains("models[2]=openrouter:openai/gpt-5.5"));
-        assert!(!report.contains("telegram_token"));
-        assert!(!report.contains("telegram_chat_ids"));
-        assert!(!report.contains("codex_bin"));
-        assert!(!report.contains("fastfetch_bin"));
-    }
-
-    #[test]
-    fn config_report_from_env_requires_loaded_bot_credentials() {
-        let (_dir, mut env) = env_with_token();
-        env.remove(GATEWAY_TELEGRAM_TOKEN_ENV);
-
-        let err = config_report_from_env(&env).unwrap_err();
-
-        assert!(err.contains(GATEWAY_TELEGRAM_TOKEN_ENV));
     }
 
     #[test]

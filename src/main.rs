@@ -17,13 +17,6 @@ fn run() -> Result<(), String> {
     };
     match mode {
         Mode::Bot => gateway::bot::run(gateway::config::load()?),
-        Mode::Config => {
-            println!(
-                "{}",
-                gateway::config::config_report_from_env(&gateway::config::current_env())?
-            );
-            Ok(())
-        }
         Mode::Logs(lines) => {
             let output = gateway::logs::read_gateway_logs(&gateway::config::current_env(), lines)?;
             println!("{output}");

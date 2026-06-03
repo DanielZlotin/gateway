@@ -460,7 +460,7 @@ pub fn supported_bot_commands() -> Vec<BotCommand> {
         .iter()
         .map(|spec| BotCommand {
             command: spec.command().to_string(),
-            description: spec.bot_description.to_string(),
+            description: spec.bot_description(),
         })
         .collect()
 }
@@ -543,26 +543,25 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "help", "status", "config", "log", "new", "restart", "update", "model", "resume",
-                "rename", "list", "stop",
+                "status", "log", "new", "restart", "update", "model", "resume", "rename", "list",
+                "stop",
             ]
         );
+        assert!(!names.contains(&"config"));
+        assert!(!names.contains(&"help"));
         assert!(!names.contains(&"commands"));
-        assert!(commands
+        let expected_names: Vec<_> = DIRECTIVE_SPECS.iter().map(|spec| spec.command()).collect();
+        let expected_descriptions: Vec<_> = DIRECTIVE_SPECS
             .iter()
-            .any(|command| command.command == "status" && command.description.starts_with("📊 ")));
-        assert!(commands
+            .map(|spec| spec.bot_description())
+            .collect();
+        let descriptions: Vec<_> = commands
             .iter()
-            .any(|command| command.command == "config" && command.description.starts_with("⚙️ ")));
-        assert!(commands
-            .iter()
-            .any(|command| command.command == "update" && command.description.starts_with("⬆️ ")));
-        assert!(
-            commands
-                .iter()
-                .any(|command| command.command == "help"
-                    && !command.description.contains("/commands"))
-        );
+            .map(|command| command.description.clone())
+            .collect();
+
+        assert_eq!(names, expected_names);
+        assert_eq!(descriptions, expected_descriptions);
     }
 
     #[test]

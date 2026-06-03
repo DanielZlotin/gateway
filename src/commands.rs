@@ -1,8 +1,6 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Directive {
-    Help,
     Status,
-    Config,
     Log,
     New,
     Restart,
@@ -17,9 +15,7 @@ pub enum Directive {
 impl Directive {
     pub fn command(self) -> &'static str {
         match self {
-            Directive::Help => "help",
             Directive::Status => "status",
-            Directive::Config => "config",
             Directive::Log => "log",
             Directive::New => "new",
             Directive::Restart => "restart",
@@ -38,7 +34,6 @@ pub struct DirectiveSpec {
     icon: &'static str,
     usage: &'static str,
     summary: &'static str,
-    pub bot_description: &'static str,
 }
 
 impl DirectiveSpec {
@@ -46,7 +41,11 @@ impl DirectiveSpec {
         self.directive.command()
     }
 
-    fn help_line(&self) -> String {
+    pub fn bot_description(&self) -> String {
+        format!("{} {}.", self.icon, sentence_case(self.summary))
+    }
+
+    fn readme_line(&self) -> String {
         format!(
             "{} /{}{} - {}",
             self.icon,
@@ -59,96 +58,72 @@ impl DirectiveSpec {
 
 pub const DIRECTIVE_SPECS: &[DirectiveSpec] = &[
     DirectiveSpec {
-        directive: Directive::Help,
-        icon: "❔",
-        usage: "",
-        summary: "show supported gateway directives",
-        bot_description: "❔ Show supported gateway directives.",
-    },
-    DirectiveSpec {
         directive: Directive::Status,
         icon: "📊",
         usage: "",
         summary: "show Codex, gateway, and system status",
-        bot_description: "📊 Show Codex, gateway, and system status.",
-    },
-    DirectiveSpec {
-        directive: Directive::Config,
-        icon: "⚙️",
-        usage: "",
-        summary: "show loaded gateway config with secrets redacted",
-        bot_description: "⚙️ Show loaded gateway config with secrets redacted.",
     },
     DirectiveSpec {
         directive: Directive::Log,
         icon: "📜",
         usage: " [lines]",
         summary: "send recent gateway logs",
-        bot_description: "📜 Send recent gateway logs.",
     },
     DirectiveSpec {
         directive: Directive::New,
-        icon: "🆕",
+        icon: "✨",
         usage: "",
         summary: "start a fresh Codex session",
-        bot_description: "🆕 Start a fresh Codex session.",
     },
     DirectiveSpec {
         directive: Directive::Restart,
-        icon: "🔄",
+        icon: "🔁",
         usage: "",
         summary: "restart the gateway service",
-        bot_description: "🔄 Restart the gateway service.",
     },
     DirectiveSpec {
         directive: Directive::Update,
-        icon: "⬆️",
+        icon: "📦",
         usage: "",
         summary: "pull latest gateway code and run setup",
-        bot_description: "⬆️ Pull latest gateway code and run setup.",
     },
     DirectiveSpec {
         directive: Directive::Model,
-        icon: "🤖",
+        icon: "🧠",
         usage: " [index]",
         summary: "choose a configured provider/model",
-        bot_description: "🤖 Choose a configured provider/model.",
     },
     DirectiveSpec {
         directive: Directive::Resume,
         icon: "↩️",
         usage: " [SESSION_OR_NAME|index]",
         summary: "list or resume a saved session",
-        bot_description: "↩️ Resume a saved session.",
     },
     DirectiveSpec {
         directive: Directive::Rename,
         icon: "🏷️",
         usage: " [NAME]",
         summary: "rename the current session",
-        bot_description: "🏷️ Rename the current session.",
     },
     DirectiveSpec {
         directive: Directive::List,
-        icon: "💾",
+        icon: "📚",
         usage: "",
         summary: "list saved sessions",
-        bot_description: "💾 List saved sessions.",
     },
     DirectiveSpec {
         directive: Directive::Stop,
         icon: "🛑",
         usage: "",
         summary: "cancel active and queued Codex work for this chat",
-        bot_description: "🛑 Cancel active and queued Codex work for this chat.",
     },
 ];
 
-pub fn directive_help() -> String {
-    std::iter::once("🧭 Supported directives:".to_string())
-        .chain(DIRECTIVE_SPECS.iter().map(DirectiveSpec::help_line))
-        .collect::<Vec<_>>()
-        .join("\n")
+pub fn readme_command_lines() -> Vec<String> {
+    DIRECTIVE_SPECS
+        .iter()
+        .map(DirectiveSpec::readme_line)
+        .collect()
 }
 
 pub fn directive_from_command(command: &str) -> Option<Directive> {
@@ -178,23 +153,31 @@ pub fn is_allowed(telegram_chat_ids: &[i64], chat_id: i64) -> bool {
     telegram_chat_ids.contains(&chat_id)
 }
 
+fn sentence_case(text: &str) -> String {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let mut sentence = first.to_uppercase().collect::<String>();
+    sentence.push_str(chars.as_str());
+    sentence
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn directive_help_includes_supported_commands() {
-        let help = directive_help();
-        assert!(help.starts_with("🧭 Supported directives:"));
-        for command in directive_list().split(", ") {
-            assert!(help.contains(command), "missing {command}");
-        }
-        assert!(help.contains("📊 /status"));
-        assert!(help.contains("⚙️ /config"));
-        assert!(help.contains("⬆️ /update"));
-        assert!(help.contains("🛑 /stop"));
-        assert!(!help.contains("/commands"));
-        assert!(!help.contains("/start"));
+    fn directive_list_includes_supported_commands() {
+        let list = directive_list();
+
+        assert!(list.contains("/status"));
+        assert!(list.contains("/update"));
+        assert!(list.contains("/stop"));
+        assert!(!list.contains("/config"));
+        assert!(!list.contains("/help"));
+        assert!(!list.contains("/commands"));
+        assert!(!list.contains("/start"));
     }
 
     #[test]
@@ -207,6 +190,8 @@ mod tests {
                 spec.command()
             );
         }
+        assert_eq!(directive_from_command("/config"), None);
+        assert_eq!(directive_from_command("/help"), None);
         assert_eq!(directive_from_command("/commands"), None);
     }
 
@@ -215,6 +200,17 @@ mod tests {
         let message = unknown_directive_message();
         assert!(message.contains("❓ Unknown directive."));
         assert!(message.contains(&directive_list()));
+    }
+
+    #[test]
+    fn readme_telegram_command_block_matches_specs() {
+        let readme_commands = include_str!("../README.md")
+            .split_once("```text\n")
+            .and_then(|(_, rest)| rest.split_once("\n```"))
+            .map(|(block, _)| block.lines().map(str::to_string).collect::<Vec<String>>())
+            .expect("README must include a Telegram command block");
+
+        assert_eq!(readme_commands, readme_command_lines());
     }
 
     #[test]

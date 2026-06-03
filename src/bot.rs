@@ -1,12 +1,10 @@
 use crate::codex::{run_codex, run_codex_stream, CodexConfig, CodexRun, LIGHTWEIGHT_CODEX_MODEL};
-use crate::commands::{
-    directive_from_command, directive_help, is_allowed, unknown_directive_message, Directive,
-};
+use crate::commands::{directive_from_command, is_allowed, unknown_directive_message, Directive};
 use crate::config::{Config, ProviderModel};
 use crate::logs;
 use crate::provider::Provider;
 use crate::session::{SessionKey, SessionStore};
-use crate::status::{codex_status, fastfetch_status, format_status_message, git_status};
+use crate::status::{format_status_message, status_sections};
 use crate::telegram::{CallbackQuery, InlineKeyboardButton, Message, TelegramClient, Update};
 use crate::text::{
     command_arg, is_ok_response, log_line_count, parse_command, redact_private_data, session_label,
@@ -245,9 +243,7 @@ fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
         default_model.provider,
     );
     let codex = CodexConfig::from(&cfg);
-    let status_codex = codex_status(&cfg);
-    let status_git = git_status(&cfg, &codex);
-    let status_fetch = fastfetch_status();
+    let sections = status_sections(&cfg, &codex);
     for chat_id in &cfg.telegram_chat_ids {
         let key = SessionKey::Chat {
             chat_id: *chat_id,
@@ -262,7 +258,7 @@ fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
         if let Err(err) = send_long_message(
             &tg,
             *chat_id,
-            &format_status_message(&state, &status_codex, &status_git, &status_fetch),
+            &format_status_message(&state, &sections.codex, &sections.git, &sections.fetch),
             0,
         ) {
             logs::warn(format_args!(
@@ -499,9 +495,6 @@ fn handle_command_with_codex(
         thread_id: msg.message_thread_id,
     };
     match directive_from_command(command) {
-        Some(Directive::Config) => {
-            send_long_message(tg, msg.chat.id, &cfg.config_report(), msg.message_id)
-        }
         Some(Directive::Log) => handle_log_command(cfg, tg, msg, text),
         Some(Directive::New) => handle_new_command(cfg, codex, tg, store, selections, msg, &key),
         Some(Directive::Restart) => {
@@ -517,7 +510,6 @@ fn handle_command_with_codex(
             send_long_message(tg, msg.chat.id, &store.list(&key), msg.message_id)
         }
         Some(Directive::Stop) => handle_stop_command(tg, cancellations, msg, &key),
-        Some(Directive::Help) => tg.send_message(msg.chat.id, &directive_help(), msg.message_id),
         Some(Directive::Status) => {
             handle_status_command(cfg, codex, tg, store, selections, msg, &key)
         }
@@ -1032,14 +1024,15 @@ fn handle_status_command(
         return Ok(());
     }
     state = store.load(key);
+    let sections = status_sections(cfg, codex);
     send_long_message(
         tg,
         msg.chat.id,
         &format_status_message(
             &state_with_provider_model(&state, &selected_provider_model(cfg, selections, key)),
-            &codex_status(cfg),
-            &git_status(cfg, codex),
-            &fastfetch_status(),
+            &sections.codex,
+            &sections.git,
+            &sections.fetch,
         ),
         msg.message_id,
     )
@@ -1690,7 +1683,11 @@ mod tests {
 
         assert_eq!(err, "stop");
         assert_eq!(read_offset(&cfg.offset_file), 11);
-        assert!(tg.sent_text().iter().any(|text| text.contains("/status")));
+        assert!(tg.sent_text().iter().any(|text| {
+            text.contains("❓ Unknown directive")
+                && text.contains("/status")
+                && !text.contains("/help")
+        }));
     }
 
     #[test]
@@ -1993,7 +1990,6 @@ printf 'session id: session-12345678\n' >&2
             thread_id: None,
         };
 
-        handle_command(&cfg, &tg, &store, &selections, &msg, "/config", "/config").unwrap();
         handle_command(&cfg, &tg, &store, &selections, &msg, "/log", "/log").unwrap();
         fs::create_dir_all(cfg.gateway_log_file.parent().unwrap()).unwrap();
         fs::write(&cfg.gateway_log_file, "one\ntwo\nthree\n").unwrap();
@@ -2049,6 +2045,7 @@ printf 'session id: session-12345678\n' >&2
         handle_command(&cfg, &tg, &store, &selections, &msg, "/list", "/list").unwrap();
         handle_command(&cfg, &tg, &store, &selections, &msg, "/stop", "/stop").unwrap();
         handle_command(&cfg, &tg, &store, &selections, &msg, "/help", "/help").unwrap();
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/config", "/config").unwrap();
         handle_command(&cfg, &tg, &store, &selections, &msg, "/update", "/update").unwrap();
         handle_command(
             &cfg,
@@ -2065,9 +2062,6 @@ printf 'session id: session-12345678\n' >&2
         handle_command(&cfg, &tg, &store, &selections, &msg, "/wat", "/wat").unwrap();
 
         let sent = tg.sent_text();
-        assert!(sent.iter().any(|text| {
-            text.contains("models[0]=codex:gpt-test") && !text.contains("telegram_chat_ids")
-        }));
         assert!(!sent.iter().any(|text| text.contains("bot_token=token")));
         assert!(sent
             .iter()
@@ -2102,11 +2096,14 @@ printf 'session id: session-12345678\n' >&2
         assert!(sent.iter().any(|text| text
             == "⬆️ Updating gateway in the background. Running `git pull`, then `./setup`. Details go to `gateway/logs/update.log`."));
         assert!(!sent.iter().any(|text| text.contains("/commands")));
+        assert!(!sent
+            .iter()
+            .any(|text| text.starts_with("🧭 Supported directives:")));
         assert_eq!(
             sent.iter()
                 .filter(|text| text.contains("❓ Unknown directive"))
                 .count(),
-            2
+            4
         );
         assert!(sent.iter().any(|text| text.contains("🧠 Codex:")));
         assert!(sent.iter().any(|text| text == "🔄 Restarting gateway."));
