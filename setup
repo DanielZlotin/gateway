@@ -3,7 +3,7 @@ set -euo pipefail
 
 gateway_root="${0:A:h}"
 : "${GATEWAY_TELEGRAM_TOKEN:?GATEWAY_TELEGRAM_TOKEN is required}"
-: "${GATEWAY_TELEGRAM_CHAT_IDS:?GATEWAY_TELEGRAM_CHAT_IDS is required}"
+: "${GATEWAY_TELEGRAM_CHAT_ID:?GATEWAY_TELEGRAM_CHAT_ID is required}"
 : "${HOME:?HOME is required}"
 : "${PATH:?PATH is required}"
 

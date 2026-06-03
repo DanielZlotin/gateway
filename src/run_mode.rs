@@ -38,14 +38,12 @@ fn target_chat_id(args: &RunArgs, cfg: &Config) -> Result<i64, String> {
             .telegram_chat_ids
             .first()
             .copied()
-            .ok_or_else(|| "GATEWAY_TELEGRAM_CHAT_IDS must include at least one id".to_string());
+            .ok_or_else(|| "GATEWAY_TELEGRAM_CHAT_ID must include at least one id".to_string());
     };
-    if cfg.telegram_chat_ids.contains(&chat_id) {
+    if cfg.bot_token_for_chat(chat_id).is_some() {
         Ok(chat_id)
     } else {
-        Err(format!(
-            "chat {chat_id} is not in GATEWAY_TELEGRAM_CHAT_IDS"
-        ))
+        Err(format!("chat {chat_id} is not in GATEWAY_TELEGRAM_CHAT_ID"))
     }
 }
 
@@ -90,7 +88,10 @@ fn run_with_sender_and_codex(
     if should_send_telegram_result(&output.final_text) {
         let telegram_text = redact_private_data(&output.final_text);
         for part in split_telegram_message(&telegram_text) {
-            send_telegram(&cfg.bot_token, chat_id, &part)?;
+            let bot_token = cfg
+                .bot_token_for_chat(chat_id)
+                .ok_or_else(|| format!("chat {chat_id} is not in GATEWAY_TELEGRAM_CHAT_ID"))?;
+            send_telegram(bot_token, chat_id, &part)?;
         }
     }
     Ok(output.final_text)
@@ -260,6 +261,18 @@ printf 'session id: session-run\n' >&2
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = test_config(dir.path());
         cfg.telegram_chat_ids = vec![42, 77];
+        cfg.telegram_bots = vec![
+            crate::config::TelegramBotConfig {
+                bot_token: "token-a".to_string(),
+                chat_ids: vec![42],
+                offset_file: dir.path().join("state/gateway/telegram-1.offset"),
+            },
+            crate::config::TelegramBotConfig {
+                bot_token: "token-b".to_string(),
+                chat_ids: vec![77],
+                offset_file: dir.path().join("state/gateway/telegram-2.offset"),
+            },
+        ];
         let codex = test_codex_config(
             &cfg,
             executable(
@@ -296,7 +309,7 @@ printf 'done\n' > "$out"
         assert_eq!(output, "done");
         assert_eq!(
             *sends.lock().unwrap(),
-            vec![("token".to_string(), 77, "done".to_string())]
+            vec![("token-b".to_string(), 77, "done".to_string())]
         );
     }
 
@@ -310,7 +323,7 @@ printf 'done\n' > "$out"
 
         let err = target_chat_id(&args, &cfg).unwrap_err();
 
-        assert!(err.contains("not in GATEWAY_TELEGRAM_CHAT_IDS"));
+        assert!(err.contains("not in GATEWAY_TELEGRAM_CHAT_ID"));
     }
 
     #[test]
@@ -324,7 +337,7 @@ printf 'done\n' > "$out"
 
         let err = run_with_sender(args, cfg, |_, _, _| Ok(())).unwrap_err();
 
-        assert!(err.contains("not in GATEWAY_TELEGRAM_CHAT_IDS"));
+        assert!(err.contains("not in GATEWAY_TELEGRAM_CHAT_ID"));
         assert!(!err.contains("start codex"));
     }
 
@@ -414,6 +427,11 @@ printf 'done\n' > "$out"
         Config {
             bot_token: "token".to_string(),
             telegram_chat_ids: vec![42],
+            telegram_bots: vec![crate::config::TelegramBotConfig {
+                bot_token: "token".to_string(),
+                chat_ids: vec![42],
+                offset_file: root.join("state/gateway/telegram.offset"),
+            }],
             xdg_config_home: root.join("config"),
             xdg_cache_home: root.join("cache"),
             xdg_data_home: root.join("data"),

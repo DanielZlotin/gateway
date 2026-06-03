@@ -502,6 +502,11 @@ mod tests {
         let cfg = Config {
             bot_token: "token".to_string(),
             telegram_chat_ids: vec![42],
+            telegram_bots: vec![crate::config::TelegramBotConfig {
+                bot_token: "token".to_string(),
+                chat_ids: vec![42],
+                offset_file: PathBuf::from("/state/gateway/telegram.offset"),
+            }],
             xdg_config_home: PathBuf::from("/xdg/config"),
             xdg_cache_home: PathBuf::from("/xdg/cache"),
             xdg_data_home: PathBuf::from("/xdg/data"),

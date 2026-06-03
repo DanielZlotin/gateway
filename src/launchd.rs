@@ -92,7 +92,7 @@ mod tests {
         fs::create_dir_all(gateway_bin.parent().unwrap()).unwrap();
         fs::write(
             &gateway_bin,
-            "#!/bin/zsh\nif [[ \"${1:-}\" == version ]]; then\n  print -- \"gateway 9.8.7-test\"\n  exit 0\nfi\nprint -- \"stub args=$* token=$GATEWAY_TELEGRAM_TOKEN chats=$GATEWAY_TELEGRAM_CHAT_IDS state=$XDG_STATE_HOME\"\nprint -u2 -- \"stderr probe\"\n",
+            "#!/bin/zsh\nif [[ \"${1:-}\" == version ]]; then\n  print -- \"gateway 9.8.7-test\"\n  exit 0\nfi\nprint -- \"stub args=$* token=$GATEWAY_TELEGRAM_TOKEN chat=$GATEWAY_TELEGRAM_CHAT_ID state=$XDG_STATE_HOME\"\nprint -u2 -- \"stderr probe\"\n",
         )
         .unwrap();
         fs::set_permissions(&gateway_bin, fs::Permissions::from_mode(0o700)).unwrap();
@@ -100,7 +100,7 @@ mod tests {
             zdotdir.join(".zshenv"),
             format!(
                 "typeset -gx GATEWAY_TELEGRAM_TOKEN=token\n\
-                 typeset -gx GATEWAY_TELEGRAM_CHAT_IDS=42\n\
+                 typeset -gx GATEWAY_TELEGRAM_CHAT_ID=42\n\
                  typeset -gx XDG_CONFIG_HOME={0}/config\n\
                  typeset -gx XDG_CACHE_HOME={0}/cache\n\
                  typeset -gx XDG_DATA_HOME={0}/data\n\
@@ -130,7 +130,7 @@ mod tests {
         assert_gateway_log_format(&log, "9.8.7-test");
         assert!(log.contains("ℹ️ ") && log.contains(" v=9.8.7-test starting gateway"));
         assert!(
-            log.contains("ℹ️ ") && log.contains(" v=9.8.7-test stub args=bot token=token chats=42")
+            log.contains("ℹ️ ") && log.contains(" v=9.8.7-test stub args=bot token=token chat=42")
         );
         assert!(log.contains("❌ ") && log.contains(" v=9.8.7-test stderr probe"));
         assert!(log.contains(&format!("state={}/state", root.display())));
@@ -157,7 +157,7 @@ mod tests {
         fs::write(
             zdotdir.join(".zshenv"),
             "typeset -gx GATEWAY_TELEGRAM_TOKEN=token\n\
-             typeset -gx GATEWAY_TELEGRAM_CHAT_IDS=42\n",
+             typeset -gx GATEWAY_TELEGRAM_CHAT_ID=42\n",
         )
         .unwrap();
 
@@ -224,7 +224,7 @@ mod tests {
             .env("PATH", path)
             .env("GATEWAY_TEST_LAUNCHCTL_LOG", &launchctl_log)
             .env("GATEWAY_TELEGRAM_TOKEN", "fake&token")
-            .env("GATEWAY_TELEGRAM_CHAT_IDS", "42,-100")
+            .env("GATEWAY_TELEGRAM_CHAT_ID", "42,-100")
             .output()
             .unwrap();
 

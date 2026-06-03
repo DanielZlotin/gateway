@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const GATEWAY_TELEGRAM_TOKEN_ENV: &str = "GATEWAY_TELEGRAM_TOKEN";
+pub const GATEWAY_TELEGRAM_CHAT_ID_ENV: &str = "GATEWAY_TELEGRAM_CHAT_ID";
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.5";
 pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-4-8";
 pub const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-5.5";
@@ -18,6 +19,7 @@ pub const DEFAULT_CODEX_TIMEOUT_MINS: u64 = 30;
 pub struct Config {
     pub bot_token: String,
     pub telegram_chat_ids: Vec<i64>,
+    pub telegram_bots: Vec<TelegramBotConfig>,
     pub xdg_config_home: PathBuf,
     pub xdg_cache_home: PathBuf,
     pub xdg_data_home: PathBuf,
@@ -33,6 +35,13 @@ pub struct Config {
     pub poll_timeout_sec: u64,
     pub queue_depth: usize,
     pub codex_timeout: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramBotConfig {
+    pub bot_token: String,
+    pub chat_ids: Vec<i64>,
+    pub offset_file: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,7 +68,7 @@ pub fn load() -> Result<Config, String> {
 }
 
 pub fn load_from_env(env: &BTreeMap<String, String>) -> Result<Config, String> {
-    let bot_token = required(env, GATEWAY_TELEGRAM_TOKEN_ENV)?;
+    let bot_tokens = telegram_tokens(env)?;
     let xdg_config_home = resolve_xdg_config_home(env)?;
     let xdg_cache_home = resolve_xdg_cache_home(env)?;
     let xdg_data_home = resolve_xdg_data_home(env)?;
@@ -69,10 +78,14 @@ pub fn load_from_env(env: &BTreeMap<String, String>) -> Result<Config, String> {
     let state_dir = xdg_state_home.join("gateway");
     let chat_state_dir = state_dir.join("chats");
     let launchd_target = launchd::target()?;
+    let telegram_chat_ids_ordered = telegram_chat_ids(env)?;
+    let telegram_chat_ids = sorted_unique_ids(&telegram_chat_ids_ordered);
+    let telegram_bots = telegram_bots(&bot_tokens, &telegram_chat_ids_ordered, &state_dir)?;
 
     Ok(Config {
-        bot_token,
-        telegram_chat_ids: telegram_chat_ids(env)?,
+        bot_token: bot_tokens[0].clone(),
+        telegram_chat_ids,
+        telegram_bots,
         xdg_config_home: xdg_config_home.clone(),
         xdg_cache_home,
         xdg_data_home,
@@ -175,8 +188,24 @@ fn optional_path(env: &BTreeMap<String, String>, key: &str) -> Option<PathBuf> {
     optional(env, key).map(PathBuf::from)
 }
 
+fn telegram_tokens(env: &BTreeMap<String, String>) -> Result<Vec<String>, String> {
+    let raw = required(env, GATEWAY_TELEGRAM_TOKEN_ENV)?;
+    let tokens = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return Err(format!(
+            "{GATEWAY_TELEGRAM_TOKEN_ENV} must include at least one token"
+        ));
+    }
+    Ok(tokens)
+}
+
 fn telegram_chat_ids(env: &BTreeMap<String, String>) -> Result<Vec<i64>, String> {
-    let raw = required(env, "GATEWAY_TELEGRAM_CHAT_IDS")?;
+    let raw = required(env, GATEWAY_TELEGRAM_CHAT_ID_ENV)?;
     let mut ids = Vec::new();
     for part in raw
         .split(',')
@@ -184,19 +213,57 @@ fn telegram_chat_ids(env: &BTreeMap<String, String>) -> Result<Vec<i64>, String>
         .filter(|part| !part.is_empty())
     {
         let id = part.parse::<i64>().map_err(|_| {
-            "GATEWAY_TELEGRAM_CHAT_IDS must contain comma-separated integers".to_string()
+            format!("{GATEWAY_TELEGRAM_CHAT_ID_ENV} must contain comma-separated integers")
         })?;
         if id <= 0 {
-            return Err("GATEWAY_TELEGRAM_CHAT_IDS must contain private chat ids only".to_string());
+            return Err(format!(
+                "{GATEWAY_TELEGRAM_CHAT_ID_ENV} must contain private chat ids only"
+            ));
         }
         ids.push(id);
     }
     if ids.is_empty() {
-        return Err("GATEWAY_TELEGRAM_CHAT_IDS must include at least one id".to_string());
+        return Err(format!(
+            "{GATEWAY_TELEGRAM_CHAT_ID_ENV} must include at least one id"
+        ));
     }
+    Ok(ids)
+}
+
+fn sorted_unique_ids(ids: &[i64]) -> Vec<i64> {
+    let mut ids = ids.to_vec();
     ids.sort_unstable();
     ids.dedup();
-    Ok(ids)
+    ids
+}
+
+fn telegram_bots(
+    bot_tokens: &[String],
+    chat_ids: &[i64],
+    state_dir: &Path,
+) -> Result<Vec<TelegramBotConfig>, String> {
+    if bot_tokens.len() == 1 {
+        return Ok(vec![TelegramBotConfig {
+            bot_token: bot_tokens[0].clone(),
+            chat_ids: sorted_unique_ids(chat_ids),
+            offset_file: state_dir.join("telegram.offset"),
+        }]);
+    }
+    if bot_tokens.len() != chat_ids.len() {
+        return Err(format!(
+            "{GATEWAY_TELEGRAM_TOKEN_ENV} and {GATEWAY_TELEGRAM_CHAT_ID_ENV} must contain the same number of comma-separated values when multiple bot tokens are configured"
+        ));
+    }
+    Ok(bot_tokens
+        .iter()
+        .zip(chat_ids.iter())
+        .enumerate()
+        .map(|(index, (bot_token, chat_id))| TelegramBotConfig {
+            bot_token: bot_token.clone(),
+            chat_ids: vec![*chat_id],
+            offset_file: state_dir.join(format!("telegram-{}.offset", index + 1)),
+        })
+        .collect())
 }
 
 impl Default for GatewayConfigFile {
@@ -246,6 +313,18 @@ fn timeout_secs(timeout_mins: u64) -> Result<u64, String> {
 }
 
 impl Config {
+    pub fn bot_token_for_chat(&self, chat_id: i64) -> Option<&str> {
+        self.telegram_bots
+            .iter()
+            .find(|bot| bot.chat_ids.contains(&chat_id))
+            .map(|bot| bot.bot_token.as_str())
+            .or_else(|| {
+                self.telegram_chat_ids
+                    .contains(&chat_id)
+                    .then_some(self.bot_token.as_str())
+            })
+    }
+
     pub fn default_provider_model(&self) -> &ProviderModel {
         self.models
             .first()
@@ -344,7 +423,7 @@ mod tests {
         .unwrap();
         let env = BTreeMap::from([
             (GATEWAY_TELEGRAM_TOKEN_ENV.to_string(), "token".to_string()),
-            ("GATEWAY_TELEGRAM_CHAT_IDS".to_string(), "42".to_string()),
+            (GATEWAY_TELEGRAM_CHAT_ID_ENV.to_string(), "42".to_string()),
             (
                 "HOME".to_string(),
                 root.join("home").to_string_lossy().to_string(),
@@ -552,7 +631,7 @@ mod tests {
         let home = dir.path().join("home");
         let env = BTreeMap::from([
             (GATEWAY_TELEGRAM_TOKEN_ENV.to_string(), "token".to_string()),
-            ("GATEWAY_TELEGRAM_CHAT_IDS".to_string(), "42".to_string()),
+            (GATEWAY_TELEGRAM_CHAT_ID_ENV.to_string(), "42".to_string()),
             ("HOME".to_string(), home.to_string_lossy().to_string()),
         ]);
 
@@ -573,7 +652,7 @@ mod tests {
     fn unset_xdg_dirs_require_home() {
         let env = BTreeMap::from([
             (GATEWAY_TELEGRAM_TOKEN_ENV.to_string(), "token".to_string()),
-            ("GATEWAY_TELEGRAM_CHAT_IDS".to_string(), "42".to_string()),
+            (GATEWAY_TELEGRAM_CHAT_ID_ENV.to_string(), "42".to_string()),
         ]);
 
         let err = load_from_env(&env).unwrap_err();
@@ -604,17 +683,17 @@ mod tests {
     #[test]
     fn rejects_missing_telegram_chat_ids() {
         let (_dir, mut env) = env_with_token();
-        env.remove("GATEWAY_TELEGRAM_CHAT_IDS");
+        env.remove(GATEWAY_TELEGRAM_CHAT_ID_ENV);
 
         let err = load_from_env(&env).unwrap_err();
 
-        assert!(err.contains("GATEWAY_TELEGRAM_CHAT_IDS"));
+        assert!(err.contains(GATEWAY_TELEGRAM_CHAT_ID_ENV));
     }
 
     #[test]
     fn parses_supported_overrides() {
         let (_dir, mut env) = env_with_token();
-        env.insert("GATEWAY_TELEGRAM_CHAT_IDS".to_string(), "7,8".to_string());
+        env.insert(GATEWAY_TELEGRAM_CHAT_ID_ENV.to_string(), "7,8".to_string());
         let cfg_path =
             PathBuf::from(env.get("XDG_CONFIG_HOME").unwrap()).join("gateway/config.json");
         fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
@@ -641,6 +720,56 @@ mod tests {
         assert_eq!(cfg.poll_timeout_sec, 50);
         assert!(cfg.launchd_target.starts_with("gui/"));
         assert!(cfg.launchd_target.ends_with("/ai.gateway"));
+    }
+
+    #[test]
+    fn parses_multiple_telegram_bots_from_aligned_tokens_and_chat_ids() {
+        let (dir, mut env) = env_with_token();
+        env.insert(
+            GATEWAY_TELEGRAM_TOKEN_ENV.to_string(),
+            " token-a , token-b ".to_string(),
+        );
+        env.insert(
+            GATEWAY_TELEGRAM_CHAT_ID_ENV.to_string(),
+            "77,42".to_string(),
+        );
+
+        let cfg = load_from_env(&env).unwrap();
+
+        assert_eq!(cfg.bot_token, "token-a");
+        assert_eq!(cfg.telegram_chat_ids, vec![42, 77]);
+        assert_eq!(
+            cfg.telegram_bots,
+            vec![
+                TelegramBotConfig {
+                    bot_token: "token-a".to_string(),
+                    chat_ids: vec![77],
+                    offset_file: dir.path().join("state/gateway/telegram-1.offset"),
+                },
+                TelegramBotConfig {
+                    bot_token: "token-b".to_string(),
+                    chat_ids: vec![42],
+                    offset_file: dir.path().join("state/gateway/telegram-2.offset"),
+                },
+            ]
+        );
+        assert_eq!(cfg.bot_token_for_chat(77), Some("token-a"));
+        assert_eq!(cfg.bot_token_for_chat(42), Some("token-b"));
+    }
+
+    #[test]
+    fn rejects_mismatched_multiple_telegram_tokens_and_chat_ids() {
+        let (_dir, mut env) = env_with_token();
+        env.insert(
+            GATEWAY_TELEGRAM_TOKEN_ENV.to_string(),
+            "token-a,token-b".to_string(),
+        );
+        env.insert(GATEWAY_TELEGRAM_CHAT_ID_ENV.to_string(), "42".to_string());
+
+        let err = load_from_env(&env).unwrap_err();
+
+        assert!(err.contains(GATEWAY_TELEGRAM_TOKEN_ENV));
+        assert!(err.contains(GATEWAY_TELEGRAM_CHAT_ID_ENV));
     }
 
     #[test]
@@ -708,18 +837,21 @@ mod tests {
     #[test]
     fn rejects_invalid_telegram_chat_ids() {
         let (_dir, mut env) = env_with_token();
-        env.insert("GATEWAY_TELEGRAM_CHAT_IDS".to_string(), "7,bad".to_string());
+        env.insert(
+            GATEWAY_TELEGRAM_CHAT_ID_ENV.to_string(),
+            "7,bad".to_string(),
+        );
         let err = load_from_env(&env).unwrap_err();
         assert!(err.contains("comma-separated integers"));
 
         let (_dir, mut env) = env_with_token();
-        env.insert("GATEWAY_TELEGRAM_CHAT_IDS".to_string(), " , ".to_string());
+        env.insert(GATEWAY_TELEGRAM_CHAT_ID_ENV.to_string(), " , ".to_string());
         let err = load_from_env(&env).unwrap_err();
         assert!(err.contains("at least one id"));
 
         let (_dir, mut env) = env_with_token();
         env.insert(
-            "GATEWAY_TELEGRAM_CHAT_IDS".to_string(),
+            GATEWAY_TELEGRAM_CHAT_ID_ENV.to_string(),
             "42,-100".to_string(),
         );
         let err = load_from_env(&env).unwrap_err();
@@ -730,7 +862,7 @@ mod tests {
     fn telegram_chat_ids_are_trimmed_sorted_and_deduplicated() {
         let (_dir, mut env) = env_with_token();
         env.insert(
-            "GATEWAY_TELEGRAM_CHAT_IDS".to_string(),
+            GATEWAY_TELEGRAM_CHAT_ID_ENV.to_string(),
             " 9, 7,9 ".to_string(),
         );
 

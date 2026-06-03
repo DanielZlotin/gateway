@@ -156,6 +156,7 @@ impl TelegramApi for TelegramClient {
 
 #[derive(Debug, Clone)]
 struct Job {
+    bot_token: String,
     chat_id: i64,
     thread_id: Option<i64>,
     reply_to_message_id: i64,
@@ -188,8 +189,32 @@ impl Drop for TypingLoop {
 }
 
 pub fn run(cfg: Config) -> Result<(), String> {
-    let tg = TelegramClient::new(&cfg.bot_token);
-    run_with_client(cfg, tg)
+    if cfg.telegram_bots.len() <= 1 {
+        let tg = TelegramClient::new(&cfg.bot_token);
+        return run_with_client(cfg, tg);
+    }
+
+    let (tx, rx) = mpsc::channel();
+    for bot in cfg.telegram_bots.clone() {
+        let tx = tx.clone();
+        let mut bot_cfg = cfg.clone();
+        bot_cfg.bot_token = bot.bot_token;
+        bot_cfg.telegram_chat_ids = bot.chat_ids;
+        bot_cfg.offset_file = bot.offset_file;
+        bot_cfg.telegram_bots = vec![crate::config::TelegramBotConfig {
+            bot_token: bot_cfg.bot_token.clone(),
+            chat_ids: bot_cfg.telegram_chat_ids.clone(),
+            offset_file: bot_cfg.offset_file.clone(),
+        }];
+        thread::spawn(move || {
+            let tg = TelegramClient::new(&bot_cfg.bot_token);
+            let result = run_with_client(bot_cfg, tg);
+            let _ = tx.send(result);
+        });
+    }
+    drop(tx);
+    rx.recv()
+        .map_err(|err| format!("telegram bot workers exited: {err}"))?
 }
 
 fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
@@ -363,6 +388,7 @@ fn handle_message(
     }
 
     let queued = tx.try_send(Job {
+        bot_token: cfg.bot_token.clone(),
         chat_id: msg.chat.id,
         thread_id: msg.message_thread_id,
         reply_to_message_id: msg.message_id,
@@ -920,7 +946,6 @@ fn state_with_provider_model(
 }
 
 fn worker_loop(cfg: Config, rx: mpsc::Receiver<Job>) {
-    let tg = TelegramClient::new(&cfg.bot_token);
     let default_model = cfg.default_provider_model().clone();
     let store = SessionStore::new_with_provider(
         cfg.chat_state_dir.clone(),
@@ -928,6 +953,7 @@ fn worker_loop(cfg: Config, rx: mpsc::Receiver<Job>) {
         default_model.provider,
     );
     for job in rx {
+        let tg = TelegramClient::new(&job.bot_token);
         if let Err(err) = run_job(&cfg, &tg, &store, job) {
             logs::error(format_args!("job handler failed: {err}"));
         }
@@ -1630,6 +1656,7 @@ mod tests {
         )
         .unwrap();
         let job = rx.recv().unwrap();
+        assert_eq!(job.bot_token, "token");
         assert_eq!(job.chat_id, 42);
         assert_eq!(job.reply_to_message_id, 3);
         assert_eq!(job.prompt, "run this");
@@ -2982,6 +3009,11 @@ exit 2
         Config {
             bot_token: "token".to_string(),
             telegram_chat_ids: vec![42],
+            telegram_bots: vec![crate::config::TelegramBotConfig {
+                bot_token: "token".to_string(),
+                chat_ids: vec![42],
+                offset_file: root.join("state/gateway/telegram.offset"),
+            }],
             xdg_config_home: root.join("config"),
             xdg_cache_home: root.join("cache"),
             xdg_data_home: root.join("data"),
@@ -3055,6 +3087,7 @@ exit 2
 
     fn job(prompt: &str) -> Job {
         Job {
+            bot_token: "token".to_string(),
             chat_id: 42,
             thread_id: None,
             reply_to_message_id: 7,

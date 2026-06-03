@@ -18,7 +18,16 @@ cargo build --release
 
 ```zsh
 export GATEWAY_TELEGRAM_TOKEN=...
-export GATEWAY_TELEGRAM_CHAT_IDS=123456789
+export GATEWAY_TELEGRAM_CHAT_ID=123456789
+```
+
+Multiple bots can be configured with comma-separated tokens and chat IDs. When
+more than one token is provided, each token is paired with the chat ID at the
+same position.
+
+```zsh
+export GATEWAY_TELEGRAM_TOKEN=bot-token-a,bot-token-b
+export GATEWAY_TELEGRAM_CHAT_ID=123456789,987654321
 ```
 
 ⚙️ Optional:
@@ -106,7 +115,7 @@ printf '%s\n' "Summarize status" | gateway run
 6. 🎯 Without `--chat`, Telegram output goes to the first configured private
    chat ID.
 7. 💬 With `--chat ID`, Telegram output goes only to that ID, and the ID must
-   already be listed in `GATEWAY_TELEGRAM_CHAT_IDS`.
+   already be listed in `GATEWAY_TELEGRAM_CHAT_ID`.
 
 🧭 Other commands:
 
