@@ -16,7 +16,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, Arc, Mutex,
+};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -162,9 +165,17 @@ struct Job {
     reply_to_message_id: i64,
     prompt: String,
     provider_model: ProviderModel,
+    cancel_epoch: u64,
 }
 
 type RuntimeSelections = Arc<Mutex<HashMap<SessionKey, ProviderModel>>>;
+type CancellationState = Arc<Mutex<HashMap<SessionKey, CancellationEntry>>>;
+
+#[derive(Debug, Clone)]
+struct CancellationEntry {
+    epoch: u64,
+    active: Vec<Arc<AtomicBool>>,
+}
 
 struct TypingLoop {
     stop: Option<mpsc::Sender<()>>,
@@ -253,8 +264,10 @@ fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
     }
 
     let (tx, rx) = mpsc::sync_channel::<Job>(cfg.queue_depth);
+    let cancellations = CancellationState::default();
     let worker_cfg = cfg.clone();
-    let _worker = thread::spawn(move || worker_loop(worker_cfg, rx));
+    let worker_cancellations = cancellations.clone();
+    let _worker = thread::spawn(move || worker_loop(worker_cfg, rx, worker_cancellations));
     let selections = RuntimeSelections::default();
 
     let mut offset = read_offset(&cfg.offset_file);
@@ -291,7 +304,9 @@ fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
             offset = advance_offset(offset, update.update_id);
             write_offset(&cfg.offset_file, offset)?;
             if let Some(message) = update.message {
-                if let Err(err) = handle_message(&cfg, &tg, &store, &selections, &tx, message) {
+                if let Err(err) =
+                    handle_message(&cfg, &tg, &store, &selections, &cancellations, &tx, message)
+                {
                     logs::warn(format_args!("message handler failed: {err}"));
                 }
             }
@@ -369,6 +384,7 @@ fn handle_message(
     tg: &impl TelegramApi,
     store: &SessionStore,
     selections: &RuntimeSelections,
+    cancellations: &CancellationState,
     tx: &mpsc::SyncSender<Job>,
     msg: Message,
 ) -> Result<(), String> {
@@ -384,8 +400,21 @@ fn handle_message(
     };
 
     if let Some(command) = parse_command(&text) {
-        return handle_command(cfg, tg, store, selections, &msg, &text, &command);
+        return handle_command(
+            cfg,
+            tg,
+            store,
+            selections,
+            cancellations,
+            &msg,
+            &text,
+            &command,
+        );
     }
+    let key = SessionKey::Chat {
+        chat_id: msg.chat.id,
+        thread_id: msg.message_thread_id,
+    };
 
     let queued = tx.try_send(Job {
         bot_token: cfg.bot_token.clone(),
@@ -393,14 +422,8 @@ fn handle_message(
         thread_id: msg.message_thread_id,
         reply_to_message_id: msg.message_id,
         prompt: text,
-        provider_model: selected_provider_model(
-            cfg,
-            selections,
-            &SessionKey::Chat {
-                chat_id: msg.chat.id,
-                thread_id: msg.message_thread_id,
-            },
-        ),
+        provider_model: selected_provider_model(cfg, selections, &key),
+        cancel_epoch: cancellation_epoch(cancellations, &key),
     });
     if queued.is_err() {
         tg.send_message(
@@ -419,12 +442,23 @@ fn handle_command(
     tg: &impl TelegramApi,
     store: &SessionStore,
     selections: &RuntimeSelections,
+    cancellations: &CancellationState,
     msg: &Message,
     text: &str,
     command: &str,
 ) -> Result<(), String> {
     let codex = CodexConfig::from(cfg);
-    handle_command_with_codex(cfg, &codex, tg, store, selections, msg, text, command)
+    handle_command_with_codex(
+        cfg,
+        &codex,
+        tg,
+        store,
+        selections,
+        cancellations,
+        msg,
+        text,
+        command,
+    )
 }
 
 fn handle_command_with_codex(
@@ -433,6 +467,7 @@ fn handle_command_with_codex(
     tg: &impl TelegramApi,
     store: &SessionStore,
     selections: &RuntimeSelections,
+    cancellations: &CancellationState,
     msg: &Message,
     text: &str,
     command: &str,
@@ -459,12 +494,28 @@ fn handle_command_with_codex(
         Some(Directive::List) => {
             send_long_message(tg, msg.chat.id, &store.list(&key), msg.message_id)
         }
+        Some(Directive::Stop) => handle_stop_command(tg, cancellations, msg, &key),
         Some(Directive::Help) => tg.send_message(msg.chat.id, &directive_help(), msg.message_id),
         Some(Directive::Status) => {
             handle_status_command(cfg, codex, tg, store, selections, msg, &key)
         }
         None => tg.send_message(msg.chat.id, &unknown_directive_message(), msg.message_id),
     }
+}
+
+fn handle_stop_command(
+    tg: &impl TelegramApi,
+    cancellations: &CancellationState,
+    msg: &Message,
+    key: &SessionKey,
+) -> Result<(), String> {
+    let active = cancel_key(cancellations, key);
+    let detail = if active == 0 {
+        "No active Codex run was found; queued work for this chat was cancelled."
+    } else {
+        "Active Codex work was cancelled; queued work for this chat was skipped."
+    };
+    tg.send_message(msg.chat.id, &format!("🛑 {detail}"), msg.message_id)
 }
 
 fn handle_log_command(
@@ -954,7 +1005,7 @@ fn state_with_provider_model(
     state
 }
 
-fn worker_loop(cfg: Config, rx: mpsc::Receiver<Job>) {
+fn worker_loop(cfg: Config, rx: mpsc::Receiver<Job>, cancellations: CancellationState) {
     let default_model = cfg.default_provider_model().clone();
     let store = SessionStore::new_with_provider(
         cfg.chat_state_dir.clone(),
@@ -963,7 +1014,14 @@ fn worker_loop(cfg: Config, rx: mpsc::Receiver<Job>) {
     );
     for job in rx {
         let tg = TelegramClient::new(&job.bot_token);
-        if let Err(err) = run_job(&cfg, &tg, &store, job) {
+        if is_job_cancelled(&cancellations, &job) {
+            logs::info(format_args!(
+                "job skipped after cancellation chat={} reply_to={}",
+                job.chat_id, job.reply_to_message_id
+            ));
+            continue;
+        }
+        if let Err(err) = run_job(&cfg, &tg, &store, &cancellations, job) {
             logs::error(format_args!("job handler failed: {err}"));
         }
     }
@@ -973,10 +1031,11 @@ fn run_job(
     cfg: &Config,
     tg: &impl TelegramApi,
     store: &SessionStore,
+    cancellations: &CancellationState,
     job: Job,
 ) -> Result<(), String> {
     let codex = CodexConfig::from(cfg);
-    run_job_with_codex(cfg, &codex, tg, store, job)
+    run_job_with_codex(cfg, &codex, tg, store, cancellations, job)
 }
 
 fn run_job_with_codex(
@@ -984,6 +1043,7 @@ fn run_job_with_codex(
     codex: &CodexConfig,
     tg: &impl TelegramApi,
     store: &SessionStore,
+    cancellations: &CancellationState,
     job: Job,
 ) -> Result<(), String> {
     let started = Instant::now();
@@ -1004,6 +1064,7 @@ fn run_job_with_codex(
     ));
     let stream_message_id =
         tg.send_message_returning(job.chat_id, "🫧 Thinking…", job.reply_to_message_id)?;
+    let cancel = register_active_cancel(cancellations, &key);
     let mut streamed = String::new();
     let mut last_edit = Instant::now();
     let run_result = {
@@ -1017,6 +1078,7 @@ fn run_job_with_codex(
                 model: &job.provider_model.model,
                 timeout: cfg.codex_timeout,
                 state_dir: &cfg.state_dir,
+                cancel: Some(cancel.clone()),
             },
             |chunk| {
                 streamed.push_str(chunk);
@@ -1034,6 +1096,7 @@ fn run_job_with_codex(
     let output = match run_result {
         Ok(output) => output,
         Err(err) => {
+            unregister_active_cancel(cancellations, &key, &cancel);
             logs::warn(format_args!(
                 "job provider failed chat={} provider={} elapsed_ms={} error={}",
                 job.chat_id,
@@ -1041,15 +1104,25 @@ fn run_job_with_codex(
                 started.elapsed().as_millis(),
                 single_line(&err)
             ));
-            send_long_message(
-                tg,
-                job.chat_id,
-                &format!("⚠️ {} failed:\n{err}", job.provider_model.provider.label()),
-                job.reply_to_message_id,
-            )?;
+            if err == "codex cancelled" {
+                let _ = tg.delete_message(job.chat_id, stream_message_id);
+                tg.send_message(
+                    job.chat_id,
+                    "🛑 Codex work cancelled.",
+                    job.reply_to_message_id,
+                )?;
+            } else {
+                send_long_message(
+                    tg,
+                    job.chat_id,
+                    &format!("⚠️ {} failed:\n{err}", job.provider_model.provider.label()),
+                    job.reply_to_message_id,
+                )?;
+            }
             return Ok(());
         }
     };
+    unregister_active_cancel(cancellations, &key, &cancel);
     if let Some(session_id) = output.session_id.as_deref() {
         store.save_current_session(&key, state.generation, session_id)?;
     }
@@ -1077,6 +1150,62 @@ fn run_job_with_codex(
             Ok(())
         }
     }
+}
+
+fn cancellation_epoch(cancellations: &CancellationState, key: &SessionKey) -> u64 {
+    cancellations
+        .lock()
+        .unwrap()
+        .get(key)
+        .map(|entry| entry.epoch)
+        .unwrap_or(0)
+}
+
+fn cancel_key(cancellations: &CancellationState, key: &SessionKey) -> usize {
+    let mut cancellations = cancellations.lock().unwrap();
+    let entry = cancellations
+        .entry(key.clone())
+        .or_insert(CancellationEntry {
+            epoch: 0,
+            active: Vec::new(),
+        });
+    entry.epoch = entry.epoch.saturating_add(1);
+    entry.active.retain(|cancel| Arc::strong_count(cancel) > 1);
+    for cancel in &entry.active {
+        cancel.store(true, Ordering::SeqCst);
+    }
+    entry.active.len()
+}
+
+fn register_active_cancel(cancellations: &CancellationState, key: &SessionKey) -> Arc<AtomicBool> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut cancellations = cancellations.lock().unwrap();
+    let entry = cancellations
+        .entry(key.clone())
+        .or_insert(CancellationEntry {
+            epoch: 0,
+            active: Vec::new(),
+        });
+    entry.active.push(cancel.clone());
+    cancel
+}
+
+fn unregister_active_cancel(
+    cancellations: &CancellationState,
+    key: &SessionKey,
+    cancel: &Arc<AtomicBool>,
+) {
+    if let Some(entry) = cancellations.lock().unwrap().get_mut(key) {
+        entry.active.retain(|active| !Arc::ptr_eq(active, cancel));
+    }
+}
+
+fn is_job_cancelled(cancellations: &CancellationState, job: &Job) -> bool {
+    let key = SessionKey::Chat {
+        chat_id: job.chat_id,
+        thread_id: job.thread_id,
+    };
+    cancellation_epoch(cancellations, &key) > job.cancel_epoch
 }
 
 const FINAL_MESSAGE_EFFECT_ID: &str = "5107584321108051014";
@@ -1845,6 +1974,7 @@ printf 'session id: session-12345678\n' >&2
         )
         .unwrap();
         handle_command(&cfg, &tg, &store, &selections, &msg, "/list", "/list").unwrap();
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/stop", "/stop").unwrap();
         handle_command(&cfg, &tg, &store, &selections, &msg, "/help", "/help").unwrap();
         handle_command(&cfg, &tg, &store, &selections, &msg, "/update", "/update").unwrap();
         handle_command(
@@ -1892,6 +2022,9 @@ printf 'session id: session-12345678\n' >&2
             .any(|text| text.contains("invalid session name")));
         assert!(sent.iter().any(|text| text.contains("🏷️ Renamed session")));
         assert!(sent.iter().any(|text| text.contains("💾 Saved sessions:")));
+        assert!(sent
+            .iter()
+            .any(|text| text.contains("🛑") && text.contains("queued work")));
         assert!(sent.iter().any(|text| text.contains("/status")));
         assert!(sent.iter().any(|text| text
             == "⬆️ Updating gateway in the background. Running `git pull`, then `./setup`. Details go to `gateway/logs/update.log`."));
@@ -3059,6 +3192,102 @@ exit 2
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn handle_message(
+        cfg: &Config,
+        tg: &impl TelegramApi,
+        store: &SessionStore,
+        selections: &RuntimeSelections,
+        tx: &mpsc::SyncSender<Job>,
+        msg: Message,
+    ) -> Result<(), String> {
+        super::handle_message(
+            cfg,
+            tg,
+            store,
+            selections,
+            &CancellationState::default(),
+            tx,
+            msg,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn handle_command(
+        cfg: &Config,
+        tg: &impl TelegramApi,
+        store: &SessionStore,
+        selections: &RuntimeSelections,
+        msg: &Message,
+        text: &str,
+        command: &str,
+    ) -> Result<(), String> {
+        super::handle_command(
+            cfg,
+            tg,
+            store,
+            selections,
+            &CancellationState::default(),
+            msg,
+            text,
+            command,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn handle_command_with_codex(
+        cfg: &Config,
+        codex: &CodexConfig,
+        tg: &impl TelegramApi,
+        store: &SessionStore,
+        selections: &RuntimeSelections,
+        msg: &Message,
+        text: &str,
+        command: &str,
+    ) -> Result<(), String> {
+        super::handle_command_with_codex(
+            cfg,
+            codex,
+            tg,
+            store,
+            selections,
+            &CancellationState::default(),
+            msg,
+            text,
+            command,
+        )
+    }
+
+    fn run_job_with_codex(
+        cfg: &Config,
+        codex: &CodexConfig,
+        tg: &impl TelegramApi,
+        store: &SessionStore,
+        job: Job,
+    ) -> Result<(), String> {
+        super::run_job_with_codex(cfg, codex, tg, store, &CancellationState::default(), job)
+    }
+
+    #[test]
+    fn stop_cancels_active_and_stale_queued_jobs_for_same_chat() {
+        let cancellations = CancellationState::default();
+        let key = SessionKey::Chat {
+            chat_id: 42,
+            thread_id: None,
+        };
+        let mut queued = job("queued");
+        queued.cancel_epoch = cancellation_epoch(&cancellations, &key);
+        let active = register_active_cancel(&cancellations, &key);
+
+        assert_eq!(cancel_key(&cancellations, &key), 1);
+
+        assert!(active.load(Ordering::SeqCst));
+        assert!(is_job_cancelled(&cancellations, &queued));
+
+        unregister_active_cancel(&cancellations, &key, &active);
+        assert_eq!(cancel_key(&cancellations, &key), 0);
+    }
+
     fn seed_session_history(store: &SessionStore, key: &SessionKey) {
         assert!(store
             .save_current_session(key, 0, "cccccccc-oldest")
@@ -3164,6 +3393,7 @@ exit 2
                 provider: Provider::Codex,
                 model: "gpt-test".to_string(),
             },
+            cancel_epoch: 0,
         }
     }
 

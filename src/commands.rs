@@ -11,6 +11,7 @@ pub enum Directive {
     Resume,
     Rename,
     List,
+    Stop,
 }
 
 impl Directive {
@@ -27,6 +28,7 @@ impl Directive {
             Directive::Resume => "resume",
             Directive::Rename => "rename",
             Directive::List => "list",
+            Directive::Stop => "stop",
         }
     }
 }
@@ -133,6 +135,13 @@ pub const DIRECTIVE_SPECS: &[DirectiveSpec] = &[
         summary: "list saved sessions",
         bot_description: "💾 List saved sessions.",
     },
+    DirectiveSpec {
+        directive: Directive::Stop,
+        icon: "🛑",
+        usage: "",
+        summary: "cancel active and queued Codex work for this chat",
+        bot_description: "🛑 Cancel active and queued Codex work for this chat.",
+    },
 ];
 
 pub fn directive_help() -> String {
@@ -183,6 +192,7 @@ mod tests {
         assert!(help.contains("📊 /status"));
         assert!(help.contains("⚙️ /config"));
         assert!(help.contains("⬆️ /update"));
+        assert!(help.contains("🛑 /stop"));
         assert!(!help.contains("/commands"));
         assert!(!help.contains("/start"));
     }

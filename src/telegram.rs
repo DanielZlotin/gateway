@@ -542,7 +542,7 @@ mod tests {
             names,
             vec![
                 "help", "status", "config", "log", "new", "restart", "update", "model", "resume",
-                "rename", "list",
+                "rename", "list", "stop",
             ]
         );
         assert!(!names.contains(&"commands"));

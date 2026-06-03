@@ -6,7 +6,10 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, Arc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -40,6 +43,7 @@ pub struct CodexRun<'a> {
     pub model: &'a str,
     pub timeout: Duration,
     pub state_dir: &'a Path,
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 const GATEWAY_DEVELOPER_INSTRUCTIONS: &str = include_str!("SYSTEM.md");
@@ -144,6 +148,7 @@ pub fn run_codex(
             model,
             timeout,
             state_dir,
+            cancel: None,
         },
         |_| {},
     )
@@ -224,6 +229,17 @@ pub fn run_codex_stream(
         while let Ok(chunk) = stdout_rx.try_recv() {
             stdout_text.push_str(&chunk);
             on_stdout(&chunk);
+        }
+        if run
+            .cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::SeqCst))
+        {
+            let _ = child.kill();
+            let _ = child.wait().map_err(|err| err.to_string())?;
+            let _ = stdout_handle.join();
+            let _ = stderr_handle.join().unwrap_or_default();
+            return Err("codex cancelled".to_string());
         }
         if start.elapsed() > run.timeout {
             let _ = child.kill();
@@ -581,6 +597,7 @@ printf 'session id: session-123\n' >&2
                 model: "",
                 timeout: Duration::from_secs(5),
                 state_dir: &dir.path().join("state"),
+                cancel: None,
             },
             |chunk| streamed.push_str(chunk),
         )
@@ -631,6 +648,7 @@ cat >/dev/null
                 model: "",
                 timeout: Duration::from_secs(5),
                 state_dir: &dir.path().join("state"),
+                cancel: None,
             },
             |_| {},
         )
