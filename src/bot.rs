@@ -460,7 +460,9 @@ fn handle_command_with_codex(
             send_long_message(tg, msg.chat.id, &store.list(&key), msg.message_id)
         }
         Some(Directive::Help) => tg.send_message(msg.chat.id, &directive_help(), msg.message_id),
-        Some(Directive::Status) => handle_status_command(cfg, tg, store, selections, msg, &key),
+        Some(Directive::Status) => {
+            handle_status_command(cfg, codex, tg, store, selections, msg, &key)
+        }
         None => tg.send_message(msg.chat.id, &unknown_directive_message(), msg.message_id),
     }
 }
@@ -916,13 +918,20 @@ fn rename_session(
 
 fn handle_status_command(
     cfg: &Config,
+    codex: &CodexConfig,
     tg: &impl TelegramApi,
     store: &SessionStore,
     selections: &RuntimeSelections,
     msg: &Message,
     key: &SessionKey,
 ) -> Result<(), String> {
-    let state = store.load(key);
+    let mut state = store.load(key);
+    if current_session_is_unnamed(&state)
+        && !auto_rename_current_session(cfg, codex, tg, store, msg, key)?
+    {
+        return Ok(());
+    }
+    state = store.load(key);
     send_long_message(
         tg,
         msg.chat.id,
@@ -2087,6 +2096,65 @@ printf 'session id: aaaaaaaa-current\n' >&2
             .sent_text()
             .iter()
             .any(|text| text.contains("🏷️ Renamed session aaaaaaaa to \"session-name\".")));
+    }
+
+    #[test]
+    fn status_auto_renames_unnamed_current_session() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let codex = test_codex_config(
+            &cfg,
+            executable(
+                dir.path().join("codex-status-title"),
+                r#"#!/bin/sh
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--output-last-message" ]; then out="$arg"; fi
+  prev="$arg"
+done
+cat >/dev/null
+printf 'status-name\n' > "$out"
+printf 'session id: aaaaaaaa-current\n' >&2
+"#,
+            ),
+        );
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let key = SessionKey::Chat {
+            chat_id: 42,
+            thread_id: None,
+        };
+        assert!(store
+            .save_current_session(&key, 0, "aaaaaaaa-current")
+            .unwrap());
+        let tg = FakeTelegram::new();
+        let selections = RuntimeSelections::default();
+        let msg = message(42, 10, "/status");
+
+        handle_command_with_codex(
+            &cfg,
+            &codex,
+            &tg,
+            &store,
+            &selections,
+            &msg,
+            "/status",
+            "/status",
+        )
+        .unwrap();
+
+        let state = store.load(&key);
+        assert_eq!(state.sessions[0].name.as_deref(), Some("status-name"));
+        let sent = tg.sent_text();
+        assert!(sent
+            .iter()
+            .any(|text| text.contains("🏷️ Naming current session")));
+        assert!(sent
+            .iter()
+            .any(|text| text.contains("🧵 Session: aaaaaaaa (status-name)")));
     }
 
     #[test]
