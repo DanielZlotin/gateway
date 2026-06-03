@@ -127,11 +127,8 @@ impl TelegramClient {
         text: &str,
         reply_to_message_id: i64,
     ) -> Result<(), String> {
-        let text = redact_private_data(text);
-        let values = send_message_values(chat_id, &text, reply_to_message_id, None, true);
-        let plain_values = send_message_values(chat_id, &text, reply_to_message_id, None, false);
         let _: serde_json::Value =
-            self.post_form_with_plain_text_retry("sendMessage", &values, &plain_values)?;
+            self.post_send_message(chat_id, text, reply_to_message_id, None)?;
         Ok(())
     }
 
@@ -142,23 +139,16 @@ impl TelegramClient {
         reply_to_message_id: i64,
         buttons: &[InlineKeyboardButton],
     ) -> Result<(), String> {
-        let text = redact_private_data(text);
-        let values = send_message_with_inline_keyboard_values(
-            chat_id,
-            &text,
-            reply_to_message_id,
-            buttons,
-            true,
-        )?;
-        let plain_values = send_message_with_inline_keyboard_values(
-            chat_id,
-            &text,
-            reply_to_message_id,
-            buttons,
-            false,
-        )?;
         let _: serde_json::Value =
-            self.post_form_with_plain_text_retry("sendMessage", &values, &plain_values)?;
+            self.post_redacted_text_form("sendMessage", text, |text, parse_markdown| {
+                send_message_with_inline_keyboard_values(
+                    chat_id,
+                    text,
+                    reply_to_message_id,
+                    buttons,
+                    parse_markdown,
+                )
+            })?;
         Ok(())
     }
 
@@ -178,11 +168,7 @@ impl TelegramClient {
         text: &str,
         reply_to_message_id: i64,
     ) -> Result<i64, String> {
-        let text = redact_private_data(text);
-        let values = send_message_values(chat_id, &text, reply_to_message_id, None, true);
-        let plain_values = send_message_values(chat_id, &text, reply_to_message_id, None, false);
-        let message: Message =
-            self.post_form_with_plain_text_retry("sendMessage", &values, &plain_values)?;
+        let message: Message = self.post_send_message(chat_id, text, reply_to_message_id, None)?;
         Ok(message.message_id)
     }
 
@@ -193,22 +179,7 @@ impl TelegramClient {
         reply_to_message_id: i64,
         message_effect_id: &str,
     ) -> Result<Message, String> {
-        let text = redact_private_data(text);
-        let values = send_message_values(
-            chat_id,
-            &text,
-            reply_to_message_id,
-            Some(message_effect_id),
-            true,
-        );
-        let plain_values = send_message_values(
-            chat_id,
-            &text,
-            reply_to_message_id,
-            Some(message_effect_id),
-            false,
-        );
-        self.post_form_with_plain_text_retry("sendMessage", &values, &plain_values)
+        self.post_send_message(chat_id, text, reply_to_message_id, Some(message_effect_id))
     }
 
     pub fn delete_message(&self, chat_id: i64, message_id: i64) -> Result<(), String> {
@@ -237,11 +208,15 @@ impl TelegramClient {
         message_id: i64,
         text: &str,
     ) -> Result<(), String> {
-        let text = redact_private_data(text);
-        let values = edit_message_values(chat_id, message_id, &text, true);
-        let plain_values = edit_message_values(chat_id, message_id, &text, false);
         let _: serde_json::Value =
-            self.post_form_with_plain_text_retry("editMessageText", &values, &plain_values)?;
+            self.post_redacted_text_form("editMessageText", text, |text, parse_markdown| {
+                Ok(edit_message_values(
+                    chat_id,
+                    message_id,
+                    text,
+                    parse_markdown,
+                ))
+            })?;
         Ok(())
     }
 
@@ -320,6 +295,36 @@ impl TelegramClient {
             Err(err) if should_retry_plain_text(&err) => self.post_form(method, plain_values),
             Err(err) => Err(err),
         }
+    }
+
+    fn post_send_message<T: DeserializeOwned>(
+        &self,
+        chat_id: i64,
+        text: &str,
+        reply_to_message_id: i64,
+        message_effect_id: Option<&str>,
+    ) -> Result<T, String> {
+        self.post_redacted_text_form("sendMessage", text, |text, parse_markdown| {
+            Ok(send_message_values(
+                chat_id,
+                text,
+                reply_to_message_id,
+                message_effect_id,
+                parse_markdown,
+            ))
+        })
+    }
+
+    fn post_redacted_text_form<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        text: &str,
+        build_values: impl Fn(&str, bool) -> Result<Vec<(&'static str, String)>, String>,
+    ) -> Result<T, String> {
+        let text = redact_private_data(text);
+        let values = build_values(&text, true)?;
+        let plain_values = build_values(&text, false)?;
+        self.post_form_with_plain_text_retry(method, &values, &plain_values)
     }
 
     fn call_json<T: DeserializeOwned>(
