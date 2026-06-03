@@ -46,6 +46,8 @@ pub struct Message {
     pub message_thread_id: Option<i64>,
     #[serde(default)]
     pub effect_id: Option<String>,
+    #[serde(default)]
+    pub reply_to_message: Option<Box<Message>>,
     pub from: Option<User>,
     pub chat: Chat,
     #[serde(default)]

@@ -374,6 +374,20 @@ pub fn message_text(text: &str, caption: &str) -> Result<String, String> {
     Err("📝 Text messages only.".to_string())
 }
 
+fn prompt_with_reply_context(msg: &Message, text: &str) -> String {
+    let Some(reply) = msg.reply_to_message.as_deref() else {
+        return text.to_string();
+    };
+    let Ok(reply_text) = message_text(&reply.text, &reply.caption) else {
+        return text.to_string();
+    };
+    format!(
+        "Telegram reply context:\n{}\n\nUser message:\n{}",
+        reply_text.trim(),
+        text.trim()
+    )
+}
+
 fn advance_offset(current: i64, update_id: i64) -> i64 {
     current.max(update_id + 1)
 }
@@ -428,7 +442,7 @@ fn handle_message(
         chat_id: msg.chat.id,
         thread_id: msg.message_thread_id,
         reply_to_message_id: msg.message_id,
-        prompt: text,
+        prompt: prompt_with_reply_context(&msg, &text),
         provider_model: selected_provider_model(cfg, selections, &key),
         cancel_epoch: cancellation_epoch(cancellations, &key),
     });
@@ -1851,6 +1865,29 @@ mod tests {
         assert!(tg.calls().iter().any(|call| {
             matches!(call, Call::Send { text, reply_to: 4, .. } if text.contains("🚦 Codex queue is full"))
         }));
+    }
+
+    #[test]
+    fn handle_message_adds_replied_message_text_to_prompt() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let tg = FakeTelegram::new();
+        let selections = RuntimeSelections::default();
+        let (tx, rx) = mpsc::sync_channel(1);
+        let mut msg = message(42, 6, "what do you think?");
+        msg.reply_to_message = Some(Box::new(message(42, 5, "original claim")));
+
+        handle_message(&cfg, &tg, &store, &selections, &tx, msg).unwrap();
+
+        let job = rx.recv().unwrap();
+        assert_eq!(
+            job.prompt,
+            "Telegram reply context:\noriginal claim\n\nUser message:\nwhat do you think?"
+        );
     }
 
     #[test]
@@ -3436,6 +3473,7 @@ exit 2
             message_id,
             message_thread_id: None,
             effect_id: None,
+            reply_to_message: None,
             from: Some(User {
                 id: chat_id,
                 username: String::new(),
@@ -3483,6 +3521,7 @@ exit 2
             message_id,
             message_thread_id: None,
             effect_id: effect_id.map(ToOwned::to_owned),
+            reply_to_message: None,
             from: None,
             chat: Chat {
                 id: 42,
