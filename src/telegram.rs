@@ -275,7 +275,11 @@ impl TelegramClient {
             .file_path
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| "telegram getFile returned no file_path".to_string())?;
-        let url = format!("{}/{}", self.file_base_url, file_path.trim_start_matches('/'));
+        let url = format!(
+            "{}/{}",
+            self.file_base_url,
+            file_path.trim_start_matches('/')
+        );
         let response = self.agent.get(&url).call().map_err(|err| {
             format!(
                 "telegram download file request failed: {}",
@@ -777,7 +781,9 @@ mod tests {
     fn download_file_resolves_telegram_file_path_and_writes_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let server = TestServer::new(vec![
-            json_response(r#"{"ok":true,"result":{"file_id":"file-1","file_path":"docs/report.txt"}}"#),
+            json_response(
+                r#"{"ok":true,"result":{"file_id":"file-1","file_path":"docs/report.txt"}}"#,
+            ),
             binary_response("downloaded bytes"),
         ]);
         let client = server.client();
@@ -785,7 +791,10 @@ mod tests {
 
         client.download_file("file-1", &target).unwrap();
 
-        assert_eq!(std::fs::read_to_string(&target).unwrap(), "downloaded bytes");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "downloaded bytes"
+        );
         let get_file = server.request();
         let download = server.request();
         assert_eq!(get_file.path, "/botsecret/getFile");

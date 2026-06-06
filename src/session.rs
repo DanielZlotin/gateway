@@ -21,6 +21,12 @@ pub struct ChatSession {
     pub sessions: Vec<SavedSession>,
 }
 
+impl ChatSession {
+    pub fn saved_session_name(&self, session_id: &str) -> Option<&str> {
+        saved_session_name(&self.sessions, session_id)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedSession {
     pub id: String,
@@ -41,6 +47,7 @@ pub enum SessionKey {
     },
 }
 
+#[derive(Clone)]
 pub struct SessionStore {
     chat_dir: PathBuf,
     default_model: String,
@@ -160,6 +167,61 @@ impl SessionStore {
         Ok(state)
     }
 
+    pub fn rename_session(
+        &self,
+        key: &SessionKey,
+        session_id: &str,
+        name: &str,
+        model: &str,
+        provider: Provider,
+    ) -> Result<ChatSession, String> {
+        let state = self.load(key);
+        self.save_session_name(key, state, session_id, name, model, provider)
+    }
+
+    pub fn rename_session_if_name_unchanged(
+        &self,
+        key: &SessionKey,
+        session_id: &str,
+        previous_name: Option<&str>,
+        name: &str,
+        model: &str,
+        provider: Provider,
+    ) -> Result<ChatSession, String> {
+        let state = self.load(key);
+        if state.saved_session_name(session_id)
+            != previous_name.filter(|name| !name.trim().is_empty())
+        {
+            return Ok(state);
+        }
+        self.save_session_name(key, state, session_id, name, model, provider)
+    }
+
+    fn save_session_name(
+        &self,
+        key: &SessionKey,
+        mut state: ChatSession,
+        session_id: &str,
+        name: &str,
+        model: &str,
+        provider: Provider,
+    ) -> Result<ChatSession, String> {
+        state.updated_at = now_string();
+        state.sessions = upsert_session(
+            state.sessions,
+            SavedSession {
+                id: session_id.to_string(),
+                name: Some(name.trim().to_string()),
+                model: model.trim().to_string(),
+                provider,
+                updated_at: state.updated_at.clone(),
+            },
+            &self.default_model,
+        );
+        self.save(key, &state)?;
+        Ok(state)
+    }
+
     pub fn save_current_session(
         &self,
         key: &SessionKey,
@@ -253,6 +315,14 @@ impl SessionStore {
             },
         )
     }
+}
+
+fn saved_session_name<'a>(sessions: &'a [SavedSession], session_id: &str) -> Option<&'a str> {
+    sessions
+        .iter()
+        .find(|session| session.id == session_id)
+        .and_then(|session| session.name.as_deref())
+        .filter(|name| !name.trim().is_empty())
 }
 
 pub fn upsert_session(

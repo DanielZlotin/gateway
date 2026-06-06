@@ -31,11 +31,18 @@ const GATEWAY_UPDATE_SCRIPT: &str = r#"gateway_update_label="$1"
 gateway_update_lock="$2"
 gateway_update_root="$3"
 gateway_update_log="${gateway_update_lock:h}/logs/update.log"
+set -o pipefail
 mkdir -p "${gateway_update_log:h}"
 print -r -- "$$" > "$gateway_update_lock"
 {
   print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] starting gateway update"
-  cd "$gateway_update_root" && git pull && ./setup
+  cd "$gateway_update_root" &&
+    git pull &&
+    brew update &&
+    brew upgrade &&
+    brew cleanup &&
+    (curl -sSfL "https://raw.githubusercontent.com/foundry-rs/foundry/refs/heads/master/foundryup/foundryup" | bash) &&
+    ./setup
   gateway_update_code=$?
   print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] gateway update exited $gateway_update_code"
 } >>"$gateway_update_log" 2>&1
@@ -422,7 +429,11 @@ fn message_attachment_specs(msg: &Message) -> Vec<AttachmentSpec> {
         });
     }
     if let Some(document) = msg.document.as_ref() {
-        let kind = if document.mime_type.to_ascii_lowercase().starts_with("image/") {
+        let kind = if document
+            .mime_type
+            .to_ascii_lowercase()
+            .starts_with("image/")
+        {
             AttachmentKind::Image
         } else {
             AttachmentKind::File
@@ -480,10 +491,9 @@ fn download_message_attachments(
     let mut image_paths = Vec::new();
     let mut file_paths = Vec::new();
     for (index, attachment) in attachments.iter().enumerate() {
-        let path = dir.path().join(local_attachment_file_name(
-            index,
-            &attachment.file_name,
-        ));
+        let path = dir
+            .path()
+            .join(local_attachment_file_name(index, &attachment.file_name));
         tg.download_file(&attachment.file_id, &path)?;
         match attachment.kind {
             AttachmentKind::Image => image_paths.push(path),
@@ -638,6 +648,7 @@ fn handle_message(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_command(
     cfg: &Config,
     tg: &impl TelegramApi,
@@ -662,6 +673,7 @@ fn handle_command(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_command_with_codex(
     cfg: &Config,
     codex: &CodexConfig,
@@ -1061,89 +1073,85 @@ fn auto_rename_startup_session(
 fn auto_rename_session(
     cfg: &Config,
     codex: &CodexConfig,
-    tg: &impl TelegramApi,
+    _tg: &impl TelegramApi,
     store: &SessionStore,
     chat_id: i64,
-    reply_to_message_id: i64,
+    _reply_to_message_id: i64,
     key: &SessionKey,
 ) -> Result<bool, String> {
     let state = store.load(key);
     if state.session_id.is_none() {
-        return tg
-            .send_message(
-                chat_id,
-                "🏷️ No current session to rename. Send a normal message first.",
-                reply_to_message_id,
-            )
-            .map(|_| false);
+        return Ok(false);
     }
-    tg.send_message(chat_id, "🏷️ Naming current session…", reply_to_message_id)?;
+    let cfg = cfg.clone();
+    let codex = codex.clone();
+    let store = store.clone();
+    let key = key.clone();
+    thread::spawn(move || {
+        if let Err(err) = auto_rename_session_in_background(&cfg, &codex, &store, &key, state) {
+            logs::warn(format_args!(
+                "telegram auto session rename failed for chat {chat_id}: {err}"
+            ));
+        }
+    });
+    Ok(true)
+}
+
+fn auto_rename_session_in_background(
+    cfg: &Config,
+    codex: &CodexConfig,
+    store: &SessionStore,
+    key: &SessionKey,
+    state: crate::session::ChatSession,
+) -> Result<(), String> {
+    let session_id = state
+        .session_id
+        .as_deref()
+        .ok_or_else(|| "no current session to rename".to_string())?;
+    let previous_name = state
+        .saved_session_name(session_id)
+        .map(ToString::to_string);
     let output = match run_codex(
         codex,
         AUTO_RENAME_PROMPT,
-        state.session_id.as_deref(),
+        Some(session_id),
         Provider::Codex,
         LIGHTWEIGHT_CODEX_MODEL,
         cfg.codex_timeout,
         &cfg.state_dir,
     ) {
         Ok(output) => output,
-        Err(err) => {
-            return tg
-                .send_message(
-                    chat_id,
-                    &format!("⚠️ Failed to rename session: {err}"),
-                    reply_to_message_id,
-                )
-                .map(|_| false)
-        }
+        Err(err) => return Err(format!("run Codex title prompt: {err}")),
     };
     let Some(name) = auto_session_name(&output.final_text) else {
-        return tg
-            .send_message(
-                chat_id,
-                "⚠️ Failed to rename session: Codex returned an invalid session name.",
-                reply_to_message_id,
-            )
-            .map(|_| false);
+        return Err("Codex returned an invalid session name".to_string());
     };
-    if let Some(session_id) = output.session_id.as_deref() {
-        if let Err(err) = store.save_current_session(key, state.generation, session_id) {
-            return tg
-                .send_message(
-                    chat_id,
-                    &format!("⚠️ Failed to save renamed session: {err}"),
-                    reply_to_message_id,
-                )
-                .map(|_| false);
-        }
-    }
-    rename_current_session_for_chat(tg, store, chat_id, reply_to_message_id, key, &name)
-}
 
-fn rename_current_session_for_chat(
-    tg: &impl TelegramApi,
-    store: &SessionStore,
-    chat_id: i64,
-    reply_to_message_id: i64,
-    key: &SessionKey,
-    name: &str,
-) -> Result<bool, String> {
-    match store.rename_current(key, name) {
-        Ok(state) => tg
-            .send_message(
-                chat_id,
-                &format!(
-                    "🏷️ Renamed session {} to \"{name}\".",
-                    session_label(state.session_id.as_deref().unwrap_or(""))
-                ),
-                reply_to_message_id,
-            )
-            .map(|_| true),
-        Err(err) => tg
-            .send_message(chat_id, &err, reply_to_message_id)
-            .map(|_| false),
-    }
+    let target_session_id = match output.session_id.as_deref() {
+        Some(output_session_id) => {
+            if store.save_current_session(key, state.generation, output_session_id)? {
+                output_session_id.to_string()
+            } else {
+                session_id.to_string()
+            }
+        }
+        None => session_id.to_string(),
+    };
+
+    let expected_name = if target_session_id == session_id {
+        previous_name.as_deref()
+    } else {
+        None
+    };
+    store.rename_session_if_name_unchanged(
+        key,
+        &target_session_id,
+        expected_name,
+        &name,
+        &state.model,
+        state.provider,
+    )?;
+    Ok(())
 }
 
 const AUTO_RENAME_PROMPT: &str = "Create a concise name for this session. Return only the name, with no quotes, prefixes, markdown, or explanation. Use a lowercase single-word name, or if multiple words are necessary, use a lowercase hyphenated name like session-name.";
@@ -1178,17 +1186,37 @@ fn rename_session(
     key: &SessionKey,
     name: &str,
 ) -> Result<(), String> {
-    match store.rename_current(key, name) {
-        Ok(state) => tg.send_message(
-            msg.chat.id,
-            &format!(
-                "🏷️ Renamed session {} to \"{name}\".",
-                session_label(state.session_id.as_deref().unwrap_or(""))
-            ),
-            msg.message_id,
-        ),
-        Err(err) => tg.send_message(msg.chat.id, &err, msg.message_id),
-    }
+    let state = store.load(key);
+    let store = store.clone();
+    let key = key.clone();
+    let name = name.to_string();
+    let chat_id = msg.chat.id;
+    thread::spawn(move || {
+        if let Err(err) = rename_session_in_background(&store, &key, state, &name) {
+            logs::warn(format_args!(
+                "telegram explicit session rename failed for chat {chat_id}: {err}"
+            ));
+        }
+    });
+    react_ok(tg, msg.chat.id, msg.message_id)
+}
+
+fn rename_session_in_background(
+    store: &SessionStore,
+    key: &SessionKey,
+    state: crate::session::ChatSession,
+    name: &str,
+) -> Result<(), String> {
+    let session_id = state
+        .session_id
+        .as_deref()
+        .ok_or_else(|| "no current session to rename".to_string())?;
+    store.rename_session(key, session_id, name, &state.model, state.provider)?;
+    Ok(())
+}
+
+fn react_ok(tg: &impl TelegramApi, chat_id: i64, message_id: i64) -> Result<(), String> {
+    tg.set_message_reaction(chat_id, message_id, "👍")
 }
 
 fn handle_status_command(
@@ -1364,7 +1392,7 @@ fn run_job_with_codex(
     match final_delivery(&output.final_text) {
         FinalDelivery::Reaction => {
             let _ = tg.delete_message(job.chat_id, stream_message_id);
-            tg.set_message_reaction(job.chat_id, job.reply_to_message_id, "👍")
+            react_ok(tg, job.chat_id, job.reply_to_message_id)
         }
         FinalDelivery::Message(final_text) => {
             let final_text = redact_private_data(&final_text);
@@ -1547,7 +1575,7 @@ fn send_long_message(
 fn handle_update_command(cfg: &Config, tg: &impl TelegramApi, msg: &Message) -> Result<(), String> {
     let message = match start_gateway_update(cfg) {
         Ok(GatewayUpdateStart::Started) => {
-            "⬆️ Updating gateway in the background. Running `git pull`, then `./setup`. Details go to `gateway/logs/update.log`.".to_string()
+            "⬆️ Updating gateway in the background. Running `git pull`, Homebrew maintenance, Foundry update, then `./setup`. Details go to `gateway/logs/update.log`.".to_string()
         }
         Ok(GatewayUpdateStart::AlreadyRunning) => {
             "⏳ Gateway update already running. Details go to `gateway/logs/update.log`."
@@ -2291,6 +2319,7 @@ printf 'session id: session-12345678\n' >&2
             "/rename",
         )
         .unwrap();
+        assert_session_name_eventually(&store, &key, "session-12345678", "work");
         handle_command(&cfg, &tg, &store, &selections, &msg, "/list", "/list").unwrap();
         handle_command(&cfg, &tg, &store, &selections, &msg, "/stop", "/stop").unwrap();
         handle_command(&cfg, &tg, &store, &selections, &msg, "/help", "/help").unwrap();
@@ -2330,20 +2359,25 @@ printf 'session id: session-12345678\n' >&2
             .iter()
             .any(|text| text.contains("🔎 No saved session matches")));
         assert!(sent.iter().any(|text| text.contains("↩️ Resumed session")));
-        assert!(sent
+        assert!(!sent
             .iter()
             .any(|text| text.contains("🏷️ Naming current session")));
-        assert!(sent
+        assert!(!sent
             .iter()
             .any(|text| text.contains("invalid session name")));
-        assert!(sent.iter().any(|text| text.contains("🏷️ Renamed session")));
+        assert!(!sent.iter().any(|text| text.contains("🏷️ Renamed session")));
+        assert!(tg.calls().contains(&Call::Reaction {
+            chat_id: 42,
+            message_id: 10,
+            emoji: "👍".to_string(),
+        }));
         assert!(sent.iter().any(|text| text.contains("💾 Saved sessions:")));
         assert!(sent
             .iter()
             .any(|text| text.contains("🛑") && text.contains("queued work")));
         assert!(sent.iter().any(|text| text.contains("/status")));
         assert!(sent.iter().any(|text| text
-            == "⬆️ Updating gateway in the background. Running `git pull`, then `./setup`. Details go to `gateway/logs/update.log`."));
+            == "⬆️ Updating gateway in the background. Running `git pull`, Homebrew maintenance, Foundry update, then `./setup`. Details go to `gateway/logs/update.log`."));
         assert!(!sent.iter().any(|text| text.contains("/commands")));
         assert!(!sent
             .iter()
@@ -2413,9 +2447,28 @@ printf 'session id: session-12345678\n' >&2
         assert!(script.contains("gateway_update_lock=\"$2\""));
         assert!(script.contains("gateway_update_root=\"$3\""));
         assert!(script.contains("print -r -- \"$$\" > \"$gateway_update_lock\""));
-        assert!(script.contains("cd \"$gateway_update_root\" && git pull && ./setup"));
+        assert!(script.contains("set -o pipefail"));
+        assert!(script.contains("brew update"));
+        assert!(script.contains("brew upgrade"));
+        assert!(script.contains("brew cleanup"));
+        assert!(script.contains("https://raw.githubusercontent.com/foundry-rs/foundry/refs/heads/master/foundryup/foundryup"));
+        assert!(script.contains("git pull"));
+        assert!(script.contains("./setup"));
         assert!(script.contains("gateway_update_code=$?"));
         assert!(script.contains("gateway_update_log=\"${gateway_update_lock:h}/logs/update.log\""));
+        let git_pull = script.find("git pull").unwrap();
+        let brew_update = script.find("brew update").unwrap();
+        let brew_upgrade = script.find("brew upgrade").unwrap();
+        let brew_cleanup = script.find("brew cleanup").unwrap();
+        let foundry_update = script
+            .find("https://raw.githubusercontent.com/foundry-rs/foundry/refs/heads/master/foundryup/foundryup")
+            .unwrap();
+        let setup = script.find("./setup").unwrap();
+        assert!(git_pull < brew_update);
+        assert!(brew_update < brew_upgrade);
+        assert!(brew_upgrade < brew_cleanup);
+        assert!(brew_cleanup < foundry_update);
+        assert!(foundry_update < setup);
         let lock_cleanup = script.find("rm -f \"$gateway_update_lock\"").unwrap();
         let label_cleanup = script
             .find("/bin/launchctl remove \"$gateway_update_label\"")
@@ -2485,7 +2538,7 @@ printf 'session id: session-12345678\n' >&2
     }
 
     #[test]
-    fn rename_without_name_asks_codex_for_session_name() {
+    fn rename_without_name_starts_auto_rename_without_waiting_or_sending_telegram() {
         let dir = tempdir().unwrap();
         let cfg = test_config(dir.path());
         let codex = test_codex_config(
@@ -2493,6 +2546,7 @@ printf 'session id: session-12345678\n' >&2
             executable(
                 dir.path().join("codex-title"),
                 r#"#!/bin/sh
+sleep 0.3
 printf '%s\n' "$@" > codex-title.args
 out=""
 prev=""
@@ -2521,6 +2575,7 @@ printf 'session id: aaaaaaaa-current\n' >&2
         let selections = RuntimeSelections::default();
         let msg = message(42, 10, "/rename");
 
+        let started = Instant::now();
         handle_command_with_codex(
             &cfg,
             &codex,
@@ -2533,8 +2588,9 @@ printf 'session id: aaaaaaaa-current\n' >&2
         )
         .unwrap();
 
-        let state = store.load(&key);
-        assert_eq!(state.sessions[0].name.as_deref(), Some("session-name"));
+        assert!(started.elapsed() < Duration::from_millis(250));
+        assert_no_auto_rename_telegram(&tg);
+        assert_session_name_eventually(&store, &key, "aaaaaaaa-current", "session-name");
         let args = fs::read_to_string(dir.path().join("codex-title.args")).unwrap();
         assert!(args
             .lines()
@@ -2544,14 +2600,63 @@ printf 'session id: aaaaaaaa-current\n' >&2
         let prompt = fs::read_to_string(dir.path().join("codex-title.prompt")).unwrap();
         assert!(prompt.contains("lowercase single-word"));
         assert!(prompt.contains("session-name"));
-        assert!(tg
-            .sent_text()
-            .iter()
-            .any(|text| text.contains("🏷️ Renamed session aaaaaaaa to \"session-name\".")));
     }
 
     #[test]
-    fn status_auto_renames_unnamed_current_session() {
+    fn rename_without_name_auto_renames_even_when_current_session_already_named() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let codex = test_codex_config(
+            &cfg,
+            executable(
+                dir.path().join("codex-retitle"),
+                r#"#!/bin/sh
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--output-last-message" ]; then out="$arg"; fi
+  prev="$arg"
+done
+cat >/dev/null
+printf 'refreshed-name\n' > "$out"
+printf 'session id: aaaaaaaa-current\n' >&2
+"#,
+            ),
+        );
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let key = SessionKey::Chat {
+            chat_id: 42,
+            thread_id: None,
+        };
+        assert!(store
+            .save_current_session(&key, 0, "aaaaaaaa-current")
+            .unwrap());
+        store.rename_current(&key, "old-name").unwrap();
+        let tg = FakeTelegram::new();
+        let selections = RuntimeSelections::default();
+        let msg = message(42, 10, "/rename");
+
+        handle_command_with_codex(
+            &cfg,
+            &codex,
+            &tg,
+            &store,
+            &selections,
+            &msg,
+            "/rename",
+            "/rename",
+        )
+        .unwrap();
+
+        assert_no_auto_rename_telegram(&tg);
+        assert_session_name_eventually(&store, &key, "aaaaaaaa-current", "refreshed-name");
+    }
+
+    #[test]
+    fn status_starts_auto_rename_without_waiting_or_sending_rename_messages() {
         let dir = tempdir().unwrap();
         let cfg = test_config(dir.path());
         let codex = test_codex_config(
@@ -2559,6 +2664,7 @@ printf 'session id: aaaaaaaa-current\n' >&2
             executable(
                 dir.path().join("codex-status-title"),
                 r#"#!/bin/sh
+sleep 0.3
 out=""
 prev=""
 for arg in "$@"; do
@@ -2598,19 +2704,16 @@ printf 'session id: aaaaaaaa-current\n' >&2
         )
         .unwrap();
 
-        let state = store.load(&key);
-        assert_eq!(state.sessions[0].name.as_deref(), Some("status-name"));
         let sent = tg.sent_text();
+        assert_no_auto_rename_telegram(&tg);
         assert!(sent
             .iter()
-            .any(|text| text.contains("🏷️ Naming current session")));
-        assert!(sent
-            .iter()
-            .any(|text| text.contains("🧵 Session: aaaaaaaa (status-name)")));
+            .any(|text| text.contains("🧵 Session: aaaaaaaa")));
+        assert_session_name_eventually(&store, &key, "aaaaaaaa-current", "status-name");
     }
 
     #[test]
-    fn startup_status_auto_renames_unnamed_current_session() {
+    fn startup_starts_auto_rename_without_waiting_or_sending_telegram() {
         let dir = tempdir().unwrap();
         let cfg = test_config(dir.path());
         let codex = test_codex_config(
@@ -2618,6 +2721,7 @@ printf 'session id: aaaaaaaa-current\n' >&2
             executable(
                 dir.path().join("codex-startup-title"),
                 r#"#!/bin/sh
+sleep 0.3
 out=""
 prev=""
 for arg in "$@"; do
@@ -2643,16 +2747,12 @@ printf 'session id: aaaaaaaa-current\n' >&2
             .unwrap());
         let tg = FakeTelegram::new();
 
+        let started = Instant::now();
         assert!(auto_rename_startup_session(&cfg, &codex, &tg, &store, 42, &key).unwrap());
 
-        let state = store.load(&key);
-        assert_eq!(state.sessions[0].name.as_deref(), Some("startup-name"));
-        assert!(tg.calls().iter().any(|call| {
-            matches!(call, Call::Send { reply_to: 0, text, .. } if text.contains("🏷️ Naming current session"))
-        }));
-        assert!(tg.calls().iter().any(|call| {
-            matches!(call, Call::Send { reply_to: 0, text, .. } if text.contains("🏷️ Renamed session aaaaaaaa to \"startup-name\"."))
-        }));
+        assert!(started.elapsed() < Duration::from_millis(250));
+        assert_no_auto_rename_telegram(&tg);
+        assert_session_name_eventually(&store, &key, "aaaaaaaa-current", "startup-name");
     }
 
     #[test]
@@ -2673,6 +2773,7 @@ done
 cat >/dev/null
 printf 'Generated Session Name\n' > "$out"
 printf 'session id: aaaaaaaa-current\n' >&2
+printf done > codex-invalid-title.done
 "#,
             ),
         );
@@ -2703,12 +2804,130 @@ printf 'session id: aaaaaaaa-current\n' >&2
         )
         .unwrap();
 
+        assert_file_eventually(&dir.path().join("codex-invalid-title.done"));
         let state = store.load(&key);
         assert_eq!(state.sessions[0].name, None);
-        assert!(tg
-            .sent_text()
+        assert_no_auto_rename_telegram(&tg);
+    }
+
+    #[test]
+    fn rename_with_name_reacts_without_sending_telegram_and_overwrites_existing_name() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let key = SessionKey::Chat {
+            chat_id: 42,
+            thread_id: None,
+        };
+        assert!(store
+            .save_current_session(&key, 0, "aaaaaaaa-current")
+            .unwrap());
+        store.rename_current(&key, "old-name").unwrap();
+        let tg = FakeTelegram::new();
+        let selections = RuntimeSelections::default();
+        let msg = message(42, 10, "/rename new-name");
+
+        handle_command(
+            &cfg,
+            &tg,
+            &store,
+            &selections,
+            &msg,
+            "/rename new-name",
+            "/rename",
+        )
+        .unwrap();
+
+        assert!(tg.sent_text().is_empty());
+        assert!(tg.calls().contains(&Call::Reaction {
+            chat_id: 42,
+            message_id: 10,
+            emoji: "👍".to_string(),
+        }));
+        assert_session_name_eventually(&store, &key, "aaaaaaaa-current", "new-name");
+    }
+
+    #[test]
+    fn explicit_rename_wins_over_pending_auto_rename() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let codex = test_codex_config(
+            &cfg,
+            executable(
+                dir.path().join("codex-manual-title"),
+                r#"#!/bin/sh
+sleep 0.3
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--output-last-message" ]; then out="$arg"; fi
+  prev="$arg"
+done
+cat >/dev/null
+printf 'auto-name\n' > "$out"
+printf 'session id: aaaaaaaa-current\n' >&2
+printf done > codex-manual-title.done
+"#,
+            ),
+        );
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let key = SessionKey::Chat {
+            chat_id: 42,
+            thread_id: None,
+        };
+        assert!(store
+            .save_current_session(&key, 0, "aaaaaaaa-current")
+            .unwrap());
+        let tg = FakeTelegram::new();
+        let selections = RuntimeSelections::default();
+        let msg = message(42, 10, "/rename");
+
+        handle_command_with_codex(
+            &cfg,
+            &codex,
+            &tg,
+            &store,
+            &selections,
+            &msg,
+            "/rename",
+            "/rename",
+        )
+        .unwrap();
+        handle_command(
+            &cfg,
+            &tg,
+            &store,
+            &selections,
+            &message(42, 11, "/rename manual"),
+            "/rename manual",
+            "/rename",
+        )
+        .unwrap();
+
+        assert_file_eventually(&dir.path().join("codex-manual-title.done"));
+        assert_session_name_remains_for(
+            &store,
+            &key,
+            "aaaaaaaa-current",
+            "manual",
+            Duration::from_millis(300),
+        );
+        let sent = tg.sent_text();
+        assert!(!sent
             .iter()
-            .any(|text| text.contains("invalid session name")));
+            .any(|text| text.contains("🏷️ Naming current session")));
+        assert!(!sent.iter().any(|text| text.contains("🏷️ Renamed session")));
+        assert!(tg.calls().contains(&Call::Reaction {
+            chat_id: 42,
+            message_id: 11,
+            emoji: "👍".to_string(),
+        }));
     }
 
     #[test]
@@ -2730,7 +2949,7 @@ printf 'session id: aaaaaaaa-current\n' >&2
     }
 
     #[test]
-    fn new_auto_renames_current_unnamed_session_before_reset() {
+    fn new_starts_auto_rename_without_waiting_before_reset() {
         let dir = tempdir().unwrap();
         let cfg = test_config(dir.path());
         let codex = test_codex_config(
@@ -2738,6 +2957,7 @@ printf 'session id: aaaaaaaa-current\n' >&2
             executable(
                 dir.path().join("codex-title-new"),
                 r#"#!/bin/sh
+sleep 0.3
 out=""
 prev=""
 for arg in "$@"; do
@@ -2765,27 +2985,19 @@ printf 'session id: aaaaaaaa-current\n' >&2
         let selections = RuntimeSelections::default();
         let msg = message(42, 10, "/new");
 
+        let started = Instant::now();
         handle_command_with_codex(&cfg, &codex, &tg, &store, &selections, &msg, "/new", "/new")
             .unwrap();
 
+        assert!(started.elapsed() < Duration::from_millis(250));
         let state = store.load(&key);
         assert_eq!(state.session_id, None);
-        let saved = state
-            .sessions
-            .iter()
-            .find(|session| session.id == "aaaaaaaa-current")
-            .unwrap();
-        assert_eq!(saved.name.as_deref(), Some("session-name"));
         let sent = tg.sent_text();
-        assert!(sent
-            .iter()
-            .any(|text| text.contains("🏷️ Naming current session")));
-        assert!(sent
-            .iter()
-            .any(|text| text.contains("🏷️ Renamed session aaaaaaaa to \"session-name\".")));
+        assert_no_auto_rename_telegram(&tg);
         assert!(sent
             .iter()
             .any(|text| text.contains("🆕 New session ready")));
+        assert_session_name_eventually(&store, &key, "aaaaaaaa-current", "session-name");
     }
 
     #[test]
@@ -2969,7 +3181,12 @@ printf 'session id: aaaaaaaa-current\n' >&2
         assert!(sent
             .iter()
             .any(|text| text.contains("⚠️ Failed to reset session")));
-        assert!(sent.iter().any(|text| text.contains("No current session")));
+        assert!(!sent.iter().any(|text| text.contains("No current session")));
+        assert!(tg.calls().contains(&Call::Reaction {
+            chat_id: 42,
+            message_id: 10,
+            emoji: "👍".to_string(),
+        }));
     }
 
     #[test]
@@ -3659,6 +3876,82 @@ exit 2
         job: Job,
     ) -> Result<(), String> {
         super::run_job_with_codex(cfg, codex, tg, store, &CancellationState::default(), job)
+    }
+
+    fn assert_no_auto_rename_telegram(tg: &FakeTelegram) {
+        let sent = tg.sent_text();
+        assert!(
+            !sent.iter().any(|text| {
+                text.contains("🏷️ Naming current session")
+                    || text.contains("🏷️ Renamed session")
+                    || text.contains("⚠️ Failed to rename session")
+                    || text.contains("⚠️ Failed to save renamed session")
+                    || text.contains("🏷️ No current session to rename")
+            }),
+            "unexpected auto-rename telegram messages: {sent:?}"
+        );
+    }
+
+    const ASYNC_RENAME_TEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+    fn assert_session_name_eventually(
+        store: &SessionStore,
+        key: &SessionKey,
+        session_id: &str,
+        expected_name: &str,
+    ) {
+        let deadline = Instant::now() + ASYNC_RENAME_TEST_TIMEOUT;
+        loop {
+            let state = store.load(key);
+            if state.sessions.iter().any(|session| {
+                session.id == session_id && session.name.as_deref() == Some(expected_name)
+            }) {
+                return;
+            }
+            if Instant::now() >= deadline {
+                panic!(
+                    "session {session_id} was not renamed to {expected_name}: {:?}",
+                    state.sessions
+                );
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn assert_file_eventually(path: &Path) {
+        let deadline = Instant::now() + ASYNC_RENAME_TEST_TIMEOUT;
+        loop {
+            if path.exists() {
+                return;
+            }
+            if Instant::now() >= deadline {
+                panic!("file was not created: {}", path.display());
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn assert_session_name_remains_for(
+        store: &SessionStore,
+        key: &SessionKey,
+        session_id: &str,
+        expected_name: &str,
+        duration: Duration,
+    ) {
+        let deadline = Instant::now() + duration;
+        loop {
+            let state = store.load(key);
+            let actual = state
+                .sessions
+                .iter()
+                .find(|session| session.id == session_id)
+                .and_then(|session| session.name.as_deref());
+            assert_eq!(actual, Some(expected_name), "session name changed");
+            if Instant::now() >= deadline {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]

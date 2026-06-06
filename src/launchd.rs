@@ -76,6 +76,11 @@ pub fn uninstall() -> Result<String, String> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    const SETUP_LOCAL_TOOLS: &[&str] = &[
+        "awk", "fzf", "gh", "git", "go", "node", "parallel", "rg", "rustc", "sed", "xargs",
+    ];
 
     #[test]
     fn launch_script_runs_with_environment_loaded_by_zshenv() {
@@ -191,32 +196,24 @@ mod tests {
         let launchctl_log = root.join("launchctl.log");
 
         fs::create_dir_all(&stub_dir).unwrap();
-        for name in ["cargo", "codex", "fastfetch"] {
-            let path = stub_dir.join(name);
-            fs::write(&path, "#!/bin/zsh\nexit 0\n").unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        for name in ["cargo", "codex", "fastfetch"]
+            .into_iter()
+            .chain(SETUP_LOCAL_TOOLS.iter().copied())
+        {
+            write_executable(&stub_dir.join(name), "#!/bin/zsh\nexit 0\n");
         }
-        let launchctl = stub_dir.join("launchctl");
-        fs::write(
-            &launchctl,
+        write_executable(&stub_dir.join("jq"), "#!/bin/zsh\nprint -r -- \"$4\"\n");
+        write_executable(
+            &stub_dir.join("launchctl"),
             "#!/bin/zsh\nprint -- \"$*\" >> \"$GATEWAY_TEST_LAUNCHCTL_LOG\"\nexit 0\n",
-        )
-        .unwrap();
-        fs::set_permissions(&launchctl, fs::Permissions::from_mode(0o700)).unwrap();
-        let sleep = stub_dir.join("sleep");
-        fs::write(
-            &sleep,
+        );
+        write_executable(
+            &stub_dir.join("sleep"),
             "#!/bin/zsh\nprint -- \"sleep $*\" >> \"$GATEWAY_TEST_LAUNCHCTL_LOG\"\nexit 0\n",
-        )
-        .unwrap();
-        fs::set_permissions(&sleep, fs::Permissions::from_mode(0o700)).unwrap();
+        );
 
         let setup = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("setup");
-        let path = format!(
-            "{}:{}",
-            stub_dir.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
+        let path = format!("{}:/bin:/usr/bin", stub_dir.display());
         let output = Command::new("/bin/zsh")
             .arg(setup)
             .env_clear()
@@ -243,6 +240,28 @@ mod tests {
         assert!(launchctl_log.contains("bootout"));
         assert!(launchctl_log.contains("sleep 1\nbootstrap"));
         assert!(launchctl_log.contains("sleep 1\nkickstart"));
+    }
+
+    #[test]
+    fn setup_checks_local_tools() {
+        let setup =
+            fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("setup")).unwrap();
+
+        for name in SETUP_LOCAL_TOOLS {
+            assert!(
+                setup.contains(&format!("  {name}\n")),
+                "setup should require {name}"
+            );
+        }
+        assert!(
+            !setup.contains("  rust\n"),
+            "setup should require the rustc command, not a nonexistent rust command"
+        );
+    }
+
+    fn write_executable(path: &Path, contents: &str) {
+        fs::write(path, contents).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     fn assert_gateway_log_format(log: &str, version: &str) {

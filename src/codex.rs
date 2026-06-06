@@ -51,6 +51,7 @@ pub const LIGHTWEIGHT_CODEX_MODEL: &str = "gpt-5.4-mini";
 
 const GATEWAY_DEVELOPER_INSTRUCTIONS: &str = include_str!("SYSTEM.md");
 
+#[allow(clippy::too_many_arguments)]
 pub fn codex_args(
     out_path: &Path,
     session_id: Option<&str>,

@@ -8,17 +8,28 @@ gateway_root="${0:A:h}"
 : "${PATH:?PATH is required}"
 
 gateway_required_commands=(
+  awk
   cargo
   codex
   date
   fastfetch
+  fzf
+  gh
+  git
+  go
   id
   jq
   launchctl
   mkdir
   mv
+  node
+  parallel
+  rg
   rm
+  rustc
+  sed
   sleep
+  xargs
 )
 gateway_missing_commands=()
 

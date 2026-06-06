@@ -86,10 +86,7 @@ fn redact_sensitive_assignment(line: &str) -> String {
     if line.contains("<redacted>") {
         return line.to_string();
     }
-    let Some((index, separator)) = line
-        .char_indices()
-        .find(|(_, ch)| matches!(ch, '=' | ':'))
-        .map(|(index, ch)| (index, ch))
+    let Some((index, separator)) = line.char_indices().find(|(_, ch)| matches!(ch, '=' | ':'))
     else {
         return line.to_string();
     };

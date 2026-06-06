@@ -85,7 +85,7 @@ pub const DIRECTIVE_SPECS: &[DirectiveSpec] = &[
         directive: Directive::Update,
         icon: "📦",
         usage: "",
-        summary: "pull latest gateway code and run setup",
+        summary: "pull latest gateway code, update Brew/Foundry, and run setup",
     },
     DirectiveSpec {
         directive: Directive::Model,

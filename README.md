@@ -108,7 +108,7 @@ Sessions are kept separately per chat, and commands are case-insensitive.
 📜 /log [lines] - send recent gateway logs
 ✨ /new - start a fresh Codex session
 🔁 /restart - restart the gateway service
-📦 /update - pull latest gateway code and run setup
+📦 /update - pull latest gateway code, update Brew/Foundry, and run setup
 🧠 /model [index] - choose a configured provider/model
 ↩️ /resume [SESSION_OR_NAME|index] - list or resume a saved session
 🏷️ /rename [NAME] - rename the current session
