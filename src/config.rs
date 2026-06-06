@@ -10,6 +10,7 @@ use std::time::Duration;
 pub const GATEWAY_TELEGRAM_TOKEN_ENV: &str = "GATEWAY_TELEGRAM_TOKEN";
 pub const GATEWAY_TELEGRAM_CHAT_ID_ENV: &str = "GATEWAY_TELEGRAM_CHAT_ID";
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.5";
+pub const DEFAULT_LIGHT_CODEX_MODEL: &str = "gpt-5.4-mini";
 pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-4-8";
 pub const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-5.5";
 pub const DEFAULT_CODEX_TIMEOUT_MINS: u64 = 30;
@@ -56,6 +57,29 @@ pub struct GatewayConfigFile {
 pub struct ProviderModel {
     pub provider: Provider,
     pub model: String,
+    #[serde(default, skip_serializing_if = "ModelRole::is_default")]
+    pub role: ModelRole,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelRole {
+    #[default]
+    Default,
+    Light,
+}
+
+impl ModelRole {
+    pub const fn is_default(&self) -> bool {
+        matches!(self, Self::Default)
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Light => "light",
+        }
+    }
 }
 
 pub fn current_env() -> BTreeMap<String, String> {
@@ -284,14 +308,22 @@ pub fn default_models() -> Vec<ProviderModel> {
         ProviderModel {
             provider: Provider::Codex,
             model: DEFAULT_CODEX_MODEL.to_string(),
+            role: ModelRole::Default,
+        },
+        ProviderModel {
+            provider: Provider::Codex,
+            model: DEFAULT_LIGHT_CODEX_MODEL.to_string(),
+            role: ModelRole::Light,
         },
         ProviderModel {
             provider: Provider::Claude,
             model: DEFAULT_CLAUDE_MODEL.to_string(),
+            role: ModelRole::Default,
         },
         ProviderModel {
             provider: Provider::Openrouter,
             model: DEFAULT_OPENROUTER_MODEL.to_string(),
+            role: ModelRole::Default,
         },
     ]
 }
@@ -321,8 +353,17 @@ impl Config {
 
     pub fn default_provider_model(&self) -> &ProviderModel {
         self.models
-            .first()
+            .iter()
+            .find(|model| model.role == ModelRole::Default)
+            .or_else(|| self.models.first())
             .expect("gateway config normalization ensures at least one model")
+    }
+
+    pub fn light_provider_model(&self) -> &ProviderModel {
+        self.models
+            .iter()
+            .find(|model| model.role == ModelRole::Light)
+            .unwrap_or_else(|| self.default_provider_model())
     }
 
     pub fn provider_model_at(&self, index: usize) -> Option<&ProviderModel> {
@@ -337,6 +378,13 @@ fn normalize_models(models: &mut Vec<ProviderModel>) -> Result<(), String> {
     models.retain(|item| !item.model.is_empty());
     if models.is_empty() {
         return Err("gateway config must include at least one non-empty model".to_string());
+    }
+    if !models.iter().any(|item| item.role == ModelRole::Light) {
+        models.push(ProviderModel {
+            provider: Provider::Codex,
+            model: DEFAULT_LIGHT_CODEX_MODEL.to_string(),
+            role: ModelRole::Light,
+        });
     }
     Ok(())
 }
@@ -408,15 +456,23 @@ mod tests {
             vec![
                 ProviderModel {
                     provider: Provider::Codex,
-                    model: DEFAULT_CODEX_MODEL.to_string()
+                    model: DEFAULT_CODEX_MODEL.to_string(),
+                    role: ModelRole::Default,
+                },
+                ProviderModel {
+                    provider: Provider::Codex,
+                    model: DEFAULT_LIGHT_CODEX_MODEL.to_string(),
+                    role: ModelRole::Light,
                 },
                 ProviderModel {
                     provider: Provider::Claude,
-                    model: "claude-opus-4-8".to_string()
+                    model: "claude-opus-4-8".to_string(),
+                    role: ModelRole::Default,
                 },
                 ProviderModel {
                     provider: Provider::Openrouter,
-                    model: DEFAULT_OPENROUTER_MODEL.to_string()
+                    model: DEFAULT_OPENROUTER_MODEL.to_string(),
+                    role: ModelRole::Default,
                 }
             ]
         );
@@ -425,6 +481,7 @@ mod tests {
 
         let text = fs::read_to_string(&cfg.gateway_config_file).unwrap();
         assert!(text.contains(r#""models""#));
+        assert!(text.contains(r#""role": "light""#));
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert!(value.get("provider").is_none());
         assert!(!text.contains(r#""claude_model""#));
@@ -533,9 +590,11 @@ mod tests {
             cfg.default_provider_model(),
             &ProviderModel {
                 provider: Provider::Codex,
-                model: "gpt-test".to_string()
+                model: "gpt-test".to_string(),
+                role: ModelRole::Default,
             }
         );
+        assert_eq!(cfg.light_provider_model().model, DEFAULT_LIGHT_CODEX_MODEL);
         assert_eq!(cfg.queue_depth, 8);
         assert_eq!(cfg.codex_timeout, Duration::from_secs(9 * 60));
         assert_eq!(cfg.state_dir, cfg.xdg_state_home.join("gateway"));
@@ -610,15 +669,60 @@ mod tests {
 
         assert_eq!(
             cfg.models,
-            vec![ProviderModel {
-                provider: Provider::Claude,
-                model: "claude-test".to_string()
-            }]
+            vec![
+                ProviderModel {
+                    provider: Provider::Claude,
+                    model: "claude-test".to_string(),
+                    role: ModelRole::Default,
+                },
+                ProviderModel {
+                    provider: Provider::Codex,
+                    model: DEFAULT_LIGHT_CODEX_MODEL.to_string(),
+                    role: ModelRole::Light,
+                },
+            ]
         );
         let text = fs::read_to_string(&path).unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert!(value.get("provider").is_none());
         assert!(text.contains("\"timeout_mins\": 30"));
+    }
+
+    #[test]
+    fn model_roles_select_first_default_and_first_light() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gateway/config.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"models":[{"provider":"codex","model":"gpt-light","role":"light"},{"provider":"claude","model":"claude-default"},{"provider":"codex","model":"gpt-other","role":"default"},{"provider":"codex","model":"gpt-light-2","role":"light"}],"timeout_mins":30}"#,
+        )
+        .unwrap();
+        let env = {
+            let mut env = BTreeMap::new();
+            env.insert(GATEWAY_TELEGRAM_TOKEN_ENV.to_string(), "token".to_string());
+            env.insert(GATEWAY_TELEGRAM_CHAT_ID_ENV.to_string(), "42".to_string());
+            env.insert(
+                "XDG_CONFIG_HOME".to_string(),
+                dir.path().to_string_lossy().to_string(),
+            );
+            env.insert(
+                "HOME".to_string(),
+                dir.path().join("home").to_string_lossy().to_string(),
+            );
+            env
+        };
+
+        let cfg = load_from_env(&env).unwrap();
+
+        assert_eq!(cfg.default_provider_model().model, "claude-default");
+        assert_eq!(cfg.light_provider_model().model, "gpt-light");
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(
+            r#""model": "claude-default",
+      "role""#
+        ));
+        assert!(text.contains(r#""role": "light""#));
     }
 
     #[test]

@@ -56,6 +56,7 @@ Gateway reads `$XDG_CONFIG_HOME/gateway/config.json`; if missing, it creates:
 {
   "models": [
     { "provider": "codex", "model": "gpt-5.5" },
+    { "provider": "codex", "model": "gpt-5.4-mini", "role": "light" },
     { "provider": "claude", "model": "claude-opus-4-8" },
     { "provider": "openrouter", "model": "openai/gpt-5.5" }
   ],
@@ -66,9 +67,13 @@ Gateway reads `$XDG_CONFIG_HOME/gateway/config.json`; if missing, it creates:
 📋 Notes:
 
 1. 🤖 `provider` must be `codex`, `claude`, or `openrouter`.
-2. 🧠 The first model slot is the default for new sessions and `gateway run`.
-3. ⏱️ `timeout_mins` sets the per-prompt Codex timeout.
-4. 🧱 Existing config files must include `models`; `timeout_mins` defaults to
+2. 🧠 Missing `role` means `default`; the first default model is used for new
+   sessions and `gateway run`.
+3. 🪶 `role: "light"` marks the first lightweight model used for helper work
+   such as renaming and git summaries.
+4. 🧭 `/model` shows every configured model and marks each model role.
+5. ⏱️ `timeout_mins` sets the per-prompt Codex timeout.
+6. 🧱 Existing config files must include `models`; `timeout_mins` defaults to
    `30` when omitted.
 
 ## 🧰 CLI

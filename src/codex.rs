@@ -47,8 +47,6 @@ pub struct CodexRun<'a> {
     pub cancel: Option<Arc<AtomicBool>>,
 }
 
-pub const LIGHTWEIGHT_CODEX_MODEL: &str = "gpt-5.4-mini";
-
 const GATEWAY_DEVELOPER_INSTRUCTIONS: &str = include_str!("SYSTEM.md");
 
 #[allow(clippy::too_many_arguments)]
@@ -594,6 +592,7 @@ mod tests {
             models: vec![crate::config::ProviderModel {
                 provider: crate::provider::Provider::Codex,
                 model: "gpt-default".to_string(),
+                role: crate::config::ModelRole::Default,
             }],
             state_dir: PathBuf::from("/state/gateway"),
             chat_state_dir: PathBuf::from("/state/gateway/chats"),

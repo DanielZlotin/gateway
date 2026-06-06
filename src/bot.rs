@@ -1,8 +1,7 @@
-use crate::codex::{run_codex, run_codex_stream, CodexConfig, CodexRun, LIGHTWEIGHT_CODEX_MODEL};
+use crate::codex::{run_codex, run_codex_stream, CodexConfig, CodexRun};
 use crate::commands::{directive_from_command, is_allowed, unknown_directive_message, Directive};
 use crate::config::{Config, ProviderModel};
 use crate::logs;
-use crate::provider::Provider;
 use crate::session::{SessionKey, SessionStore};
 use crate::status::{format_status_message, status_sections};
 use crate::telegram::{CallbackQuery, InlineKeyboardButton, Message, TelegramClient, Update};
@@ -885,7 +884,12 @@ fn model_buttons(cfg: &Config) -> Vec<InlineKeyboardButton> {
 }
 
 fn provider_model_label(choice: &ProviderModel) -> String {
-    format!("{}: {}", choice.provider.label(), choice.model)
+    format!(
+        "{}: {} ({})",
+        choice.provider.label(),
+        choice.model,
+        choice.role.label()
+    )
 }
 
 fn selected_provider_model(
@@ -1119,12 +1123,13 @@ fn auto_rename_session_in_background(
     let previous_name = state
         .saved_session_name(session_id)
         .map(ToString::to_string);
+    let light_model = cfg.light_provider_model();
     let output = match run_codex(
         codex,
         AUTO_RENAME_PROMPT,
         Some(session_id),
-        Provider::Codex,
-        LIGHTWEIGHT_CODEX_MODEL,
+        light_model.provider,
+        &light_model.model,
         cfg.codex_timeout,
         &cfg.state_dir,
     ) {
@@ -1754,6 +1759,8 @@ pub const fn typing_refresh_interval() -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ModelRole;
+    use crate::provider::Provider;
     use crate::telegram::{Chat, Document, PhotoSize, User};
     use std::collections::VecDeque;
     use std::ffi::OsStr;
@@ -2621,7 +2628,7 @@ printf 'session id: aaaaaaaa-current\n' >&2
             .lines()
             .collect::<Vec<_>>()
             .windows(2)
-            .any(|pair| pair == ["-m", "gpt-5.4-mini"]));
+            .any(|pair| pair == ["-m", "gpt-light"]));
         let prompt = fs::read_to_string(dir.path().join("codex-title.prompt")).unwrap();
         assert!(prompt.contains("lowercase single-word"));
         assert!(prompt.contains("session-name"));
@@ -3046,12 +3053,13 @@ printf 'session id: aaaaaaaa-current\n' >&2
                     if text == "🤖 Select model:"
                         && buttons.iter().map(|button| button.text.as_str()).collect::<Vec<_>>()
                             == vec![
-                                "Codex: gpt-test",
-                                "Claude: claude-test",
-                                "OpenRouter: openrouter/test"
+                                "Codex: gpt-test (default)",
+                                "Claude: claude-test (default)",
+                                "OpenRouter: openrouter/test (default)",
+                                "Codex: gpt-light (light)"
                             ]
                         && buttons.iter().map(|button| button.callback_data.as_str()).collect::<Vec<_>>()
-                            == vec!["model:0", "model:1", "model:2"]
+                            == vec!["model:0", "model:1", "model:2", "model:3"]
             )
         }));
     }
@@ -3082,7 +3090,7 @@ printf 'session id: aaaaaaaa-current\n' >&2
         assert!(tg
             .sent_text()
             .iter()
-            .any(|text| text == "🧭 Usage: /model or /model 0..2"));
+            .any(|text| text == "🧭 Usage: /model or /model 0..3"));
     }
 
     #[test]
@@ -3144,7 +3152,7 @@ printf 'session id: aaaaaaaa-current\n' >&2
 
         assert!(tg.calls().contains(&Call::AnswerCallback {
             callback_query_id: "callback-1".to_string(),
-            text: "Selected OpenRouter: openrouter/test".to_string(),
+            text: "Selected OpenRouter: openrouter/test (default)".to_string(),
         }));
         let job = rx.recv().unwrap();
         assert_eq!(job.provider_model.provider, Provider::Openrouter);
@@ -4032,14 +4040,22 @@ exit 2
                 ProviderModel {
                     provider: Provider::Codex,
                     model: "gpt-test".to_string(),
+                    role: ModelRole::Default,
                 },
                 ProviderModel {
                     provider: Provider::Claude,
                     model: "claude-test".to_string(),
+                    role: ModelRole::Default,
                 },
                 ProviderModel {
                     provider: Provider::Openrouter,
                     model: "openrouter/test".to_string(),
+                    role: ModelRole::Default,
+                },
+                ProviderModel {
+                    provider: Provider::Codex,
+                    model: "gpt-light".to_string(),
+                    role: ModelRole::Light,
                 },
             ],
             state_dir: root.join("state/gateway"),
@@ -4113,6 +4129,7 @@ exit 2
             provider_model: ProviderModel {
                 provider: Provider::Codex,
                 model: "gpt-test".to_string(),
+                role: ModelRole::Default,
             },
             cancel_epoch: 0,
         }

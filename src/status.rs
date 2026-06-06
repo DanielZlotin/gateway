@@ -1,6 +1,5 @@
-use crate::codex::{run_codex, CodexConfig, LIGHTWEIGHT_CODEX_MODEL};
+use crate::codex::{run_codex, CodexConfig};
 use crate::config::Config;
-use crate::provider::Provider;
 use crate::session::ChatSession;
 use crate::text::{redact_private_data, session_label};
 use serde::Deserialize;
@@ -212,12 +211,13 @@ fn summarize_git_status_with_codex(
     let fallback = summarize_git_status_lines(lines);
     let input = git_summary_input(path, lines).unwrap_or_else(|_| lines.join("\n"));
     let prompt = git_summary_prompt(label, &input);
+    let light_model = cfg.light_provider_model();
     match run_codex(
         codex,
         &prompt,
         None,
-        Provider::Codex,
-        LIGHTWEIGHT_CODEX_MODEL,
+        light_model.provider,
+        &light_model.model,
         GIT_SUMMARY_TIMEOUT.min(cfg.codex_timeout),
         &cfg.state_dir,
     ) {

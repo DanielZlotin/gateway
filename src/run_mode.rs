@@ -441,6 +441,7 @@ printf 'done\n' > "$out"
             models: vec![crate::config::ProviderModel {
                 provider: crate::provider::Provider::Codex,
                 model: "gpt-test".to_string(),
+                role: crate::config::ModelRole::Default,
             }],
             state_dir: root.join("state/gateway"),
             chat_state_dir: root.join("state/gateway/chats"),

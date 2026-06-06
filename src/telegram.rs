@@ -628,8 +628,8 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "status", "update", "list", "new", "resume", "rename", "model", "log",
-                "restart", "stop",
+                "status", "update", "list", "new", "resume", "rename", "model", "log", "restart",
+                "stop",
             ]
         );
         assert!(!names.contains(&"config"));
