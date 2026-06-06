@@ -267,10 +267,23 @@ impl SessionStore {
             } else {
                 item.model.as_str()
             };
+            let provider = match item.provider {
+                Provider::Codex => "",
+                _ => item.provider.label(),
+            };
+            let show_model = item.provider != self.default_provider || model != self.default_model;
+            let provider_model = if show_model && !provider.is_empty() {
+                format!(" {provider} {model}")
+            } else if show_model {
+                format!(" {model}")
+            } else if !provider.is_empty() {
+                format!(" {provider}")
+            } else {
+                String::new()
+            };
             lines.push(format!(
-                "{}. {marker} {} {} {model} {name}",
+                "{}. {marker} {}{provider_model} {name}",
                 index + 1,
-                item.provider.label(),
                 session_label(&item.id)
             ));
         }
@@ -510,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn list_formats_current_and_default_model_sessions() {
+    fn list_omits_default_model_and_prints_non_default_models() {
         let dir = tempdir().unwrap();
         let store = SessionStore::new(dir.path().join("chats"), "gpt-default".to_string());
         let key = SessionKey::Chat {
@@ -533,13 +546,30 @@ mod tests {
             provider: Provider::Codex,
             updated_at: String::new(),
         });
+        state.sessions.push(SavedSession {
+            id: "session-alt".to_string(),
+            name: None,
+            model: "gpt-alt".to_string(),
+            provider: Provider::Codex,
+            updated_at: String::new(),
+        });
+        state.sessions.push(SavedSession {
+            id: "session-claude".to_string(),
+            name: None,
+            model: "claude-test".to_string(),
+            provider: Provider::Claude,
+            updated_at: String::new(),
+        });
         store.save(&key, &state).unwrap();
 
         let list = store.list(&key);
 
         assert!(list.contains("💾 Saved sessions:"));
-        assert!(list.contains("1. ⭐ Codex session- gpt-default (unnamed)"));
-        assert!(list.contains("2. ▫️ Codex session- gpt-default (unnamed)"));
+        assert!(list.contains("1. ⭐ session- (unnamed)"));
+        assert!(list.contains("2. ▫️ session- (unnamed)"));
+        assert!(list.contains("3. ▫️ session- gpt-alt (unnamed)"));
+        assert!(list.contains("4. ▫️ session- Claude claude-test (unnamed)"));
+        assert!(!list.contains("gpt-default"));
         assert!(dir.path().join("chats/7-thread-99.json").exists());
     }
 
