@@ -23,6 +23,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const TYPING_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 const POLL_CONFLICT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const POLL_REQUEST_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+const SESSION_WORKER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const TELEGRAM_GET_UPDATES_CONFLICT_MARKER: &str = "terminated by other getUpdates request";
 const GATEWAY_UPDATE_JOB_LABEL: &str = "ai.gateway.update";
 const GATEWAY_UPDATE_PENDING_LOCK_TTL_SECS: u64 = 300;
@@ -202,6 +203,10 @@ struct DownloadedAttachments {
 
 type RuntimeSelections = Arc<Mutex<HashMap<SessionKey, ProviderModel>>>;
 type CancellationState = Arc<Mutex<HashMap<SessionKey, CancellationEntry>>>;
+
+struct SessionWorker {
+    tx: mpsc::Sender<Job>,
+}
 
 #[derive(Debug, Clone)]
 struct CancellationEntry {
@@ -1300,13 +1305,57 @@ fn state_with_provider_model(
 }
 
 fn worker_loop(cfg: Config, rx: mpsc::Receiver<Job>, cancellations: CancellationState) {
+    dispatch_session_jobs(rx, |session_rx| {
+        let session_cfg = cfg.clone();
+        let session_cancellations = cancellations.clone();
+        thread::spawn(move || session_worker_loop(session_cfg, session_rx, session_cancellations))
+    });
+}
+
+fn dispatch_session_jobs<F>(rx: mpsc::Receiver<Job>, mut spawn_worker: F)
+where
+    F: FnMut(mpsc::Receiver<Job>) -> JoinHandle<()>,
+{
+    let mut workers: HashMap<SessionKey, SessionWorker> = HashMap::new();
+    let mut handles = Vec::new();
+    for mut job in rx {
+        let key = job_session_key(&job);
+        loop {
+            let worker = workers.entry(key.clone()).or_insert_with(|| {
+                let (tx, session_rx) = mpsc::channel();
+                let handle = spawn_worker(session_rx);
+                handles.push(handle);
+                SessionWorker { tx }
+            });
+            match worker.tx.send(job) {
+                Ok(()) => break,
+                Err(err) => {
+                    job = err.0;
+                    workers.remove(&key);
+                }
+            }
+        }
+    }
+    drop(workers);
+    for handle in handles {
+        if handle.join().is_err() {
+            logs::error(format_args!("session worker panicked"));
+        }
+    }
+}
+
+fn session_worker_loop(cfg: Config, rx: mpsc::Receiver<Job>, cancellations: CancellationState) {
     let default_model = cfg.default_provider_model().clone();
     let store = SessionStore::new_with_provider(
         cfg.chat_state_dir.clone(),
         default_model.model,
         default_model.provider,
     );
-    for job in rx {
+    loop {
+        let job = match rx.recv_timeout(SESSION_WORKER_IDLE_TIMEOUT) {
+            Ok(job) => job,
+            Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         let tg = TelegramClient::new(&job.bot_token);
         if is_job_cancelled(&cancellations, &job) {
             logs::info(format_args!(
@@ -1318,6 +1367,13 @@ fn worker_loop(cfg: Config, rx: mpsc::Receiver<Job>, cancellations: Cancellation
         if let Err(err) = run_job(&cfg, &tg, &store, &cancellations, job) {
             logs::error(format_args!("job handler failed: {err}"));
         }
+    }
+}
+
+fn job_session_key(job: &Job) -> SessionKey {
+    SessionKey::Chat {
+        chat_id: job.chat_id,
+        thread_id: job.thread_id,
     }
 }
 
@@ -4039,6 +4095,68 @@ exit 2
             }
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn dispatch_session_jobs_uses_one_ordered_worker_per_session_key() {
+        let (tx, rx) = mpsc::channel();
+        let worker_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let records = Arc::new(Mutex::new(Vec::<(usize, i64, Option<i64>, String)>::new()));
+
+        tx.send(job("first")).unwrap();
+        tx.send(job("second")).unwrap();
+        let mut other_chat = job("other chat");
+        other_chat.chat_id = 43;
+        tx.send(other_chat).unwrap();
+        drop(tx);
+
+        dispatch_session_jobs(rx, {
+            let worker_count = worker_count.clone();
+            let records = records.clone();
+            move |session_rx| {
+                let worker_id = worker_count.fetch_add(1, Ordering::SeqCst);
+                let records = records.clone();
+                thread::spawn(move || {
+                    for job in session_rx {
+                        records.lock().unwrap().push((
+                            worker_id,
+                            job.chat_id,
+                            job.thread_id,
+                            job.prompt,
+                        ));
+                    }
+                })
+            }
+        });
+
+        let records = records.lock().unwrap();
+        let same_key: Vec<_> = records
+            .iter()
+            .filter(|(_, chat_id, thread_id, _)| *chat_id == 42 && thread_id.is_none())
+            .collect();
+        assert_eq!(same_key.len(), 2);
+        assert_eq!(same_key[0].0, same_key[1].0);
+        assert_eq!(same_key[0].3, "first");
+        assert_eq!(same_key[1].3, "second");
+        assert!(records
+            .iter()
+            .any(|(worker_id, chat_id, _, prompt)| *chat_id == 43
+                && prompt == "other chat"
+                && *worker_id != same_key[0].0));
+        assert_eq!(worker_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn job_session_key_includes_thread_id() {
+        let mut first_thread = job("first thread");
+        first_thread.thread_id = Some(1);
+        let mut second_thread = job("second thread");
+        second_thread.thread_id = Some(2);
+
+        assert_ne!(
+            job_session_key(&first_thread),
+            job_session_key(&second_thread)
+        );
     }
 
     #[test]

@@ -815,6 +815,43 @@ sleep 1
     }
 
     #[test]
+    fn run_codex_stream_kills_running_process_when_cancelled() {
+        let dir = tempdir().unwrap();
+        let fake_codex = executable(
+            dir.path().join("codex-cancellable"),
+            r#"#!/bin/sh
+cat >/dev/null
+printf 'ready\n'
+sleep 5
+"#,
+        );
+        let cfg = codex_config(&fake_codex, dir.path());
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        let err = run_codex_stream(
+            &cfg,
+            CodexRun {
+                prompt: "prompt",
+                session_id: None,
+                provider: Provider::Codex,
+                model: "",
+                image_paths: &[],
+                timeout: Duration::from_secs(5),
+                state_dir: &dir.path().join("state"),
+                cancel: Some(cancel.clone()),
+            },
+            |chunk| {
+                if chunk.contains("ready") {
+                    cancel.store(true, Ordering::SeqCst);
+                }
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(err, "codex cancelled");
+    }
+
+    #[test]
     fn final_text_from_outputs_joins_available_sources() {
         let dir = tempdir().unwrap();
         let out = dir.path().join("out.txt");
