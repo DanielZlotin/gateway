@@ -475,19 +475,31 @@ pub fn format_fastfetch_output(raw: &str) -> String {
             continue;
         }
         let (key, value) = line
-            .split_once(':')
+            .rsplit_once(':')
             .expect("line contains a colon after earlier check");
-        let key = key.trim();
+        let key = fastfetch_key_label(key);
         let value = value.trim();
         if value.is_empty() {
             continue;
         }
-        let Some(emoji) = fastfetch_emoji(key) else {
+        let Some(emoji) = fastfetch_emoji(&key) else {
             continue;
         };
         lines.push(format!("• {emoji} {key}: {value}"));
     }
     lines.join("\n")
+}
+
+fn fastfetch_key_label(raw_key: &str) -> String {
+    raw_key
+        .split("  ")
+        .filter_map(|part| {
+            let part = part.trim();
+            (!part.is_empty()).then_some(part)
+        })
+        .last()
+        .unwrap_or_else(|| raw_key.trim())
+        .to_string()
 }
 
 #[cfg(test)]
@@ -1001,6 +1013,22 @@ mod tests {
             got,
             "• 🖥️ OS: macOS Tahoe 26.3\n• 💻 Host: MacBook Pro\n• 📦 Packages: 126\n• 💾 Memory: 8.60 GiB / 64.00 GiB (13%)"
         );
+    }
+
+    #[test]
+    fn fastfetch_output_uses_key_after_logo_column() {
+        let raw = [
+            "               .OMMMMo            OS: macOS Tahoe 26.5.1",
+            "     .;loddo:.  .olloddol;.       Packages: 125 (brew), 1 (brew-cask)",
+            ".MMMMMMMMMMMMMMMMMMMMMMMMX.       Battery (bq40z651): 100% [AC Connected]",
+        ]
+        .join("\n");
+
+        let got = format_fastfetch_output(&raw);
+
+        assert!(got.contains("• 🖥️ OS: macOS Tahoe 26.5.1"));
+        assert!(got.contains("• 📦 Packages: 125 (brew), 1 (brew-cask)"));
+        assert!(got.contains("• 🔋 Battery (bq40z651): 100% [AC Connected]"));
     }
 
     #[test]
