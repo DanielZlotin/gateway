@@ -75,7 +75,7 @@ pub fn codex_args(
             .expect("gateway developer instructions should serialize")
     );
     if let Some(session_id) = session_id.filter(|value| !value.trim().is_empty()) {
-        let mut args = strings(["--search", "exec", "resume"]);
+        let mut args = strings(["--search", "exec", "resume", "--ephemeral"]);
         append_model_provider_config(&mut args, provider, claude_proxy_base_url)?;
         append_image_args(&mut args, image_paths);
         args.extend(strings([
@@ -436,7 +436,8 @@ mod tests {
         assert_eq!(args[0], "--search");
         assert_eq!(args[1], "exec");
         assert_eq!(args[2], "resume");
-        assert!(joined.starts_with("--search exec resume -c developer_instructions=\""));
+        assert_eq!(args[3], "--ephemeral");
+        assert!(joined.starts_with("--search exec resume --ephemeral -c developer_instructions=\""));
         assert!(joined.contains("# 🌉 Gateway Runtime Instructions"));
         assert!(joined.contains("--skip-git-repo-check"));
         assert!(joined.contains("--dangerously-bypass-approvals-and-sandbox"));

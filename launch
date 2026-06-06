@@ -14,6 +14,7 @@ if [[ ! -x "$gateway_bin" ]]; then
   exit 127
 fi
 
+cd "$gateway_root"
 mkdir -p "${gateway_log_file:h}"
 exec >>"$gateway_log_file"
 gateway_version="$("$gateway_bin" version 2>/dev/null || true)"
