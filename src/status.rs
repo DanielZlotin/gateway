@@ -150,9 +150,33 @@ pub fn fastfetch_status() -> String {
 }
 
 pub fn git_status(cfg: &Config, codex: &CodexConfig) -> String {
-    let gateway = gateway_repo_status(cfg, codex).unwrap_or_else(|err| format!("error: {err}"));
-    let xdg_config = git_status_short_summary(codex, cfg, "xdg config", &cfg.xdg_config_home);
+    let gateway_cfg = cfg.clone();
+    let gateway_codex = codex.clone();
+    let xdg_cfg = cfg.clone();
+    let xdg_codex = codex.clone();
+    let (gateway, xdg_config) = collect_git_status_summaries(
+        move || {
+            gateway_repo_status(&gateway_cfg, &gateway_codex)
+                .unwrap_or_else(|err| format!("error: {err}"))
+        },
+        move || {
+            git_status_short_summary(&xdg_codex, &xdg_cfg, "xdg config", &xdg_cfg.xdg_config_home)
+        },
+    );
     format_git_status_section(&gateway, &xdg_config)
+}
+
+fn collect_git_status_summaries<G, X>(gateway: G, xdg_config: X) -> (String, String)
+where
+    G: FnOnce() -> String + Send + 'static,
+    X: FnOnce() -> String + Send + 'static,
+{
+    let gateway = thread::spawn(gateway);
+    let xdg_config = thread::spawn(xdg_config);
+    (
+        join_status_worker(gateway, "🌉 Gateway"),
+        join_status_worker(xdg_config, "🛠️ XDG Config"),
+    )
 }
 
 fn format_git_status_section(gateway: &str, xdg_config: &str) -> String {
@@ -895,6 +919,46 @@ mod tests {
         assert_eq!(sections.codex, "codex done");
         assert_eq!(sections.git, "git done");
         assert_eq!(sections.fetch, "fetch done");
+    }
+
+    #[test]
+    fn collect_git_status_summaries_runs_workers_concurrently() {
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let (started_tx, started_rx) = mpsc::channel();
+        let collector_gate = Arc::clone(&gate);
+        let collector = thread::spawn(move || {
+            collect_git_status_summaries(
+                {
+                    let gate = Arc::clone(&collector_gate);
+                    let started_tx = started_tx.clone();
+                    move || gated_status("gateway", gate, started_tx)
+                },
+                {
+                    let gate = Arc::clone(&collector_gate);
+                    move || gated_status("xdg", gate, started_tx)
+                },
+            )
+        });
+
+        let mut started = Vec::new();
+        for _ in 0..2 {
+            match started_rx.recv_timeout(Duration::from_millis(500)) {
+                Ok(name) => started.push(name),
+                Err(err) => {
+                    release_status_workers(&gate);
+                    let _ = collector.join();
+                    panic!("git status workers did not start concurrently: {err}");
+                }
+            }
+        }
+
+        release_status_workers(&gate);
+        let (gateway, xdg_config) = collector.join().unwrap();
+        started.sort_unstable();
+
+        assert_eq!(started, vec!["gateway", "xdg"]);
+        assert_eq!(gateway, "gateway done");
+        assert_eq!(xdg_config, "xdg done");
     }
 
     #[test]

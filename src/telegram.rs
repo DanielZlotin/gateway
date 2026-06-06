@@ -40,7 +40,7 @@ struct TelegramFile {
     file_path: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Update {
     pub update_id: i64,
     pub message: Option<Message>,
@@ -48,7 +48,7 @@ pub struct Update {
     pub callback_query: Option<CallbackQuery>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Message {
     pub message_id: i64,
     #[serde(default)]
@@ -89,7 +89,7 @@ pub struct Document {
     pub mime_type: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct CallbackQuery {
     pub id: String,
     pub from: User,
@@ -99,14 +99,14 @@ pub struct CallbackQuery {
     pub data: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct User {
     pub id: i64,
     #[serde(default)]
     pub username: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Chat {
     pub id: i64,
     #[serde(rename = "type", default)]

@@ -279,40 +279,14 @@ fn run_with_client_with_codex<T: TelegramApi>(
     fs::create_dir_all(&cfg.chat_state_dir)
         .map_err(|err| format!("create chat state dir: {err}"))?;
 
-    if let Err(err) = tg.sync_my_commands(&cfg.telegram_chat_ids) {
-        logs::warn(format_args!(
-            "telegram command sync failed; continuing without command refresh: {err}"
-        ));
-    }
+    sync_my_commands_in_background(tg.clone(), cfg.telegram_chat_ids.clone());
     let default_model = cfg.default_provider_model().clone();
     let store = SessionStore::new_with_provider(
         cfg.chat_state_dir.clone(),
         default_model.model.clone(),
         default_model.provider,
     );
-    let sections = status_sections(&cfg, codex);
-    for chat_id in &cfg.telegram_chat_ids {
-        let key = SessionKey::Chat {
-            chat_id: *chat_id,
-            thread_id: None,
-        };
-        if let Err(err) = auto_rename_startup_session(&cfg, codex, &tg, &store, *chat_id, &key) {
-            logs::warn(format_args!(
-                "telegram startup session rename failed for chat {chat_id}: {err}"
-            ));
-        }
-        let state = store.load(&key);
-        if let Err(err) = send_long_message(
-            &tg,
-            *chat_id,
-            &format_status_message(&state, &sections.codex, &sections.git, &sections.fetch),
-            0,
-        ) {
-            logs::warn(format_args!(
-                "telegram startup status send failed for chat {chat_id}: {err}"
-            ));
-        }
-    }
+    startup_statuses_in_background(cfg.clone(), codex.clone(), tg.clone(), store.clone());
 
     let (tx, rx) = mpsc::sync_channel::<Job>(cfg.queue_depth);
     let cancellations = CancellationState::default();
@@ -370,6 +344,64 @@ fn run_with_client_with_codex<T: TelegramApi>(
             }
         }
     }
+}
+
+fn sync_my_commands_in_background<T: TelegramApi>(tg: T, chat_ids: Vec<i64>) {
+    thread::spawn(move || {
+        if let Err(err) = tg.sync_my_commands(&chat_ids) {
+            logs::warn(format_args!(
+                "telegram command sync failed; continuing without command refresh: {err}"
+            ));
+        }
+    });
+}
+
+fn startup_statuses_in_background<T: TelegramApi>(
+    cfg: Config,
+    codex: CodexConfig,
+    tg: T,
+    store: SessionStore,
+) {
+    thread::spawn(move || {
+        let sections = Arc::new(status_sections(&cfg, &codex));
+        let mut handles = Vec::new();
+        for chat_id in cfg.telegram_chat_ids.clone() {
+            let cfg = cfg.clone();
+            let codex = codex.clone();
+            let tg = tg.clone();
+            let store = store.clone();
+            let sections = sections.clone();
+            handles.push(thread::spawn(move || {
+                let key = SessionKey::Chat {
+                    chat_id,
+                    thread_id: None,
+                };
+                if let Err(err) =
+                    auto_rename_startup_session(&cfg, &codex, &tg, &store, chat_id, &key)
+                {
+                    logs::warn(format_args!(
+                        "telegram startup session rename failed for chat {chat_id}: {err}"
+                    ));
+                }
+                let state = store.load(&key);
+                if let Err(err) = send_long_message(
+                    &tg,
+                    chat_id,
+                    &format_status_message(&state, &sections.codex, &sections.git, &sections.fetch),
+                    0,
+                ) {
+                    logs::warn(format_args!(
+                        "telegram startup status send failed for chat {chat_id}: {err}"
+                    ));
+                }
+            }));
+        }
+        for handle in handles {
+            if handle.join().is_err() {
+                logs::warn(format_args!("telegram startup status worker panicked"));
+            }
+        }
+    });
 }
 
 fn is_get_updates_conflict(err: &str) -> bool {
@@ -616,10 +648,55 @@ fn handle_message(
             &command,
         );
     }
-    let key = SessionKey::Chat {
-        chat_id: msg.chat.id,
-        thread_id: msg.message_thread_id,
-    };
+    if !attachment_specs.is_empty() {
+        let chat_id = msg.chat.id;
+        let cfg = cfg.clone();
+        let worker_tg = tg.clone();
+        let action_tg = tg.clone();
+        let selections = selections.clone();
+        let cancellations = cancellations.clone();
+        let tx = tx.clone();
+        thread::spawn(move || {
+            if let Err(err) = download_attachments_and_queue_job(
+                &cfg,
+                &worker_tg,
+                &selections,
+                &cancellations,
+                &tx,
+                msg,
+                text,
+                attachment_specs,
+            ) {
+                logs::warn(format_args!("attachment message handler failed: {err}"));
+            }
+        });
+        let _ = action_tg.send_chat_action(chat_id, "typing");
+        return Ok(());
+    }
+
+    queue_codex_job(
+        cfg,
+        tg,
+        selections,
+        cancellations,
+        tx,
+        &msg,
+        text,
+        DownloadedAttachments::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn download_attachments_and_queue_job<T: TelegramApi>(
+    cfg: &Config,
+    tg: &T,
+    selections: &RuntimeSelections,
+    cancellations: &CancellationState,
+    tx: &mpsc::SyncSender<Job>,
+    msg: Message,
+    text: String,
+    attachment_specs: Vec<AttachmentSpec>,
+) -> Result<(), String> {
     let attachments = match download_message_attachments(cfg, tg, &attachment_specs) {
         Ok(attachments) => attachments,
         Err(err) => {
@@ -631,8 +708,35 @@ fn handle_message(
             return Ok(());
         }
     };
+    queue_codex_job(
+        cfg,
+        tg,
+        selections,
+        cancellations,
+        tx,
+        &msg,
+        text,
+        attachments,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn queue_codex_job<T: TelegramApi>(
+    cfg: &Config,
+    tg: &T,
+    selections: &RuntimeSelections,
+    cancellations: &CancellationState,
+    tx: &mpsc::SyncSender<Job>,
+    msg: &Message,
+    text: String,
+    attachments: DownloadedAttachments,
+) -> Result<(), String> {
+    let key = SessionKey::Chat {
+        chat_id: msg.chat.id,
+        thread_id: msg.message_thread_id,
+    };
     let prompt = prompt_with_file_attachments(
-        &prompt_with_reply_context(&msg, &text),
+        &prompt_with_reply_context(msg, &text),
         &attachments.file_paths,
     );
 
@@ -718,7 +822,8 @@ fn handle_command_with_codex(
         }
         Some(Directive::Stop) => handle_stop_command(tg, cancellations, msg, &key),
         Some(Directive::Status) => {
-            handle_status_command(cfg, codex, tg, store, selections, msg, &key)
+            handle_status_command(cfg, codex, tg, store, selections, msg, &key);
+            Ok(())
         }
         None => tg.send_message(msg.chat.id, &unknown_directive_message(), msg.message_id),
     }
@@ -1268,6 +1373,31 @@ fn handle_status_command(
     cfg: &Config,
     codex: &CodexConfig,
     tg: &impl TelegramApi,
+    store: &SessionStore,
+    selections: &RuntimeSelections,
+    msg: &Message,
+    key: &SessionKey,
+) {
+    let cfg = cfg.clone();
+    let codex = codex.clone();
+    let tg = tg.clone();
+    let store = store.clone();
+    let selections = selections.clone();
+    let msg = msg.clone();
+    let key = key.clone();
+    thread::spawn(move || {
+        if let Err(err) =
+            handle_status_command_in_background(&cfg, &codex, &tg, &store, &selections, &msg, &key)
+        {
+            logs::warn(format_args!("telegram status command failed: {err}"));
+        }
+    });
+}
+
+fn handle_status_command_in_background<T: TelegramApi>(
+    cfg: &Config,
+    codex: &CodexConfig,
+    tg: &T,
     store: &SessionStore,
     selections: &RuntimeSelections,
     msg: &Message,
@@ -1952,10 +2082,14 @@ mod tests {
             vec!["chats".to_string(), "telegram.offset".to_string()]
         );
         assert_eq!(read_offset(&cfg.offset_file), 5);
-        assert!(tg.calls().contains(&Call::Sync(vec![42])));
-        assert!(tg.calls().iter().any(|call| {
-            matches!(call, Call::Send { chat_id: 42, reply_to: 0, text } if text.contains("🤖 Model: gpt-test"))
-        }));
+        assert_call_eventually(
+            &tg,
+            |call| matches!(call, Call::Sync(chat_ids) if chat_ids == &[42]),
+        );
+        assert_call_eventually(
+            &tg,
+            |call| matches!(call, Call::Send { chat_id: 42, reply_to: 0, text } if text.contains("🤖 Model: gpt-test")),
+        );
         assert!(tg.calls().contains(&Call::GetUpdates {
             offset: 0,
             timeout: 0
@@ -2037,7 +2171,10 @@ mod tests {
         let err = run_with_client_with_codex(cfg, tg.clone(), &codex).unwrap_err();
 
         assert_eq!(err, "stop");
-        assert!(tg.calls().contains(&Call::Sync(vec![42])));
+        assert_call_eventually(
+            &tg,
+            |call| matches!(call, Call::Sync(chat_ids) if chat_ids == &[42]),
+        );
         assert!(tg.calls().contains(&Call::GetUpdates {
             offset: 0,
             timeout: 0
@@ -2271,6 +2408,42 @@ mod tests {
     }
 
     #[test]
+    fn handle_message_downloads_attachments_without_blocking_polling() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let tg = FakeTelegram::new();
+        tg.delay_downloads(Duration::from_millis(300));
+        tg.push_download(Ok(b"photo bytes".to_vec()));
+        let selections = RuntimeSelections::default();
+        let (tx, rx) = mpsc::sync_channel(1);
+        let mut msg = message(42, 6, "summarize this");
+        msg.photo = vec![PhotoSize {
+            file_id: "photo-large".to_string(),
+            width: 640,
+            height: 480,
+            file_size: Some(1000),
+        }];
+
+        let started = Instant::now();
+        handle_message(&cfg, &tg, &store, &selections, &tx, msg).unwrap();
+
+        assert!(started.elapsed() < Duration::from_millis(250));
+        assert!(tg.calls().contains(&Call::Action {
+            chat_id: 42,
+            action: "typing".to_string()
+        }));
+        let job = rx
+            .recv_timeout(ASYNC_RENAME_TEST_TIMEOUT)
+            .expect("attachment job was not queued");
+        assert_eq!(job.image_paths.len(), 1);
+        assert_eq!(fs::read(&job.image_paths[0]).unwrap(), b"photo bytes");
+    }
+
+    #[test]
     fn handle_message_ignores_allowed_non_private_chat() {
         let dir = tempdir().unwrap();
         let cfg = test_config(dir.path());
@@ -2454,6 +2627,7 @@ printf 'session id: session-12345678\n' >&2
         handle_command(&cfg, &tg, &store, &selections, &msg, "/restart", "/restart").unwrap();
         handle_command(&cfg, &tg, &store, &selections, &msg, "/wat", "/wat").unwrap();
 
+        assert_sent_text_eventually(&tg, |text| text.contains("🧠 Codex:"));
         let sent = tg.sent_text();
         assert!(!sent.iter().any(|text| text.contains("bot_token=token")));
         assert!(sent
@@ -2814,6 +2988,7 @@ printf 'session id: aaaaaaaa-current\n' >&2
         let selections = RuntimeSelections::default();
         let msg = message(42, 10, "/status");
 
+        let started = Instant::now();
         handle_command_with_codex(
             &cfg,
             &codex,
@@ -2826,6 +3001,8 @@ printf 'session id: aaaaaaaa-current\n' >&2
         )
         .unwrap();
 
+        assert!(started.elapsed() < Duration::from_millis(250));
+        assert_sent_text_eventually(&tg, |text| text.contains("🧵 Session: aaaaaaaa"));
         let sent = tg.sent_text();
         assert_no_auto_rename_telegram(&tg);
         assert!(sent
@@ -3690,6 +3867,7 @@ exit 2
         downloads: VecDeque<Result<Vec<u8>, String>>,
         sync_error: Option<String>,
         send_error: Option<String>,
+        download_delay: Duration,
         next_message_id: i64,
     }
 
@@ -3719,6 +3897,10 @@ exit 2
 
         fn push_download(&self, download: Result<Vec<u8>, String>) {
             self.state.lock().unwrap().downloads.push_back(download);
+        }
+
+        fn delay_downloads(&self, delay: Duration) {
+            self.state.lock().unwrap().download_delay = delay;
         }
 
         fn fail_sends(&self, err: &str) {
@@ -3906,17 +4088,23 @@ exit 2
         }
 
         fn download_file(&self, file_id: &str, path: &Path) -> Result<(), String> {
-            let download = {
+            let (download, delay) = {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(Call::Download {
                     file_id: file_id.to_string(),
                     path: path.to_path_buf(),
                 });
-                state
-                    .downloads
-                    .pop_front()
-                    .unwrap_or_else(|| Ok(Vec::new()))
+                (
+                    state
+                        .downloads
+                        .pop_front()
+                        .unwrap_or_else(|| Ok(Vec::new())),
+                    state.download_delay,
+                )
             };
+            if !delay.is_zero() {
+                thread::sleep(delay);
+            }
             let bytes = download?;
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).map_err(|err| err.to_string())?;
@@ -4059,6 +4247,27 @@ exit 2
             }
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    fn assert_call_eventually(tg: &FakeTelegram, predicate: impl Fn(&Call) -> bool) {
+        let deadline = Instant::now() + ASYNC_RENAME_TEST_TIMEOUT;
+        loop {
+            let calls = tg.calls();
+            if calls.iter().any(&predicate) {
+                return;
+            }
+            if Instant::now() >= deadline {
+                panic!("expected telegram call was not observed: {calls:?}");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn assert_sent_text_eventually(tg: &FakeTelegram, predicate: impl Fn(&str) -> bool) {
+        assert_call_eventually(
+            tg,
+            |call| matches!(call, Call::Send { text, .. } if predicate(text)),
+        );
     }
 
     fn assert_file_eventually(path: &Path) {
