@@ -262,6 +262,15 @@ pub fn run(cfg: Config) -> Result<(), String> {
 }
 
 fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
+    let codex = CodexConfig::from(&cfg);
+    run_with_client_with_codex(cfg, tg, &codex)
+}
+
+fn run_with_client_with_codex<T: TelegramApi>(
+    cfg: Config,
+    tg: T,
+    codex: &CodexConfig,
+) -> Result<(), String> {
     fs::create_dir_all(&cfg.state_dir).map_err(|err| format!("create state dir: {err}"))?;
     fs::create_dir_all(&cfg.chat_state_dir)
         .map_err(|err| format!("create chat state dir: {err}"))?;
@@ -277,14 +286,13 @@ fn run_with_client<T: TelegramApi>(cfg: Config, tg: T) -> Result<(), String> {
         default_model.model.clone(),
         default_model.provider,
     );
-    let codex = CodexConfig::from(&cfg);
-    let sections = status_sections(&cfg, &codex);
+    let sections = status_sections(&cfg, codex);
     for chat_id in &cfg.telegram_chat_ids {
         let key = SessionKey::Chat {
             chat_id: *chat_id,
             thread_id: None,
         };
-        if let Err(err) = auto_rename_startup_session(&cfg, &codex, &tg, &store, *chat_id, &key) {
+        if let Err(err) = auto_rename_startup_session(&cfg, codex, &tg, &store, *chat_id, &key) {
             logs::warn(format_args!(
                 "telegram startup session rename failed for chat {chat_id}: {err}"
             ));
@@ -1838,7 +1846,8 @@ mod tests {
         }]));
         tg.push_update(Err("stop".to_string()));
 
-        let err = run_with_client(cfg.clone(), tg.clone()).unwrap_err();
+        let codex = inert_codex_config(&cfg);
+        let err = run_with_client_with_codex(cfg.clone(), tg.clone(), &codex).unwrap_err();
 
         assert_eq!(err, "stop");
         assert!(cfg.state_dir.exists());
@@ -1892,7 +1901,8 @@ mod tests {
         }]));
         tg.push_update(Err("stop".to_string()));
 
-        let err = run_with_client(cfg.clone(), tg.clone()).unwrap_err();
+        let codex = inert_codex_config(&cfg);
+        let err = run_with_client_with_codex(cfg.clone(), tg.clone(), &codex).unwrap_err();
 
         assert_eq!(err, "stop");
         assert_eq!(read_offset(&cfg.offset_file), 11);
@@ -1917,7 +1927,8 @@ mod tests {
         tg.push_update(Err("stop".to_string()));
         tg.fail_sends("send failed");
 
-        let err = run_with_client(cfg.clone(), tg).unwrap_err();
+        let codex = inert_codex_config(&cfg);
+        let err = run_with_client_with_codex(cfg.clone(), tg, &codex).unwrap_err();
 
         assert_eq!(err, "stop");
         assert_eq!(read_offset(&cfg.offset_file), 11);
@@ -1932,7 +1943,8 @@ mod tests {
         tg.push_update(Ok(Vec::new()));
         tg.push_update(Err("stop".to_string()));
 
-        let err = run_with_client(cfg, tg.clone()).unwrap_err();
+        let codex = inert_codex_config(&cfg);
+        let err = run_with_client_with_codex(cfg, tg.clone(), &codex).unwrap_err();
 
         assert_eq!(err, "stop");
         assert!(tg.calls().contains(&Call::Sync(vec![42])));
@@ -1951,7 +1963,8 @@ mod tests {
         tg.push_update(Ok(Vec::new()));
         tg.push_update(Err("stop".to_string()));
 
-        let err = run_with_client(cfg, tg).unwrap_err();
+        let codex = inert_codex_config(&cfg);
+        let err = run_with_client_with_codex(cfg, tg, &codex).unwrap_err();
 
         assert_eq!(err, "stop");
     }
@@ -1968,7 +1981,8 @@ mod tests {
         ));
         tg.push_update(Err("stop".to_string()));
 
-        let err = run_with_client(cfg, tg.clone()).unwrap_err();
+        let codex = inert_codex_config(&cfg);
+        let err = run_with_client_with_codex(cfg, tg.clone(), &codex).unwrap_err();
 
         assert_eq!(err, "stop");
         assert_eq!(
@@ -1998,7 +2012,8 @@ mod tests {
         ));
         tg.push_update(Err("stop".to_string()));
 
-        let err = run_with_client(cfg, tg.clone()).unwrap_err();
+        let codex = inert_codex_config(&cfg);
+        let err = run_with_client_with_codex(cfg, tg.clone(), &codex).unwrap_err();
 
         assert_eq!(err, "stop");
         assert_eq!(
@@ -2335,7 +2350,17 @@ printf 'session id: session-12345678\n' >&2
             "/commands",
         )
         .unwrap();
-        handle_command(&cfg, &tg, &store, &selections, &msg, "/status", "/status").unwrap();
+        handle_command_with_codex(
+            &cfg,
+            &codex,
+            &tg,
+            &store,
+            &selections,
+            &msg,
+            "/status",
+            "/status",
+        )
+        .unwrap();
         handle_command(&cfg, &tg, &store, &selections, &msg, "/restart", "/restart").unwrap();
         handle_command(&cfg, &tg, &store, &selections, &msg, "/wat", "/wat").unwrap();
 
@@ -4034,6 +4059,10 @@ exit 2
             workdir: cfg.codex_workdir.clone(),
             default_model: cfg.default_provider_model().model.clone(),
         }
+    }
+
+    fn inert_codex_config(cfg: &Config) -> CodexConfig {
+        test_codex_config(cfg, PathBuf::from("/bin/false"))
     }
 
     fn message(chat_id: i64, message_id: i64, text: &str) -> Message {
