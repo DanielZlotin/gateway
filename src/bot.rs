@@ -1053,7 +1053,17 @@ fn handle_auto_rename_command(
     msg: &Message,
     key: &SessionKey,
 ) -> Result<(), String> {
-    auto_rename_current_session(cfg, codex, tg, store, msg, key).map(|_| ())
+    auto_rename_session(
+        cfg,
+        codex,
+        tg,
+        store,
+        msg.chat.id,
+        msg.message_id,
+        key,
+        true,
+    )?;
+    Ok(())
 }
 
 fn auto_rename_current_session(
@@ -1064,7 +1074,16 @@ fn auto_rename_current_session(
     msg: &Message,
     key: &SessionKey,
 ) -> Result<bool, String> {
-    auto_rename_session(cfg, codex, tg, store, msg.chat.id, msg.message_id, key)
+    auto_rename_session(
+        cfg,
+        codex,
+        tg,
+        store,
+        msg.chat.id,
+        msg.message_id,
+        key,
+        false,
+    )
 }
 
 fn auto_rename_startup_session(
@@ -1079,17 +1098,18 @@ fn auto_rename_startup_session(
     if !current_session_is_unnamed(&state) {
         return Ok(false);
     }
-    auto_rename_session(cfg, codex, tg, store, chat_id, 0, key)
+    auto_rename_session(cfg, codex, tg, store, chat_id, 0, key, false)
 }
 
 fn auto_rename_session(
     cfg: &Config,
     codex: &CodexConfig,
-    _tg: &impl TelegramApi,
+    tg: &impl TelegramApi,
     store: &SessionStore,
     chat_id: i64,
-    _reply_to_message_id: i64,
+    reply_to_message_id: i64,
     key: &SessionKey,
+    react_on_complete: bool,
 ) -> Result<bool, String> {
     let state = store.load(key);
     if state.session_id.is_none() {
@@ -1097,6 +1117,7 @@ fn auto_rename_session(
     }
     let cfg = cfg.clone();
     let codex = codex.clone();
+    let tg = tg.clone();
     let store = store.clone();
     let key = key.clone();
     thread::spawn(move || {
@@ -1104,6 +1125,12 @@ fn auto_rename_session(
             logs::warn(format_args!(
                 "telegram auto session rename failed for chat {chat_id}: {err}"
             ));
+        } else if react_on_complete {
+            if let Err(err) = react_ok(&tg, chat_id, reply_to_message_id) {
+                logs::warn(format_args!(
+                    "telegram auto session rename reaction failed for chat {chat_id}: {err}"
+                ));
+            }
         }
     });
     Ok(true)
@@ -2570,7 +2597,7 @@ printf 'session id: session-12345678\n' >&2
     }
 
     #[test]
-    fn rename_without_name_starts_auto_rename_without_waiting_or_sending_telegram() {
+    fn rename_without_name_starts_auto_rename_without_waiting_or_sending_text() {
         let dir = tempdir().unwrap();
         let cfg = test_config(dir.path());
         let codex = test_codex_config(
@@ -2621,8 +2648,14 @@ printf 'session id: aaaaaaaa-current\n' >&2
         .unwrap();
 
         assert!(started.elapsed() < Duration::from_millis(250));
-        assert_no_auto_rename_telegram(&tg);
+        assert!(tg.sent_text().is_empty());
+        assert!(!tg.calls().contains(&Call::Reaction {
+            chat_id: 42,
+            message_id: 10,
+            emoji: "👍".to_string(),
+        }));
         assert_session_name_eventually(&store, &key, "aaaaaaaa-current", "session-name");
+        assert_reaction_eventually(&tg, 42, 10, "👍");
         let args = fs::read_to_string(dir.path().join("codex-title.args")).unwrap();
         assert!(args
             .lines()
@@ -2683,8 +2716,9 @@ printf 'session id: aaaaaaaa-current\n' >&2
         )
         .unwrap();
 
-        assert_no_auto_rename_telegram(&tg);
+        assert!(tg.sent_text().is_empty());
         assert_session_name_eventually(&store, &key, "aaaaaaaa-current", "refreshed-name");
+        assert_reaction_eventually(&tg, 42, 10, "👍");
     }
 
     #[test]
@@ -3945,6 +3979,26 @@ exit 2
                 panic!(
                     "session {session_id} was not renamed to {expected_name}: {:?}",
                     state.sessions
+                );
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn assert_reaction_eventually(tg: &FakeTelegram, chat_id: i64, message_id: i64, emoji: &str) {
+        let deadline = Instant::now() + ASYNC_RENAME_TEST_TIMEOUT;
+        loop {
+            if tg.calls().contains(&Call::Reaction {
+                chat_id,
+                message_id,
+                emoji: emoji.to_string(),
+            }) {
+                return;
+            }
+            if Instant::now() >= deadline {
+                panic!(
+                    "reaction {emoji} was not sent for chat {chat_id} message {message_id}: {:?}",
+                    tg.calls()
                 );
             }
             thread::sleep(Duration::from_millis(10));
