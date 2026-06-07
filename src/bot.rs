@@ -2321,7 +2321,7 @@ fn handle_update_command(cfg: &Config, tg: &impl TelegramApi, msg: &Message) -> 
                 "gateway update submitted chat={} message={}",
                 msg.chat.id, msg.message_id
             ));
-            "⬆️ Updating gateway in the background. Running `git pull`, Homebrew maintenance, Foundry update, then `./setup`. Details go to `gateway/logs/update.log`.".to_string()
+            "🔄 Updating...".to_string()
         }
         Ok(GatewayUpdateStart::AlreadyRunning) => {
             logs::warn(format_args!(
@@ -3533,8 +3533,7 @@ printf 'session id: session-12345678\n' >&2
             .iter()
             .any(|text| text.contains("🛑") && text.contains("queued work")));
         assert!(sent.iter().any(|text| text.contains("/status")));
-        assert!(sent.iter().any(|text| text
-            == "⬆️ Updating gateway in the background. Running `git pull`, Homebrew maintenance, Foundry update, then `./setup`. Details go to `gateway/logs/update.log`."));
+        assert!(sent.iter().any(|text| text == "🔄 Updating..."));
         assert!(!sent.iter().any(|text| text.contains("/commands")));
         assert!(!sent
             .iter()
