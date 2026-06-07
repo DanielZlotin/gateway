@@ -594,6 +594,7 @@ mod tests {
                 model: "gpt-default".to_string(),
                 role: crate::config::ModelRole::Default,
             }],
+            tts: None,
             state_dir: PathBuf::from("/state/gateway"),
             chat_state_dir: PathBuf::from("/state/gateway/chats"),
             offset_file: PathBuf::from("/state/gateway/telegram.offset"),

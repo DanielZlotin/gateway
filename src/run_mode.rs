@@ -443,6 +443,7 @@ printf 'done\n' > "$out"
                 model: "gpt-test".to_string(),
                 role: crate::config::ModelRole::Default,
             }],
+            tts: None,
             state_dir: root.join("state/gateway"),
             chat_state_dir: root.join("state/gateway/chats"),
             offset_file: root.join("state/gateway/telegram.offset"),

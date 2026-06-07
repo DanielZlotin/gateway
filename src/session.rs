@@ -80,6 +80,7 @@ impl SessionStore {
     pub fn reset(&self, key: &SessionKey) -> Result<ChatSession, String> {
         let mut state = self.load(key);
         state.session_id = None;
+        state.voice_enabled = false;
         state.generation += 1;
         state.updated_at = now_string();
         self.save(key, &state)?;
@@ -96,6 +97,7 @@ impl SessionStore {
         state.provider = provider;
         state.model = model.trim().to_string();
         state.session_id = None;
+        state.voice_enabled = false;
         state.generation += 1;
         state.updated_at = now_string();
         self.save(key, &state)?;
@@ -400,6 +402,7 @@ fn apply_resumed_session(state: &mut ChatSession, found: SavedSession) {
         state.model = found.model;
     }
     state.provider = found.provider;
+    state.voice_enabled = false;
     state.generation += 1;
     state.updated_at = now_string();
 }
@@ -451,10 +454,12 @@ mod tests {
             thread_id: None,
         };
 
+        assert!(store.set_voice_enabled(&key, true).unwrap().voice_enabled);
         assert_eq!(store.reset(&key).unwrap().generation, 1);
         let loaded = store.load(&key);
 
         assert_eq!(loaded.session_id, None);
+        assert!(!loaded.voice_enabled);
         assert_eq!(loaded.model, "gpt-5.5");
         assert_eq!(loaded.generation, 1);
     }
@@ -537,12 +542,17 @@ mod tests {
         let renamed = store.rename_current(&key, "daily").unwrap();
         assert_eq!(renamed.sessions[0].name.as_deref(), Some("daily"));
 
+        assert!(store.set_voice_enabled(&key, true).unwrap().voice_enabled);
         let resumed = store.resume(&key, "daily").unwrap();
         assert_eq!(
             resumed.session_id.as_deref(),
             Some("019e778b-2c3f-7231-bda6-c40f27bbba21")
         );
+        assert!(!resumed.voice_enabled);
         assert_eq!(resumed.generation, 1);
+
+        assert!(store.set_voice_enabled(&key, true).unwrap().voice_enabled);
+        assert!(!store.resume_index(&key, 1).unwrap().voice_enabled);
         assert!(store
             .resume(&key, "missing")
             .unwrap_err()

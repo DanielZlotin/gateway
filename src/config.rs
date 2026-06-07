@@ -15,7 +15,7 @@ pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-4-8";
 pub const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-5.5";
 pub const DEFAULT_CODEX_TIMEOUT_MINS: u64 = 30;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub bot_token: String,
     pub telegram_chat_ids: Vec<i64>,
@@ -27,6 +27,7 @@ pub struct Config {
     pub gateway_config_file: PathBuf,
     pub codex_workdir: PathBuf,
     pub models: Vec<ProviderModel>,
+    pub tts: Option<serde_json::Value>,
     pub state_dir: PathBuf,
     pub chat_state_dir: PathBuf,
     pub offset_file: PathBuf,
@@ -37,6 +38,15 @@ pub struct Config {
     pub codex_timeout: Duration,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConfiguredTts {
+    ElevenLabs {
+        model: String,
+        voice: String,
+        speed: Option<f64>,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TelegramBotConfig {
     pub bot_token: String,
@@ -44,12 +54,14 @@ pub struct TelegramBotConfig {
     pub offset_file: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GatewayConfigFile {
     pub models: Vec<ProviderModel>,
     #[serde(default = "default_timeout_mins")]
     pub timeout_mins: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tts: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +128,7 @@ pub fn load_from_env(env: &BTreeMap<String, String>) -> Result<Config, String> {
         gateway_config_file,
         codex_workdir: path(env, "GATEWAY_CODEX_WORKDIR", xdg_config_home),
         models: gateway_config.models,
+        tts: gateway_config.tts,
         state_dir: state_dir.clone(),
         chat_state_dir,
         offset_file: state_dir.join("telegram.offset"),
@@ -289,6 +302,7 @@ impl Default for GatewayConfigFile {
         Self {
             models: default_models(),
             timeout_mins: default_timeout_mins(),
+            tts: None,
         }
     }
 }
@@ -369,6 +383,81 @@ impl Config {
     pub fn provider_model_at(&self, index: usize) -> Option<&ProviderModel> {
         self.models.get(index)
     }
+
+    pub fn tts_fallback_warning(&self) -> Option<String> {
+        self.configured_tts().err().map(|err| {
+            format!(
+                "⚠️ Invalid `tts` config in {}: {err}; falling back to local Voicebox.",
+                self.gateway_config_file.display()
+            )
+        })
+    }
+
+    pub fn configured_tts(&self) -> Result<Option<ConfiguredTts>, String> {
+        let Some(value) = self.tts.as_ref() else {
+            return Ok(None);
+        };
+        configured_tts(value).map(Some)
+    }
+}
+
+fn configured_tts(value: &serde_json::Value) -> Result<ConfiguredTts, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "`tts` must be an object".to_string())?;
+    let provider =
+        tts_required_string(object, "provider", "`tts.provider` must be \"elevenlabs\"")?;
+    if !provider.eq_ignore_ascii_case("elevenlabs") {
+        return Err(format!(
+            "unsupported `tts.provider` \"{provider}\"; expected \"elevenlabs\""
+        ));
+    }
+    if let Some(key) = object
+        .keys()
+        .find(|key| !matches!(key.as_str(), "provider" | "model" | "voice" | "speed"))
+    {
+        return Err(format!(
+            "unsupported `tts.{key}` field; expected `provider`, `model`, `voice`, or `speed`"
+        ));
+    }
+    let model = tts_required_string(object, "model", "`tts.model` must be a non-empty string")?;
+    let voice = tts_required_string(object, "voice", "`tts.voice` must be a non-empty string")?;
+    let speed = tts_optional_speed(object)?;
+    Ok(ConfiguredTts::ElevenLabs {
+        model,
+        voice,
+        speed,
+    })
+}
+
+fn tts_required_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    message: &str,
+) -> Result<String, String> {
+    object
+        .get(key)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| message.to_string())
+}
+
+fn tts_optional_speed(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<f64>, String> {
+    let Some(value) = object.get("speed") else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_f64()
+        .filter(|speed| speed.is_finite() && *speed > 0.0)
+        .map(Some)
+        .ok_or_else(|| "`tts.speed` must be a positive number".to_string())
 }
 
 fn normalize_models(models: &mut Vec<ProviderModel>) -> Result<(), String> {
@@ -482,6 +571,7 @@ mod tests {
         let text = fs::read_to_string(&cfg.gateway_config_file).unwrap();
         assert!(text.contains(r#""models""#));
         assert!(text.contains(r#""role": "light""#));
+        assert!(!text.contains(r#""tts""#));
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert!(value.get("provider").is_none());
         assert!(!text.contains(r#""claude_model""#));
@@ -741,6 +831,96 @@ mod tests {
         assert_eq!(cfg.timeout_mins, DEFAULT_CODEX_TIMEOUT_MINS);
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains("\"timeout_mins\": 30"));
+    }
+
+    #[test]
+    fn valid_elevenlabs_tts_config_is_used_as_primary_tts() {
+        let (_dir, env) = env_with_token();
+        let cfg_path =
+            PathBuf::from(env.get("XDG_CONFIG_HOME").unwrap()).join("gateway/config.json");
+        fs::write(
+            &cfg_path,
+            r#"{"models":[{"provider":"codex","model":"gpt-test"}],"timeout_mins":30,"tts":{"provider":"elevenlabs","model":"eleven_v3","voice":"voice-abc","speed":1.25}}"#,
+        )
+        .unwrap();
+
+        let cfg = load_from_env(&env).unwrap();
+
+        assert_eq!(
+            cfg.configured_tts().unwrap(),
+            Some(ConfiguredTts::ElevenLabs {
+                model: "eleven_v3".to_string(),
+                voice: "voice-abc".to_string(),
+                speed: Some(1.25),
+            })
+        );
+        assert!(cfg.tts_fallback_warning().is_none());
+    }
+
+    #[test]
+    fn missing_tts_config_uses_local_voicebox_without_warning() {
+        let (_dir, env) = env_with_token();
+
+        let cfg = load_from_env(&env).unwrap();
+
+        assert_eq!(cfg.configured_tts().unwrap(), None);
+        assert!(cfg.tts_fallback_warning().is_none());
+    }
+
+    #[test]
+    fn invalid_tts_config_warns_and_falls_back_to_local_voicebox() {
+        let (_dir, env) = env_with_token();
+        let cfg_path =
+            PathBuf::from(env.get("XDG_CONFIG_HOME").unwrap()).join("gateway/config.json");
+        fs::write(
+            &cfg_path,
+            r#"{"models":[{"provider":"codex","model":"gpt-test"}],"timeout_mins":30,"tts":{"provider":17,"unknown":{"nested":true}}}"#,
+        )
+        .unwrap();
+
+        let cfg = load_from_env(&env).unwrap();
+
+        let err = cfg.configured_tts().unwrap_err();
+        assert!(err.contains("`tts.provider`"));
+        assert!(err.contains("elevenlabs"));
+        let warning = cfg.tts_fallback_warning().unwrap();
+        assert!(warning.contains("Invalid `tts` config"));
+        assert!(warning.contains("falling back to local Voicebox"));
+    }
+
+    #[test]
+    fn elevenlabs_tts_config_requires_model_voice_and_positive_speed() {
+        let (_dir, env) = env_with_token();
+        let cfg_path =
+            PathBuf::from(env.get("XDG_CONFIG_HOME").unwrap()).join("gateway/config.json");
+        fs::write(
+            &cfg_path,
+            r#"{"models":[{"provider":"codex","model":"gpt-test"}],"timeout_mins":30,"tts":{"provider":"elevenlabs","model":" ","voice":"voice-abc","speed":0}}"#,
+        )
+        .unwrap();
+
+        let cfg = load_from_env(&env).unwrap();
+
+        let err = cfg.configured_tts().unwrap_err();
+        assert!(err.contains("`tts.model`"));
+    }
+
+    #[test]
+    fn elevenlabs_tts_config_rejects_old_voice_id_field() {
+        let (_dir, env) = env_with_token();
+        let cfg_path =
+            PathBuf::from(env.get("XDG_CONFIG_HOME").unwrap()).join("gateway/config.json");
+        fs::write(
+            &cfg_path,
+            r#"{"models":[{"provider":"codex","model":"gpt-test"}],"timeout_mins":30,"tts":{"provider":"elevenlabs","model":"eleven_v3","voice_id":"voice-abc"}}"#,
+        )
+        .unwrap();
+
+        let cfg = load_from_env(&env).unwrap();
+
+        let err = cfg.configured_tts().unwrap_err();
+        assert!(err.contains("unsupported `tts.voice_id` field"));
+        assert!(err.contains("`voice`"));
     }
 
     #[test]

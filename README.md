@@ -11,8 +11,8 @@
 ./setup
 ```
 
-`setup` installs missing Homebrew-backed local tools, builds the release binary,
-installs the macOS LaunchAgent, and starts or restarts the bot.
+`setup` installs local tools, refreshes Voicebox, builds the release binary,
+installs the LaunchAgent, and restarts the bot.
 
 For local checks:
 
@@ -38,8 +38,8 @@ positions.
 1. 📁 `GATEWAY_CODEX_WORKDIR`: Codex working directory.
 2. 🟣 `ANTHROPIC_API_KEY`: required for `claude` model slots.
 3. 🌐 `OPENROUTER_API_KEY`: required for `openrouter` model slots.
-4. 🗂️ `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`:
-   override config, cache, data, and state paths.
+4. 🔊 `ELEVENLABS_API_KEY`: required when `tts.provider` is `elevenlabs`.
+5. 🗂️ `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`: override XDG paths.
 
 📁 Paths:
 
@@ -67,14 +67,23 @@ Gateway reads `$XDG_CONFIG_HOME/gateway/config.json`; if missing, it creates:
 📋 Notes:
 
 1. 🤖 `provider` must be `codex`, `claude`, or `openrouter`.
-2. 🧠 Missing `role` means `default`; the first default model is used for new
-   sessions and `gateway run`.
-3. 🪶 `role: "light"` marks the first lightweight model used for helper work
-   such as renaming and git summaries.
-4. 🧭 `/model` shows every configured model and marks each model role.
-5. ⏱️ `timeout_mins` sets the per-prompt Codex timeout.
-6. 🧱 Existing config files must include `models`; `timeout_mins` defaults to
-   `30` when omitted.
+2. 🧠 Missing `role` means `default`; `role: "light"` marks the helper model.
+3. ⏱️ `timeout_mins` defaults to `30`.
+4. 🔊 Optional `tts` tries ElevenLabs before local Voicebox:
+
+```json
+{
+  "tts": {
+    "provider": "elevenlabs",
+    "model": "eleven_v3",
+    "voice": "cPoqAvGWCPfCfyPMwe4z",
+    "speed": 1.5
+  }
+}
+```
+
+`speed` is optional. Invalid, missing, or failing `tts` falls back to local
+Voicebox.
 
 ## 🧰 CLI
 
@@ -118,23 +127,19 @@ Sessions are kept separately per chat, and commands are case-insensitive.
 🧠 /model [index] - choose a configured provider/model
 📜 /log [lines] - send recent gateway logs
 🔁 /restart - restart the gateway service
-🔊 /voice [on|off] - toggle spoken audio replies for this session
+🔊 /voice [on|off] - toggle spoken audio replies for the current session
 🛑 /stop - cancel active and queued Codex work for this chat
 ```
 
 📋 Notes:
 
-1. 🧠 `/model` with no argument shows model buttons; `/model 0`, `/model 1`,
-   etc. select by config index for the current chat only.
+1. 🧠 `/model` lists buttons; `/model 0`, `/model 1`, etc. select by index.
 2. ↩️ `/resume` and `/resume 0` list sessions; `/resume 1` steps back one
    saved session; names, full session IDs, and first 8 characters also match.
 3. 🏷️ `/rename` without a name asks Codex to create one.
-4. 🫧 Bot prompts stream progress, split long final answers, and return provider
-   failures to the requesting chat.
-5. 📎 Photos and image documents are attached to Codex as images; other documents
-   are downloaded and listed as local file paths in the prompt.
-6. 🎙️ Voice messages are downloaded, transcribed locally with Whisper `large`,
-   and sent to Codex as prompt text. No extra `gateway/config.json` field is
-   required.
-7. 🔊 `/voice` toggles sticky spoken replies for the current chat session;
-   ElevenLabs uses `ELEVENLABS_API_KEY` from the process environment.
+4. 🫧 Bot prompts stream progress and split long final answers.
+5. 📎 Photos and image documents are attached; other documents become file paths.
+6. 🎙️ Voice messages are transcribed locally with Whisper `large`.
+7. 🔊 `/voice` toggles spoken replies for the current session. `/new`, `/resume`,
+   `/restart`, and model changes disable voice mode.
+   Voice replies try `tts`, then local Voicebox.

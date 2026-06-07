@@ -1194,6 +1194,7 @@ fn handle_command_with_codex(
                 "gateway restart requested chat={} message={} target={}",
                 msg.chat.id, msg.message_id, cfg.launchd_target
             ));
+            store.set_voice_enabled(&key, false)?;
             tg.send_message(msg.chat.id, "🔄 Restarting gateway.", msg.message_id)?;
             restart_gateway(&cfg.launchd_target);
             Ok(())
@@ -1205,7 +1206,7 @@ fn handle_command_with_codex(
         Some(Directive::List) => {
             send_long_message(tg, msg.chat.id, &store.list(&key), msg.message_id)
         }
-        Some(Directive::Voice) => handle_voice_command(tg, store, msg, text, &key),
+        Some(Directive::Voice) => handle_voice_command(cfg, tg, store, msg, text, &key),
         Some(Directive::Stop) => handle_stop_command(tg, cancellations, msg, &key),
         Some(Directive::Status) => {
             handle_status_command(cfg, codex, tg, store, selections, msg, &key);
@@ -1216,6 +1217,7 @@ fn handle_command_with_codex(
 }
 
 fn handle_voice_command(
+    cfg: &Config,
     tg: &impl TelegramApi,
     store: &SessionStore,
     msg: &Message,
@@ -1237,16 +1239,17 @@ fn handle_voice_command(
         }
     };
     match store.set_voice_enabled(key, enabled) {
-        Ok(_) if enabled => tg.send_message(
-            msg.chat.id,
-            "🔊 Voice mode enabled for this session. Send /voice off to disable.",
-            msg.message_id,
-        ),
-        Ok(_) => tg.send_message(
-            msg.chat.id,
-            "🔇 Voice mode disabled for this session.",
-            msg.message_id,
-        ),
+        Ok(_) if enabled => {
+            let text = if let Some(warning) = cfg.tts_fallback_warning() {
+                format!(
+                    "🔊 Voice mode enabled for this session. Send /voice off to disable.\n\n{warning}"
+                )
+            } else {
+                "🔊 Voice mode enabled for this session. Send /voice off to disable.".to_string()
+            };
+            tg.send_message(msg.chat.id, &text, msg.message_id)
+        }
+        Ok(_) => tg.send_message(msg.chat.id, "🔇 Voice mode disabled.", msg.message_id),
         Err(err) => tg.send_message(
             msg.chat.id,
             &format!("⚠️ Failed to update voice mode: {err}"),
@@ -3487,7 +3490,9 @@ printf 'session id: session-12345678\n' >&2
             "/status",
         )
         .unwrap();
+        assert!(store.set_voice_enabled(&key, true).unwrap().voice_enabled);
         handle_command(&cfg, &tg, &store, &selections, &msg, "/restart", "/restart").unwrap();
+        assert!(!store.load(&key).voice_enabled);
         handle_command(&cfg, &tg, &store, &selections, &msg, "/wat", "/wat").unwrap();
 
         assert_sent_text_eventually(&tg, |text| text.contains("🧠 Codex:"));
@@ -4414,6 +4419,33 @@ printf 'session id: aaaaaaaa-current\n' >&2
             .sent_text()
             .iter()
             .any(|text| text.contains("🔇 Voice mode disabled")));
+    }
+
+    #[test]
+    fn voice_on_warns_and_enables_when_tts_config_is_invalid() {
+        let dir = tempdir().unwrap();
+        let mut cfg = test_config(dir.path());
+        cfg.tts = Some(serde_json::json!({"provider":"eleventlabs","speed":0}));
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let key = SessionKey::Chat {
+            chat_id: 42,
+            thread_id: None,
+        };
+        let tg = FakeTelegram::new();
+        let selections = RuntimeSelections::default();
+        let msg = message(42, 12, "/voice on");
+
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/voice on", "/voice").unwrap();
+
+        assert!(store.load(&key).voice_enabled);
+        assert!(tg.sent_text().iter().any(|text| {
+            text.contains("Voice mode enabled")
+                && text.contains("Invalid `tts` config")
+                && text.contains("falling back to local Voicebox")
+        }));
     }
 
     #[test]
@@ -5495,6 +5527,7 @@ exit 2
                     role: ModelRole::Light,
                 },
             ],
+            tts: None,
             state_dir: root.join("state/gateway"),
             chat_state_dir: root.join("state/gateway/chats"),
             offset_file: root.join("state/gateway/telegram.offset"),

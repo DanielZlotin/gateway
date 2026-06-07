@@ -6,11 +6,15 @@ gateway_root="${0:A:h}"
 : "${GATEWAY_TELEGRAM_CHAT_ID:?GATEWAY_TELEGRAM_CHAT_ID is required}"
 : "${HOME:?HOME is required}"
 : "${PATH:?PATH is required}"
+gateway_xdg_data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
 
 gateway_required_commands=(
+  arch
   awk
   cargo
+  chmod
   codex
+  curl
   date
   fastfetch
   ffmpeg
@@ -30,6 +34,7 @@ gateway_required_commands=(
   rustc
   sed
   sleep
+  tar
   whisper
   xargs
 )
@@ -120,13 +125,69 @@ if (( ${#gateway_missing_commands[@]} )); then
   exit 69
 fi
 
+gateway_voicebox_version="0.5.0"
+gateway_voicebox_root="$gateway_xdg_data_home/gateway/voicebox"
+gateway_voicebox_app="$gateway_voicebox_root/Voicebox.app"
+gateway_voicebox_executable="$gateway_voicebox_app/Contents/MacOS/Voicebox"
+gateway_voicebox_archive=
+gateway_voicebox_stage=
+gateway_plist_tmp=
+trap '[[ -z "${gateway_voicebox_archive:-}" ]] || rm -f "$gateway_voicebox_archive"; [[ -z "${gateway_voicebox_stage:-}" ]] || rm -rf "$gateway_voicebox_stage"; [[ -z "${gateway_plist_tmp:-}" ]] || rm -f "$gateway_plist_tmp"' EXIT
+
+gateway_voicebox_asset_name() {
+  local gateway_arch
+  gateway_arch="$(arch)"
+  case "$gateway_arch" in
+    arm64) print -r -- "Voicebox_aarch64.app.tar.gz" ;;
+    i386|x86_64) print -r -- "Voicebox_x64.app.tar.gz" ;;
+    *)
+      print -u2 "setup cannot install Voicebox for unsupported architecture: $gateway_arch"
+      exit 69
+      ;;
+  esac
+}
+
+gateway_install_voicebox_app() {
+  local gateway_asset gateway_url gateway_staged_executable
+  gateway_asset="$(gateway_voicebox_asset_name)"
+  gateway_voicebox_archive="$gateway_voicebox_root/$gateway_asset"
+  gateway_voicebox_stage="$gateway_voicebox_root/.Voicebox.app.$$"
+  gateway_url="https://github.com/jamiepine/voicebox/releases/download/v$gateway_voicebox_version/$gateway_asset"
+
+  mkdir -p "$gateway_voicebox_root"
+  rm -rf "$gateway_voicebox_stage"
+  mkdir -p "$gateway_voicebox_stage"
+  print -- "updating Voicebox v$gateway_voicebox_version: $gateway_url"
+  curl -L --fail -o "$gateway_voicebox_archive" "$gateway_url"
+  tar -xzf "$gateway_voicebox_archive" -C "$gateway_voicebox_stage"
+  rm -f "$gateway_voicebox_archive"
+  gateway_voicebox_archive=
+
+  gateway_staged_executable="$gateway_voicebox_stage/Voicebox.app/Contents/MacOS/Voicebox"
+  if [[ ! -f "$gateway_staged_executable" ]]; then
+    print -u2 "setup could not find Voicebox executable in downloaded archive: $gateway_staged_executable"
+    exit 69
+  fi
+
+  rm -rf "$gateway_voicebox_app"
+  mv "$gateway_voicebox_stage/Voicebox.app" "$gateway_voicebox_app"
+  rm -rf "$gateway_voicebox_stage"
+  gateway_voicebox_stage=
+
+  if [[ ! -x "$gateway_voicebox_executable" ]]; then
+    print -u2 "setup could not install Voicebox executable at $gateway_voicebox_executable"
+    exit 69
+  fi
+  chmod +x "$gateway_voicebox_executable"
+}
+
+gateway_install_voicebox_app
+
 gateway_label="ai.gateway"
 gateway_domain="gui/$(id -u)"
 gateway_launch="$gateway_root/launch"
 gateway_plist_template="$gateway_root/$gateway_label.plist"
 gateway_plist_dest="$HOME/Library/LaunchAgents/$gateway_label.plist"
-gateway_plist_tmp=
-trap '[[ -z "${gateway_plist_tmp:-}" ]] || rm -f "$gateway_plist_tmp"' EXIT
 
 if [[ ! -x "$gateway_launch" ]]; then
   print -u2 "LaunchAgent launcher is missing or not executable: $gateway_launch"

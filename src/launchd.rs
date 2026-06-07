@@ -97,6 +97,9 @@ mod tests {
     const SETUP_HOMEBREW_CASK_TOOLS: &[&str] = &["codex"];
     const SETUP_SYSTEM_TOOLS: &[&str] = &[
         "awk",
+        "arch",
+        "chmod",
+        "curl",
         "date",
         "id",
         "launchctl",
@@ -105,6 +108,7 @@ mod tests {
         "rm",
         "sed",
         "sleep",
+        "tar",
         "xargs",
     ];
 
@@ -225,6 +229,7 @@ mod tests {
         for name in setup_homebrew_tool_names() {
             write_executable(&stub_dir.join(name), "#!/bin/zsh\nexit 0\n");
         }
+        write_setup_system_tools(&stub_dir);
         write_executable(&stub_dir.join("jq"), "#!/bin/zsh\nprint -r -- \"$4\"\n");
         write_executable(
             &stub_dir.join("launchctl"),
@@ -257,6 +262,7 @@ mod tests {
         let plist = fs::read_to_string(home.join("Library/LaunchAgents/ai.gateway.plist")).unwrap();
         assert!(!plist.contains("EnvironmentVariables"));
         assert!(!plist.contains("GATEWAY_TELEGRAM_TOKEN"));
+        assert!(!plist.contains("XDG_DATA_HOME"));
         assert!(!plist.contains("XDG_STATE_HOME"));
         assert!(plist.contains(&format!("exec {}", env!("CARGO_MANIFEST_DIR"))));
         let launchctl_log = fs::read_to_string(launchctl_log).unwrap();
@@ -266,6 +272,9 @@ mod tests {
             !launchctl_log.contains("kickstart"),
             "setup should let the RunAtLoad bootstrap start the gateway once:\n{launchctl_log}"
         );
+        assert!(root
+            .join("home/.local/share/gateway/voicebox/Voicebox.app/Contents/MacOS/Voicebox")
+            .exists());
     }
 
     #[test]
@@ -280,6 +289,8 @@ mod tests {
         assert!(setup.contains("rg) print -r -- ripgrep ;;"));
         assert!(setup.contains("whisper) print -r -- openai-whisper ;;"));
         assert!(setup.contains("codex) print -r -- codex ;;"));
+        let cask_probe = ["brew", " info ", "--cask"].concat();
+        assert!(!setup.contains(&cask_probe));
     }
 
     #[test]
@@ -308,6 +319,7 @@ mod tests {
             .arg(setup_script())
             .env_clear()
             .env("HOME", &home)
+            .env("XDG_DATA_HOME", root.join("data"))
             .env("PATH", path)
             .env("GATEWAY_TEST_BREW_LOG", &brew_log)
             .env("GATEWAY_TEST_LAUNCHCTL_LOG", &launchctl_log)
@@ -328,6 +340,70 @@ mod tests {
             "install rust fastfetch ffmpeg fzf gh git go jq node parallel ripgrep openai-whisper"
         ));
         assert!(brew_log.contains("install --cask codex"));
+        assert!(root
+            .join("data/gateway/voicebox/Voicebox.app/Contents/MacOS/Voicebox")
+            .exists());
+    }
+
+    #[test]
+    fn setup_refreshes_existing_voicebox_app_without_removing_models_or_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let stub_dir = root.join("bin");
+        let home = root.join("home");
+        let data_home = root.join("data");
+        let voicebox_root = data_home.join("gateway/voicebox");
+        let voicebox_bin = voicebox_root.join("Voicebox.app/Contents/MacOS/Voicebox");
+        let model_marker = voicebox_root.join("models/model.bin");
+        let data_marker = voicebox_root.join("data/profiles.json");
+        let launchctl_log = root.join("launchctl.log");
+
+        fs::create_dir_all(voicebox_bin.parent().unwrap()).unwrap();
+        fs::create_dir_all(model_marker.parent().unwrap()).unwrap();
+        fs::create_dir_all(data_marker.parent().unwrap()).unwrap();
+        fs::write(&voicebox_bin, "#!/bin/zsh\nprint -r -- old voicebox\n").unwrap();
+        fs::write(&model_marker, "model").unwrap();
+        fs::write(&data_marker, "profiles").unwrap();
+        fs::set_permissions(&voicebox_bin, fs::Permissions::from_mode(0o700)).unwrap();
+
+        fs::create_dir_all(&stub_dir).unwrap();
+        for name in setup_homebrew_tool_names() {
+            write_executable(&stub_dir.join(name), "#!/bin/zsh\nexit 0\n");
+        }
+        write_setup_system_tools(&stub_dir);
+        write_executable(&stub_dir.join("jq"), "#!/bin/zsh\nprint -r -- \"$4\"\n");
+        write_executable(
+            &stub_dir.join("launchctl"),
+            "#!/bin/zsh\nprint -- \"$*\" >> \"$GATEWAY_TEST_LAUNCHCTL_LOG\"\nexit 0\n",
+        );
+        write_executable(
+            &stub_dir.join("sleep"),
+            "#!/bin/zsh\nprint -- \"sleep $*\" >> \"$GATEWAY_TEST_LAUNCHCTL_LOG\"\nexit 0\n",
+        );
+
+        let output = Command::new("/bin/zsh")
+            .arg(setup_script())
+            .env_clear()
+            .env("HOME", &home)
+            .env("XDG_DATA_HOME", &data_home)
+            .env("PATH", format!("{}:/bin:/usr/bin", stub_dir.display()))
+            .env("GATEWAY_TEST_LAUNCHCTL_LOG", &launchctl_log)
+            .env("GATEWAY_TELEGRAM_TOKEN", "fake-token")
+            .env("GATEWAY_TELEGRAM_CHAT_ID", "42")
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "setup failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let voicebox = fs::read_to_string(&voicebox_bin).unwrap();
+        assert!(!voicebox.contains("old voicebox"));
+        assert!(voicebox.contains("exit 0"));
+        assert_eq!(fs::read_to_string(model_marker).unwrap(), "model");
+        assert_eq!(fs::read_to_string(data_marker).unwrap(), "profiles");
     }
 
     fn setup_script() -> PathBuf {
@@ -354,10 +430,14 @@ mod tests {
     fn write_setup_system_tools(stub_dir: &Path) {
         for name in SETUP_SYSTEM_TOOLS {
             let body = match *name {
+                "arch" => "#!/bin/zsh\nprint -r -- arm64\n",
+                "chmod" => "#!/bin/zsh\nexec /bin/chmod \"$@\"\n",
+                "curl" => "#!/bin/zsh\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [[ \"$prev\" == -o ]]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nprint -r -- voicebox-archive > \"$out\"\n",
                 "id" => "#!/bin/zsh\nif [[ \"${1:-}\" == -u ]]; then print -r -- 501; else exec /usr/bin/id \"$@\"; fi\n",
                 "mkdir" => "#!/bin/zsh\nexec /bin/mkdir \"$@\"\n",
                 "mv" => "#!/bin/zsh\nexec /bin/mv \"$@\"\n",
                 "rm" => "#!/bin/zsh\nexec /bin/rm \"$@\"\n",
+                "tar" => "#!/bin/zsh\ndest=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [[ \"$prev\" == -C ]]; then dest=\"$arg\"; fi\n  prev=\"$arg\"\ndone\n/bin/mkdir -p \"$dest/Voicebox.app/Contents/MacOS\"\nprint -r -- '#!/bin/zsh\nexit 0' > \"$dest/Voicebox.app/Contents/MacOS/Voicebox\"\n/bin/chmod +x \"$dest/Voicebox.app/Contents/MacOS/Voicebox\"\n",
                 _ => "#!/bin/zsh\nexit 0\n",
             };
             write_executable(&stub_dir.join(name), body);

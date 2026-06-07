@@ -117,7 +117,7 @@ pub const DIRECTIVE_SPECS: &[DirectiveSpec] = &[
         directive: Directive::Voice,
         icon: "🔊",
         usage: " [on|off]",
-        summary: "toggle spoken audio replies for this session",
+        summary: "toggle spoken audio replies for the current session",
     },
     DirectiveSpec {
         directive: Directive::Stop,
