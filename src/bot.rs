@@ -28,6 +28,9 @@ const TELEGRAM_GET_UPDATES_CONFLICT_MARKER: &str = "terminated by other getUpdat
 const GATEWAY_UPDATE_JOB_LABEL: &str = "ai.gateway.update";
 const GATEWAY_UPDATE_PENDING_LOCK_TTL_SECS: u64 = 300;
 const VOICE_TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(120);
+const VOICE_TRANSCRIPTION_MODEL: &str = "small";
+const VOICE_STATUS_MESSAGE: &str = "🎙️ Transcribing…";
+const THINKING_MESSAGE: &str = "🫧 Thinking…";
 const WHISPER_BIN: &str = "whisper";
 const GATEWAY_UPDATE_SCRIPT: &str = r#"gateway_update_label="$1"
 gateway_update_lock="$2"
@@ -181,6 +184,7 @@ struct Job {
     file_paths: Vec<PathBuf>,
     provider_model: ProviderModel,
     cancel_epoch: u64,
+    stream_message_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -669,6 +673,7 @@ fn handle_message(
     }
     if !attachment_specs.is_empty() {
         let chat_id = msg.chat.id;
+        let stream_message_id = initial_stream_message_id(tg, &msg, &attachment_specs);
         let cfg = cfg.clone();
         let worker_tg = tg.clone();
         let action_tg = tg.clone();
@@ -685,6 +690,7 @@ fn handle_message(
                 msg,
                 text,
                 attachment_specs,
+                stream_message_id,
             ) {
                 logs::warn(format_args!("attachment message handler failed: {err}"));
             }
@@ -702,7 +708,28 @@ fn handle_message(
         &msg,
         text,
         DownloadedAttachments::default(),
+        None,
     )
+}
+
+fn initial_stream_message_id<T: TelegramApi>(
+    tg: &T,
+    msg: &Message,
+    attachment_specs: &[AttachmentSpec],
+) -> Option<i64> {
+    if !attachment_specs
+        .iter()
+        .any(|attachment| attachment.kind == AttachmentKind::Voice)
+    {
+        return None;
+    }
+    match tg.send_message_returning(msg.chat.id, VOICE_STATUS_MESSAGE, msg.message_id) {
+        Ok(message_id) => Some(message_id),
+        Err(err) => {
+            logs::warn(format_args!("failed to send voice status message: {err}"));
+            None
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -715,6 +742,7 @@ fn download_attachments_and_queue_job<T: TelegramApi>(
     msg: Message,
     text: String,
     attachment_specs: Vec<AttachmentSpec>,
+    stream_message_id: Option<i64>,
 ) -> Result<(), String> {
     download_attachments_transcribe_and_queue_job(
         cfg,
@@ -725,6 +753,7 @@ fn download_attachments_and_queue_job<T: TelegramApi>(
         msg,
         text,
         attachment_specs,
+        stream_message_id,
         transcribe_voice_attachment,
     )
 }
@@ -739,6 +768,7 @@ fn download_attachments_transcribe_and_queue_job<T, F>(
     msg: Message,
     text: String,
     attachment_specs: Vec<AttachmentSpec>,
+    stream_message_id: Option<i64>,
     mut transcribe_voice: F,
 ) -> Result<(), String>
 where
@@ -748,11 +778,8 @@ where
     let attachments = match download_message_attachments(cfg, tg, &attachment_specs) {
         Ok(attachments) => attachments,
         Err(err) => {
-            tg.send_message(
-                msg.chat.id,
-                &format!("⚠️ Failed to download Telegram attachment: {err}"),
-                msg.message_id,
-            )?;
+            let text = format!("⚠️ Failed to download Telegram attachment: {err}");
+            send_or_edit_status_message(tg, msg.chat.id, msg.message_id, stream_message_id, &text)?;
             return Ok(());
         }
     };
@@ -761,10 +788,13 @@ where
         match transcribe_voice(path) {
             Ok(text) => voice_transcripts.push(text),
             Err(err) => {
-                tg.send_message(
+                let text = format!("⚠️ Failed to transcribe Telegram voice message: {err}");
+                send_or_edit_status_message(
+                    tg,
                     msg.chat.id,
-                    &format!("⚠️ Failed to transcribe Telegram voice message: {err}"),
                     msg.message_id,
+                    stream_message_id,
+                    &text,
                 )?;
                 return Ok(());
             }
@@ -780,7 +810,22 @@ where
         &msg,
         text,
         attachments,
+        stream_message_id,
     )
+}
+
+fn send_or_edit_status_message<T: TelegramApi>(
+    tg: &T,
+    chat_id: i64,
+    reply_to_message_id: i64,
+    stream_message_id: Option<i64>,
+    text: &str,
+) -> Result<(), String> {
+    if let Some(message_id) = stream_message_id {
+        tg.edit_message_text(chat_id, message_id, text)
+    } else {
+        tg.send_message(chat_id, text, reply_to_message_id)
+    }
 }
 
 fn prompt_text_with_voice_transcripts(
@@ -798,7 +843,7 @@ fn prompt_text_with_voice_transcripts(
         .collect::<Vec<_>>()
         .join("\n\n");
     if msg.text.trim().is_empty() && msg.caption.trim().is_empty() {
-        return transcript;
+        return format!("Telegram voice transcript:\n{transcript}");
     }
     format!(
         "{}\n\nTelegram voice transcript:\n{}",
@@ -833,7 +878,13 @@ fn transcribe_voice_with_whisper(
         .ok_or_else(|| "voice attachment has no file stem".to_string())?;
     let transcript_path = output_dir.join(format!("{stem}.txt"));
     let child = Command::new(whisper)
-        .args(["--model", "large", "--output_format", "txt", "--output_dir"])
+        .args([
+            "--model",
+            VOICE_TRANSCRIPTION_MODEL,
+            "--output_format",
+            "txt",
+            "--output_dir",
+        ])
         .arg(output_dir)
         .arg(audio_path)
         .stdout(Stdio::null())
@@ -896,6 +947,7 @@ fn queue_codex_job<T: TelegramApi>(
     msg: &Message,
     text: String,
     attachments: DownloadedAttachments,
+    stream_message_id: Option<i64>,
 ) -> Result<(), String> {
     let key = SessionKey::Chat {
         chat_id: msg.chat.id,
@@ -917,12 +969,15 @@ fn queue_codex_job<T: TelegramApi>(
         file_paths: attachments.file_paths,
         provider_model: selected_provider_model(cfg, selections, &key),
         cancel_epoch: cancellation_epoch(cancellations, &key),
+        stream_message_id,
     });
     if queued.is_err() {
-        tg.send_message(
+        send_or_edit_status_message(
+            tg,
             msg.chat.id,
-            "🚦 Codex queue is full. Try again after the current requests finish.",
             msg.message_id,
+            stream_message_id,
+            "🚦 Codex queue is full. Try again after the current requests finish.",
         )?;
     } else {
         let _ = tg.send_chat_action(msg.chat.id, "typing");
@@ -1709,8 +1764,7 @@ fn run_job_with_codex(
         job.image_paths.len() + job.file_paths.len(),
         cfg.codex_timeout.as_secs()
     ));
-    let stream_message_id =
-        tg.send_message_returning(job.chat_id, "🫧 Thinking…", job.reply_to_message_id)?;
+    let stream_message_id = prepare_stream_message(tg, &job)?;
     let cancel = register_active_cancel(cancellations, &key);
     let mut streamed = String::new();
     let mut last_edit = Instant::now();
@@ -1798,6 +1852,19 @@ fn run_job_with_codex(
             Ok(())
         }
     }
+}
+
+fn prepare_stream_message(tg: &impl TelegramApi, job: &Job) -> Result<i64, String> {
+    if let Some(message_id) = job.stream_message_id {
+        match tg.edit_message_text(job.chat_id, message_id, THINKING_MESSAGE) {
+            Ok(()) => return Ok(message_id),
+            Err(err) => logs::warn(format_args!(
+                "failed to edit existing stream message chat={} message_id={} error={}",
+                job.chat_id, message_id, err
+            )),
+        }
+    }
+    tg.send_message_returning(job.chat_id, THINKING_MESSAGE, job.reply_to_message_id)
 }
 
 fn cancellation_epoch(cancellations: &CancellationState, key: &SessionKey) -> u64 {
@@ -2487,6 +2554,57 @@ mod tests {
     }
 
     #[test]
+    fn queue_codex_job_edits_existing_stream_message_when_queue_is_full() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let tg = FakeTelegram::new();
+        let selections = RuntimeSelections::default();
+        let cancellations = CancellationState::default();
+        let (full_tx, _full_rx) = mpsc::sync_channel(0);
+        let msg = message(42, 4, "queued");
+
+        queue_codex_job(
+            &cfg,
+            &tg,
+            &selections,
+            &cancellations,
+            &full_tx,
+            &msg,
+            "queued".to_string(),
+            DownloadedAttachments::default(),
+            Some(123),
+        )
+        .unwrap();
+
+        assert!(tg.calls().iter().any(|call| {
+            matches!(
+                call,
+                Call::Edit {
+                    chat_id: 42,
+                    message_id: 123,
+                    text
+                } if text.contains("🚦 Codex queue is full")
+            )
+        }));
+    }
+
+    #[test]
+    fn initial_stream_message_id_sends_status_for_voice_messages() {
+        let tg = FakeTelegram::new();
+        let msg = message_with_voice(42, 6, "voice-1");
+        let attachment_specs = message_attachment_specs(&msg);
+
+        let stream_message_id = initial_stream_message_id(&tg, &msg, &attachment_specs);
+
+        assert_eq!(stream_message_id, Some(100));
+        assert!(tg.calls().contains(&Call::SendReturning {
+            chat_id: 42,
+            reply_to: 6,
+            text: VOICE_STATUS_MESSAGE.to_string()
+        }));
+    }
+
+    #[test]
     fn handle_message_adds_replied_message_text_to_prompt() {
         let dir = tempdir().unwrap();
         let cfg = test_config(dir.path());
@@ -2594,6 +2712,7 @@ mod tests {
             msg,
             String::new(),
             attachment_specs,
+            Some(123),
             |path| {
                 assert_eq!(fs::read(path).unwrap(), b"voice bytes");
                 Ok("hello from voice".to_string())
@@ -2602,7 +2721,10 @@ mod tests {
         .unwrap();
 
         let job = rx.recv().unwrap();
-        assert_eq!(job.prompt, "hello from voice");
+        assert!(!job.prompt.contains("Reply in English."));
+        assert!(job.prompt.contains("Telegram voice transcript:"));
+        assert!(job.prompt.contains("hello from voice"));
+        assert_eq!(job.stream_message_id, Some(123));
         assert!(job.image_paths.is_empty());
         assert!(job.file_paths.is_empty());
         assert!(tg.calls().contains(&Call::Download {
@@ -2636,13 +2758,59 @@ mod tests {
             msg.clone(),
             String::new(),
             message_attachment_specs(&msg),
+            Some(123),
             |_| Err("whisper exited with 2".to_string()),
         )
         .unwrap();
 
         assert!(rx.try_recv().is_err());
-        assert!(tg.sent_text().iter().any(|text| {
-            text == "⚠️ Failed to transcribe Telegram voice message: whisper exited with 2"
+        assert!(tg.calls().iter().any(|call| {
+            matches!(
+                call,
+                Call::Edit {
+                    chat_id: 42,
+                    message_id: 123,
+                    text
+                } if text == "⚠️ Failed to transcribe Telegram voice message: whisper exited with 2"
+            )
+        }));
+    }
+
+    #[test]
+    fn download_voice_reports_download_failures_on_existing_status_message() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let tg = FakeTelegram::new();
+        tg.push_download(Err("download failed".to_string()));
+        let selections = RuntimeSelections::default();
+        let cancellations = CancellationState::default();
+        let (tx, rx) = mpsc::sync_channel(1);
+        let msg = message_with_voice(42, 6, "voice-1");
+
+        download_attachments_transcribe_and_queue_job(
+            &cfg,
+            &tg,
+            &selections,
+            &cancellations,
+            &tx,
+            msg.clone(),
+            String::new(),
+            message_attachment_specs(&msg),
+            Some(123),
+            |_| panic!("download failure should skip transcription"),
+        )
+        .unwrap();
+
+        assert!(rx.try_recv().is_err());
+        assert!(tg.calls().iter().any(|call| {
+            matches!(
+                call,
+                Call::Edit {
+                    chat_id: 42,
+                    message_id: 123,
+                    text
+                } if text == "⚠️ Failed to download Telegram attachment: download failed"
+            )
         }));
     }
 
@@ -2678,10 +2846,11 @@ printf 'transcribed text\n' > "$outdir/$stem.txt"
         assert_eq!(text, "transcribed text");
         let args = fs::read_to_string(output_dir.join("args.txt")).unwrap();
         let args = args.lines().collect::<Vec<_>>();
-        assert!(args.windows(2).any(|pair| pair == ["--model", "large"]));
+        assert!(args.windows(2).any(|pair| pair == ["--model", "small"]));
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--output_format", "txt"]));
+        assert!(!args.iter().any(|arg| *arg == "--task"));
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--output_dir", output_dir.to_str().unwrap()]));
@@ -3854,6 +4023,52 @@ printf 'session id: session-ok\n' >&2
     }
 
     #[test]
+    fn run_job_reuses_existing_stream_message_when_present() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let codex = test_codex_config(
+            &cfg,
+            executable(
+                dir.path().join("codex-existing-stream"),
+                r#"#!/bin/sh
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--output-last-message" ]; then out="$arg"; fi
+  prev="$arg"
+done
+cat >/dev/null
+printf 'OK\n' > "$out"
+"#,
+            ),
+        );
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let tg = FakeTelegram::new();
+        let mut queued = job("make it so");
+        queued.stream_message_id = Some(123);
+
+        run_job_with_codex(&cfg, &codex, &tg, &store, queued).unwrap();
+
+        let calls = tg.calls();
+        assert!(calls.contains(&Call::Edit {
+            chat_id: 42,
+            message_id: 123,
+            text: THINKING_MESSAGE.to_string()
+        }));
+        assert!(!calls.iter().any(|call| matches!(
+            call,
+            Call::SendReturning { text, .. } if text == THINKING_MESSAGE
+        )));
+        assert!(calls.contains(&Call::Delete {
+            chat_id: 42,
+            message_id: 123
+        }));
+    }
+
+    #[test]
     fn run_job_sends_final_message_and_falls_back_without_effect() {
         let dir = tempdir().unwrap();
         let cfg = test_config(dir.path());
@@ -4803,6 +5018,7 @@ exit 2
                 role: ModelRole::Default,
             },
             cancel_epoch: 0,
+            stream_message_id: None,
         }
     }
 
