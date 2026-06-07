@@ -984,6 +984,9 @@ fn queue_codex_job<T: TelegramApi>(
             "🚦 Codex queue is full. Try again after the current requests finish.",
         )?;
     } else {
+        if let Some(message_id) = stream_message_id {
+            let _ = tg.edit_message_text(msg.chat.id, message_id, THINKING_MESSAGE);
+        }
         let _ = tg.send_chat_action(msg.chat.id, "typing");
     }
     Ok(())
@@ -1862,6 +1865,7 @@ fn prepare_stream_message(tg: &impl TelegramApi, job: &Job) -> Result<i64, Strin
     if let Some(message_id) = job.stream_message_id {
         match tg.edit_message_text(job.chat_id, message_id, THINKING_MESSAGE) {
             Ok(()) => return Ok(message_id),
+            Err(err) if is_message_not_modified_error(&err) => return Ok(message_id),
             Err(err) => logs::warn(format_args!(
                 "failed to edit existing stream message chat={} message_id={} error={}",
                 job.chat_id, message_id, err
@@ -1869,6 +1873,10 @@ fn prepare_stream_message(tg: &impl TelegramApi, job: &Job) -> Result<i64, Strin
         }
     }
     tg.send_message_returning(job.chat_id, THINKING_MESSAGE, job.reply_to_message_id)
+}
+
+fn is_message_not_modified_error(err: &str) -> bool {
+    err.to_ascii_lowercase().contains("message is not modified")
 }
 
 fn cancellation_epoch(cancellations: &CancellationState, key: &SessionKey) -> u64 {
@@ -2588,6 +2596,43 @@ mod tests {
                     message_id: 123,
                     text
                 } if text.contains("🚦 Codex queue is full")
+            )
+        }));
+    }
+
+    #[test]
+    fn queue_codex_job_edits_existing_stream_message_when_queued() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let tg = FakeTelegram::new();
+        let selections = RuntimeSelections::default();
+        let cancellations = CancellationState::default();
+        let (tx, rx) = mpsc::sync_channel(1);
+        let msg = message(42, 4, "queued");
+
+        queue_codex_job(
+            &cfg,
+            &tg,
+            &selections,
+            &cancellations,
+            &tx,
+            &msg,
+            "queued".to_string(),
+            DownloadedAttachments::default(),
+            Some(123),
+        )
+        .unwrap();
+
+        let job = rx.recv().unwrap();
+        assert_eq!(job.stream_message_id, Some(123));
+        assert!(tg.calls().iter().any(|call| {
+            matches!(
+                call,
+                Call::Edit {
+                    chat_id: 42,
+                    message_id: 123,
+                    text
+                } if text == THINKING_MESSAGE
             )
         }));
     }
@@ -4088,6 +4133,24 @@ printf 'OK\n' > "$out"
     }
 
     #[test]
+    fn prepare_stream_message_keeps_existing_message_when_already_thinking() {
+        let tg = FakeTelegram::new();
+        tg.fail_edits("Bad Request: message is not modified");
+        let mut queued = job("make it so");
+        queued.stream_message_id = Some(123);
+
+        let stream_message_id = prepare_stream_message(&tg, &queued).unwrap();
+
+        assert_eq!(stream_message_id, 123);
+        assert!(!tg.calls().iter().any(|call| {
+            matches!(
+                call,
+                Call::SendReturning { text, .. } if text == THINKING_MESSAGE
+            )
+        }));
+    }
+
+    #[test]
     fn run_job_sends_final_message_and_falls_back_without_effect() {
         let dir = tempdir().unwrap();
         let cfg = test_config(dir.path());
@@ -4382,6 +4445,7 @@ exit 2
         downloads: VecDeque<Result<Vec<u8>, String>>,
         sync_error: Option<String>,
         send_error: Option<String>,
+        edit_error: Option<String>,
         download_delay: Duration,
         next_message_id: i64,
     }
@@ -4420,6 +4484,10 @@ exit 2
 
         fn fail_sends(&self, err: &str) {
             self.state.lock().unwrap().send_error = Some(err.to_string());
+        }
+
+        fn fail_edits(&self, err: &str) {
+            self.state.lock().unwrap().edit_error = Some(err.to_string());
         }
 
         fn fail_sync(&self, err: &str) {
@@ -4586,11 +4654,18 @@ exit 2
             message_id: i64,
             text: &str,
         ) -> Result<(), String> {
-            self.state.lock().unwrap().calls.push(Call::Edit {
-                chat_id,
-                message_id,
-                text: text.to_string(),
-            });
+            let edit_error = {
+                let mut state = self.state.lock().unwrap();
+                state.calls.push(Call::Edit {
+                    chat_id,
+                    message_id,
+                    text: text.to_string(),
+                });
+                state.edit_error.clone()
+            };
+            if let Some(err) = edit_error {
+                return Err(err);
+            }
             Ok(())
         }
 
