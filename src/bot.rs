@@ -9,6 +9,7 @@ use crate::text::{
     command_arg, is_ok_response, log_line_count, parse_command, redact_private_data, session_label,
     split_telegram_message, tail_log_text,
 };
+use crate::tts::{self, VoiceOutput};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -32,6 +33,7 @@ const VOICE_TRANSCRIPTION_MODEL: &str = "large";
 const VOICE_TRANSCRIPTION_LANGUAGE: &str = "en";
 const VOICE_STATUS_MESSAGE: &str = "🎙️ Transcribing…";
 const THINKING_MESSAGE: &str = "🫧 Thinking…";
+const SPEAKING_MESSAGE: &str = "🔊 Speaking…";
 const WHISPER_BIN: &str = "whisper";
 const GATEWAY_UPDATE_SCRIPT: &str = r#"gateway_update_label="$1"
 gateway_update_lock="$2"
@@ -43,11 +45,17 @@ print -r -- "$$" > "$gateway_update_lock"
 {
   print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] starting gateway update"
   cd "$gateway_update_root" &&
+    print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] gateway update phase: git pull" &&
     git pull &&
+    print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] gateway update phase: brew update" &&
     brew update &&
+    print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] gateway update phase: brew upgrade" &&
     brew upgrade &&
+    print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] gateway update phase: brew cleanup" &&
     brew cleanup &&
+    print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] gateway update phase: foundryup" &&
     (curl -sSfL "https://raw.githubusercontent.com/foundry-rs/foundry/refs/heads/master/foundryup/foundryup" | bash) &&
+    print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] gateway update phase: setup" &&
     ./setup
   gateway_update_code=$?
   print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] gateway update exited $gateway_update_code"
@@ -96,6 +104,12 @@ trait TelegramApi: Clone + Send + 'static {
     fn edit_message_text(&self, chat_id: i64, message_id: i64, text: &str) -> Result<(), String>;
     fn send_chat_action(&self, chat_id: i64, action: &str) -> Result<(), String>;
     fn download_file(&self, file_id: &str, path: &Path) -> Result<(), String>;
+    fn send_voice(
+        &self,
+        chat_id: i64,
+        voice_path: &Path,
+        reply_to_message_id: i64,
+    ) -> Result<(), String>;
 }
 
 impl TelegramApi for TelegramClient {
@@ -171,6 +185,15 @@ impl TelegramApi for TelegramClient {
     fn download_file(&self, file_id: &str, path: &Path) -> Result<(), String> {
         self.download_file(file_id, path)
     }
+
+    fn send_voice(
+        &self,
+        chat_id: i64,
+        voice_path: &Path,
+        reply_to_message_id: i64,
+    ) -> Result<(), String> {
+        self.send_voice(chat_id, voice_path, reply_to_message_id)
+    }
 }
 
 #[derive(Debug)]
@@ -186,6 +209,23 @@ struct Job {
     provider_model: ProviderModel,
     cancel_epoch: u64,
     stream_message_id: Option<i64>,
+    delivery: JobDelivery,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum JobDelivery {
+    #[default]
+    Text,
+    Voice,
+}
+
+impl JobDelivery {
+    const fn label(self) -> &'static str {
+        match self {
+            JobDelivery::Text => "text",
+            JobDelivery::Voice => "voice",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -246,6 +286,13 @@ impl Drop for TypingLoop {
 }
 
 pub fn run(cfg: Config) -> Result<(), String> {
+    logs::info(format_args!(
+        "telegram bot mode starting configured_bots={} chats={} queue_depth={} poll_timeout_secs={}",
+        cfg.telegram_bots.len().max(1),
+        cfg.telegram_chat_ids.len(),
+        cfg.queue_depth,
+        cfg.poll_timeout_sec
+    ));
     if cfg.telegram_bots.len() <= 1 {
         let tg = TelegramClient::new(&cfg.bot_token);
         return run_with_client(cfg, tg);
@@ -264,6 +311,11 @@ pub fn run(cfg: Config) -> Result<(), String> {
             offset_file: bot_cfg.offset_file.clone(),
         }];
         thread::spawn(move || {
+            logs::info(format_args!(
+                "telegram bot worker starting chats={} offset_file={}",
+                bot_cfg.telegram_chat_ids.len(),
+                bot_cfg.offset_file.display()
+            ));
             let tg = TelegramClient::new(&bot_cfg.bot_token);
             let result = run_with_client(bot_cfg, tg);
             let _ = tx.send(result);
@@ -287,6 +339,12 @@ fn run_with_client_with_codex<T: TelegramApi>(
     fs::create_dir_all(&cfg.state_dir).map_err(|err| format!("create state dir: {err}"))?;
     fs::create_dir_all(&cfg.chat_state_dir)
         .map_err(|err| format!("create chat state dir: {err}"))?;
+    logs::info(format_args!(
+        "telegram bot client initialized chats={} queue_depth={} offset_file={}",
+        cfg.telegram_chat_ids.len(),
+        cfg.queue_depth,
+        cfg.offset_file.display()
+    ));
 
     sync_my_commands_in_background(tg.clone(), cfg.telegram_chat_ids.clone());
     let default_model = cfg.default_provider_model().clone();
@@ -309,6 +367,10 @@ fn run_with_client_with_codex<T: TelegramApi>(
         if let Ok(updates) = tg.get_updates(0, 0) {
             offset = skip_offset(&updates);
             if offset > 0 {
+                logs::info(format_args!(
+                    "telegram initial offset advanced update_count={} offset={offset}",
+                    updates.len()
+                ));
                 write_offset(&cfg.offset_file, offset)?;
             }
         }
@@ -334,10 +396,20 @@ fn run_with_client_with_codex<T: TelegramApi>(
             }
             Err(err) => return Err(err),
         };
+        if !updates.is_empty() {
+            logs::info(format_args!(
+                "telegram updates received count={} offset={offset}",
+                updates.len()
+            ));
+        }
         for update in updates {
             offset = advance_offset(offset, update.update_id);
             write_offset(&cfg.offset_file, offset)?;
             if let Some(message) = update.message {
+                logs::info(format_args!(
+                    "telegram update message update_id={} chat={} message={}",
+                    update.update_id, message.chat.id, message.message_id
+                ));
                 if let Err(err) =
                     handle_message(&cfg, &tg, &store, &selections, &cancellations, &tx, message)
                 {
@@ -345,6 +417,10 @@ fn run_with_client_with_codex<T: TelegramApi>(
                 }
             }
             if let Some(callback_query) = update.callback_query {
+                logs::info(format_args!(
+                    "telegram update callback update_id={} callback={}",
+                    update.update_id, callback_query.id
+                ));
                 if let Err(err) =
                     handle_callback_query(&cfg, &tg, &store, &selections, callback_query)
                 {
@@ -357,10 +433,18 @@ fn run_with_client_with_codex<T: TelegramApi>(
 
 fn sync_my_commands_in_background<T: TelegramApi>(tg: T, chat_ids: Vec<i64>) {
     thread::spawn(move || {
-        if let Err(err) = tg.sync_my_commands(&chat_ids) {
-            logs::warn(format_args!(
+        logs::info(format_args!(
+            "telegram command sync starting chats={}",
+            chat_ids.len()
+        ));
+        match tg.sync_my_commands(&chat_ids) {
+            Ok(()) => logs::info(format_args!(
+                "telegram command sync succeeded chats={}",
+                chat_ids.len()
+            )),
+            Err(err) => logs::warn(format_args!(
                 "telegram command sync failed; continuing without command refresh: {err}"
-            ));
+            )),
         }
     });
 }
@@ -372,6 +456,10 @@ fn startup_statuses_in_background<T: TelegramApi>(
     store: SessionStore,
 ) {
     thread::spawn(move || {
+        logs::info(format_args!(
+            "telegram startup status starting chats={}",
+            cfg.telegram_chat_ids.len()
+        ));
         let sections = Arc::new(status_sections(&cfg, &codex));
         let mut handles = Vec::new();
         for chat_id in cfg.telegram_chat_ids.clone() {
@@ -649,12 +737,29 @@ fn handle_message(
     msg: Message,
 ) -> Result<(), String> {
     if !is_allowed_private_message(&cfg.telegram_chat_ids, &msg) {
+        logs::info(format_args!(
+            "telegram message ignored unauthorized chat={} message={}",
+            msg.chat.id, msg.message_id
+        ));
         return Ok(());
     }
     let attachment_specs = message_attachment_specs(&msg);
+    logs::info(format_args!(
+        "telegram message received chat={} message={} thread={} attachments={}",
+        msg.chat.id,
+        msg.message_id,
+        msg.message_thread_id.unwrap_or_default(),
+        attachment_specs.len()
+    ));
     let text = match message_prompt_text(&msg, &attachment_specs) {
         Ok(text) => text,
         Err(err) => {
+            logs::warn(format_args!(
+                "telegram message rejected chat={} message={} error={}",
+                msg.chat.id,
+                msg.message_id,
+                single_line(&err)
+            ));
             tg.send_message(msg.chat.id, &err, msg.message_id)?;
             return Ok(());
         }
@@ -674,7 +779,19 @@ fn handle_message(
     }
     if !attachment_specs.is_empty() {
         let chat_id = msg.chat.id;
+        let key = SessionKey::Chat {
+            chat_id: msg.chat.id,
+            thread_id: msg.message_thread_id,
+        };
+        let delivery = job_delivery_for_session(store, &key);
         let stream_message_id = initial_stream_message_id(tg, &msg, &attachment_specs);
+        logs::info(format_args!(
+            "telegram attachment job starting chat={} message={} attachments={} delivery={}",
+            msg.chat.id,
+            msg.message_id,
+            attachment_specs.len(),
+            delivery.label()
+        ));
         let cfg = cfg.clone();
         let worker_tg = tg.clone();
         let action_tg = tg.clone();
@@ -693,6 +810,7 @@ fn handle_message(
                 text,
                 attachment_specs,
                 stream_message_id,
+                delivery,
             ) {
                 logs::warn(format_args!("attachment message handler failed: {err}"));
             }
@@ -711,6 +829,13 @@ fn handle_message(
         text,
         DownloadedAttachments::default(),
         None,
+        job_delivery_for_session(
+            store,
+            &SessionKey::Chat {
+                chat_id: msg.chat.id,
+                thread_id: msg.message_thread_id,
+            },
+        ),
     )
 }
 
@@ -745,6 +870,7 @@ fn download_attachments_and_queue_job<T: TelegramApi>(
     text: String,
     attachment_specs: Vec<AttachmentSpec>,
     stream_message_id: Option<i64>,
+    delivery: JobDelivery,
 ) -> Result<(), String> {
     download_attachments_transcribe_and_queue_job(
         cfg,
@@ -756,6 +882,7 @@ fn download_attachments_and_queue_job<T: TelegramApi>(
         text,
         attachment_specs,
         stream_message_id,
+        delivery,
         transcribe_voice_attachment,
     )
 }
@@ -771,6 +898,7 @@ fn download_attachments_transcribe_and_queue_job<T, F>(
     text: String,
     attachment_specs: Vec<AttachmentSpec>,
     stream_message_id: Option<i64>,
+    delivery: JobDelivery,
     mut transcribe_voice: F,
 ) -> Result<(), String>
 where
@@ -813,6 +941,7 @@ where
         text,
         attachments,
         stream_message_id,
+        delivery,
     )
 }
 
@@ -952,6 +1081,7 @@ fn queue_codex_job<T: TelegramApi>(
     text: String,
     attachments: DownloadedAttachments,
     stream_message_id: Option<i64>,
+    delivery: JobDelivery,
 ) -> Result<(), String> {
     let key = SessionKey::Chat {
         chat_id: msg.chat.id,
@@ -961,6 +1091,8 @@ fn queue_codex_job<T: TelegramApi>(
         &prompt_with_reply_context(msg, &text),
         &attachments.file_paths,
     );
+    let attachment_count = attachments.image_paths.len() + attachments.file_paths.len();
+    let provider_model = selected_provider_model(cfg, selections, &key);
 
     let queued = tx.try_send(Job {
         bot_token: cfg.bot_token.clone(),
@@ -971,11 +1103,19 @@ fn queue_codex_job<T: TelegramApi>(
         _attachment_dir: attachments.dir,
         image_paths: attachments.image_paths,
         file_paths: attachments.file_paths,
-        provider_model: selected_provider_model(cfg, selections, &key),
+        provider_model: provider_model.clone(),
         cancel_epoch: cancellation_epoch(cancellations, &key),
         stream_message_id,
+        delivery,
     });
     if queued.is_err() {
+        logs::warn(format_args!(
+            "job queue full chat={} message={} delivery={} attachments={}",
+            msg.chat.id,
+            msg.message_id,
+            delivery.label(),
+            attachment_count
+        ));
         send_or_edit_status_message(
             tg,
             msg.chat.id,
@@ -984,6 +1124,15 @@ fn queue_codex_job<T: TelegramApi>(
             "🚦 Codex queue is full. Try again after the current requests finish.",
         )?;
     } else {
+        logs::info(format_args!(
+            "job queued chat={} message={} delivery={} provider={} model={} attachments={}",
+            msg.chat.id,
+            msg.message_id,
+            delivery.label(),
+            provider_model.provider.label(),
+            provider_model.model,
+            attachment_count
+        ));
         if let Some(message_id) = stream_message_id {
             let _ = tg.edit_message_text(msg.chat.id, message_id, THINKING_MESSAGE);
         }
@@ -1033,10 +1182,18 @@ fn handle_command_with_codex(
         chat_id: msg.chat.id,
         thread_id: msg.message_thread_id,
     };
+    logs::info(format_args!(
+        "telegram command dispatch chat={} message={} command={command}",
+        msg.chat.id, msg.message_id
+    ));
     match directive_from_command(command) {
         Some(Directive::Log) => handle_log_command(cfg, tg, msg, text),
         Some(Directive::New) => handle_new_command(cfg, codex, tg, store, selections, msg, &key),
         Some(Directive::Restart) => {
+            logs::info(format_args!(
+                "gateway restart requested chat={} message={} target={}",
+                msg.chat.id, msg.message_id, cfg.launchd_target
+            ));
             tg.send_message(msg.chat.id, "🔄 Restarting gateway.", msg.message_id)?;
             restart_gateway(&cfg.launchd_target);
             Ok(())
@@ -1048,12 +1205,53 @@ fn handle_command_with_codex(
         Some(Directive::List) => {
             send_long_message(tg, msg.chat.id, &store.list(&key), msg.message_id)
         }
+        Some(Directive::Voice) => handle_voice_command(tg, store, msg, text, &key),
         Some(Directive::Stop) => handle_stop_command(tg, cancellations, msg, &key),
         Some(Directive::Status) => {
             handle_status_command(cfg, codex, tg, store, selections, msg, &key);
             Ok(())
         }
         None => tg.send_message(msg.chat.id, &unknown_directive_message(), msg.message_id),
+    }
+}
+
+fn handle_voice_command(
+    tg: &impl TelegramApi,
+    store: &SessionStore,
+    msg: &Message,
+    text: &str,
+    key: &SessionKey,
+) -> Result<(), String> {
+    let arg = command_arg(text).to_ascii_lowercase();
+    let current = store.load(key).voice_enabled;
+    let enabled = match arg.as_str() {
+        "" => !current,
+        "on" => true,
+        "off" => false,
+        _ => {
+            return tg.send_message(
+                msg.chat.id,
+                "🧭 Usage: /voice, /voice on, or /voice off.",
+                msg.message_id,
+            );
+        }
+    };
+    match store.set_voice_enabled(key, enabled) {
+        Ok(_) if enabled => tg.send_message(
+            msg.chat.id,
+            "🔊 Voice mode enabled for this session. Send /voice off to disable.",
+            msg.message_id,
+        ),
+        Ok(_) => tg.send_message(
+            msg.chat.id,
+            "🔇 Voice mode disabled for this session.",
+            msg.message_id,
+        ),
+        Err(err) => tg.send_message(
+            msg.chat.id,
+            &format!("⚠️ Failed to update voice mode: {err}"),
+            msg.message_id,
+        ),
     }
 }
 
@@ -1249,6 +1447,14 @@ fn set_selection(selections: &RuntimeSelections, key: &SessionKey, choice: Provi
 
 fn clear_selection(selections: &RuntimeSelections, key: &SessionKey) {
     selections.lock().unwrap().remove(key);
+}
+
+fn job_delivery_for_session(store: &SessionStore, key: &SessionKey) -> JobDelivery {
+    if store.load(key).voice_enabled {
+        JobDelivery::Voice
+    } else {
+        JobDelivery::Text
+    }
 }
 
 fn handle_callback_query(
@@ -1754,6 +1960,21 @@ fn run_job_with_codex(
     cancellations: &CancellationState,
     job: Job,
 ) -> Result<(), String> {
+    run_job_with_codex_rendering(cfg, codex, tg, store, cancellations, job, tts::render_voice)
+}
+
+fn run_job_with_codex_rendering<F>(
+    cfg: &Config,
+    codex: &CodexConfig,
+    tg: &impl TelegramApi,
+    store: &SessionStore,
+    cancellations: &CancellationState,
+    job: Job,
+    render_voice: F,
+) -> Result<(), String>
+where
+    F: Fn(&Config, &str) -> Result<VoiceOutput, String>,
+{
     let started = Instant::now();
     let key = SessionKey::Chat {
         chat_id: job.chat_id,
@@ -1772,36 +1993,34 @@ fn run_job_with_codex(
         cfg.codex_timeout.as_secs()
     ));
     let stream_message_id = prepare_stream_message(tg, &job)?;
+    let _typing = start_typing_loop(tg, job.chat_id);
     let cancel = register_active_cancel(cancellations, &key);
     let mut streamed = String::new();
     let mut last_edit = Instant::now();
-    let run_result = {
-        let _typing = start_typing_loop(tg, job.chat_id);
-        run_codex_stream(
-            codex,
-            CodexRun {
-                prompt: &job.prompt,
-                session_id: state.session_id.as_deref(),
-                provider: job.provider_model.provider,
-                model: &job.provider_model.model,
-                image_paths: &job.image_paths,
-                timeout: cfg.codex_timeout,
-                state_dir: &cfg.state_dir,
-                cancel: Some(cancel.clone()),
-            },
-            |chunk| {
-                streamed.push_str(chunk);
-                if last_edit.elapsed() >= Duration::from_millis(1200) {
-                    let _ = tg.edit_message_text(
-                        job.chat_id,
-                        stream_message_id,
-                        &stream_preview(&streamed),
-                    );
-                    last_edit = Instant::now();
-                }
-            },
-        )
-    };
+    let run_result = run_codex_stream(
+        codex,
+        CodexRun {
+            prompt: &job.prompt,
+            session_id: state.session_id.as_deref(),
+            provider: job.provider_model.provider,
+            model: &job.provider_model.model,
+            image_paths: &job.image_paths,
+            timeout: cfg.codex_timeout,
+            state_dir: &cfg.state_dir,
+            cancel: Some(cancel.clone()),
+        },
+        |chunk| {
+            streamed.push_str(chunk);
+            if last_edit.elapsed() >= Duration::from_millis(1200) {
+                let _ = tg.edit_message_text(
+                    job.chat_id,
+                    stream_message_id,
+                    &stream_preview(&streamed),
+                );
+                last_edit = Instant::now();
+            }
+        },
+    );
     let output = match run_result {
         Ok(output) => output,
         Err(err) => {
@@ -1849,14 +2068,59 @@ fn run_job_with_codex(
         }
         FinalDelivery::Message(final_text) => {
             let final_text = redact_private_data(&final_text);
-            let parts = split_telegram_message(&final_text);
-            if let Some(first) = parts.first() {
-                send_final_message(tg, &job, stream_message_id, first)?;
-                for part in parts.iter().skip(1) {
-                    tg.send_message(job.chat_id, part, 0)?;
+            match job.delivery {
+                JobDelivery::Text => deliver_final_text(tg, &job, stream_message_id, &final_text),
+                JobDelivery::Voice => {
+                    deliver_final_voice(cfg, tg, &job, stream_message_id, &final_text, render_voice)
                 }
             }
+        }
+    }
+}
+
+fn deliver_final_text(
+    tg: &impl TelegramApi,
+    job: &Job,
+    stream_message_id: i64,
+    final_text: &str,
+) -> Result<(), String> {
+    let parts = split_telegram_message(final_text);
+    if let Some(first) = parts.first() {
+        send_final_message(tg, job, stream_message_id, first)?;
+        for part in parts.iter().skip(1) {
+            tg.send_message(job.chat_id, part, 0)?;
+        }
+    }
+    Ok(())
+}
+
+fn deliver_final_voice<F>(
+    cfg: &Config,
+    tg: &impl TelegramApi,
+    job: &Job,
+    stream_message_id: i64,
+    final_text: &str,
+    render_voice: F,
+) -> Result<(), String>
+where
+    F: Fn(&Config, &str) -> Result<VoiceOutput, String>,
+{
+    let _ = tg.edit_message_text(job.chat_id, stream_message_id, SPEAKING_MESSAGE);
+    let voice = match render_voice(cfg, final_text) {
+        Ok(voice) => voice,
+        Err(err) => {
+            let fallback = format!("⚠️ TTS failed: {err}\n\n{final_text}");
+            return deliver_final_text(tg, job, stream_message_id, &fallback);
+        }
+    };
+    match tg.send_voice(job.chat_id, voice.path(), job.reply_to_message_id) {
+        Ok(()) => {
+            let _ = tg.delete_message(job.chat_id, stream_message_id);
             Ok(())
+        }
+        Err(err) => {
+            let fallback = format!("⚠️ Failed to send voice reply: {err}\n\n{final_text}");
+            deliver_final_text(tg, job, stream_message_id, &fallback)
         }
     }
 }
@@ -2044,26 +2308,54 @@ fn send_long_message(
 }
 
 fn handle_update_command(cfg: &Config, tg: &impl TelegramApi, msg: &Message) -> Result<(), String> {
+    logs::info(format_args!(
+        "gateway update requested chat={} message={}",
+        msg.chat.id, msg.message_id
+    ));
     let message = match start_gateway_update(cfg) {
         Ok(GatewayUpdateStart::Started) => {
+            logs::info(format_args!(
+                "gateway update submitted chat={} message={}",
+                msg.chat.id, msg.message_id
+            ));
             "⬆️ Updating gateway in the background. Running `git pull`, Homebrew maintenance, Foundry update, then `./setup`. Details go to `gateway/logs/update.log`.".to_string()
         }
         Ok(GatewayUpdateStart::AlreadyRunning) => {
+            logs::warn(format_args!(
+                "gateway update already running chat={} message={}",
+                msg.chat.id, msg.message_id
+            ));
             "⏳ Gateway update already running. Details go to `gateway/logs/update.log`."
                 .to_string()
         }
-        Err(err) => format!("⚠️ Gateway update failed to start: {err}"),
+        Err(err) => {
+            logs::warn(format_args!(
+                "gateway update submit failed chat={} message={} error={}",
+                msg.chat.id,
+                msg.message_id,
+                single_line(&err)
+            ));
+            format!("⚠️ Gateway update failed to start: {err}")
+        }
     };
     tg.send_message(msg.chat.id, &message, msg.message_id)?;
     Ok(())
 }
 
 fn restart_gateway(launchd_target: &str) {
-    let _ = Command::new("/bin/launchctl")
+    match Command::new("/bin/launchctl")
         .args(["kickstart", "-k", launchd_target])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn();
+        .spawn()
+    {
+        Ok(_) => logs::info(format_args!(
+            "gateway restart command spawned target={launchd_target}"
+        )),
+        Err(err) => logs::warn(format_args!(
+            "gateway restart command failed target={launchd_target} error={err}"
+        )),
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2081,19 +2373,38 @@ enum GatewayUpdateLockStatus {
 
 fn start_gateway_update(cfg: &Config) -> Result<GatewayUpdateStart, String> {
     let lock_file = gateway_update_lock_file(cfg);
-    if gateway_update_lock_status(&lock_file)? == GatewayUpdateLockStatus::Active {
-        return Ok(GatewayUpdateStart::AlreadyRunning);
+    match gateway_update_lock_status(&lock_file)? {
+        GatewayUpdateLockStatus::Active => {
+            logs::warn(format_args!(
+                "gateway update lock active lock_file={}",
+                lock_file.display()
+            ));
+            return Ok(GatewayUpdateStart::AlreadyRunning);
+        }
+        GatewayUpdateLockStatus::Stale => logs::warn(format_args!(
+            "gateway update lock stale lock_file={}",
+            lock_file.display()
+        )),
+        GatewayUpdateLockStatus::Absent => {}
     }
 
     remove_gateway_update_lock(&lock_file)?;
     fs::create_dir_all(&cfg.state_dir).map_err(|err| format!("create update state dir: {err}"))?;
     fs::write(&lock_file, format!("pending {}\n", current_unix_seconds()))
         .map_err(|err| format!("write update lock: {err}"))?;
+    logs::info(format_args!(
+        "gateway update lock pending lock_file={}",
+        lock_file.display()
+    ));
 
     if let Err(err) = submit_gateway_update(&lock_file) {
         let _ = fs::remove_file(&lock_file);
         return Err(err);
     }
+    logs::info(format_args!(
+        "gateway update launchd job submitted lock_file={}",
+        lock_file.display()
+    ));
 
     Ok(GatewayUpdateStart::Started)
 }
@@ -2545,6 +2856,7 @@ mod tests {
         assert_eq!(job.chat_id, 42);
         assert_eq!(job.reply_to_message_id, 3);
         assert_eq!(job.prompt, "run this");
+        assert_eq!(job.delivery, JobDelivery::Text);
         assert!(tg.calls().contains(&Call::Action {
             chat_id: 42,
             action: "typing".to_string()
@@ -2563,6 +2875,38 @@ mod tests {
         assert!(tg.calls().iter().any(|call| {
             matches!(call, Call::Send { text, reply_to: 4, .. } if text.contains("🚦 Codex queue is full"))
         }));
+    }
+
+    #[test]
+    fn handle_message_queues_voice_delivery_when_voice_mode_is_enabled() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let key = SessionKey::Chat {
+            chat_id: 42,
+            thread_id: None,
+        };
+        store.set_voice_enabled(&key, true).unwrap();
+        let tg = FakeTelegram::new();
+        let selections = RuntimeSelections::default();
+        let (tx, rx) = mpsc::sync_channel(1);
+
+        handle_message(
+            &cfg,
+            &tg,
+            &store,
+            &selections,
+            &tx,
+            message(42, 3, "read this aloud"),
+        )
+        .unwrap();
+
+        let job = rx.recv().unwrap();
+        assert_eq!(job.prompt, "read this aloud");
+        assert_eq!(job.delivery, JobDelivery::Voice);
     }
 
     #[test]
@@ -2585,6 +2929,7 @@ mod tests {
             "queued".to_string(),
             DownloadedAttachments::default(),
             Some(123),
+            JobDelivery::Text,
         )
         .unwrap();
 
@@ -2620,6 +2965,7 @@ mod tests {
             "queued".to_string(),
             DownloadedAttachments::default(),
             Some(123),
+            JobDelivery::Text,
         )
         .unwrap();
 
@@ -2762,6 +3108,7 @@ mod tests {
             String::new(),
             attachment_specs,
             Some(123),
+            JobDelivery::Text,
             |path| {
                 assert_eq!(fs::read(path).unwrap(), b"voice bytes");
                 Ok("hello from voice".to_string())
@@ -2808,6 +3155,7 @@ mod tests {
             String::new(),
             message_attachment_specs(&msg),
             Some(123),
+            JobDelivery::Text,
             |_| Err("whisper exited with 2".to_string()),
         )
         .unwrap();
@@ -2846,6 +3194,7 @@ mod tests {
             String::new(),
             message_attachment_specs(&msg),
             Some(123),
+            JobDelivery::Text,
             |_| panic!("download failure should skip transcription"),
         )
         .unwrap();
@@ -3257,6 +3606,12 @@ printf 'session id: session-12345678\n' >&2
         assert!(script.contains("https://raw.githubusercontent.com/foundry-rs/foundry/refs/heads/master/foundryup/foundryup"));
         assert!(script.contains("git pull"));
         assert!(script.contains("./setup"));
+        assert!(script.contains("gateway update phase: git pull"));
+        assert!(script.contains("gateway update phase: brew update"));
+        assert!(script.contains("gateway update phase: brew upgrade"));
+        assert!(script.contains("gateway update phase: brew cleanup"));
+        assert!(script.contains("gateway update phase: foundryup"));
+        assert!(script.contains("gateway update phase: setup"));
         assert!(script.contains("gateway_update_code=$?"));
         assert!(script.contains("gateway_update_log=\"${gateway_update_lock:h}/logs/update.log\""));
         let git_pull = script.find("git pull").unwrap();
@@ -4031,6 +4386,37 @@ printf 'session id: aaaaaaaa-current\n' >&2
     }
 
     #[test]
+    fn voice_command_toggles_sticky_voice_mode_for_session() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let key = SessionKey::Chat {
+            chat_id: 42,
+            thread_id: None,
+        };
+        let tg = FakeTelegram::new();
+        let selections = RuntimeSelections::default();
+        let msg = message(42, 12, "/voice");
+
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/voice", "/voice").unwrap();
+        assert!(store.load(&key).voice_enabled);
+        assert!(tg
+            .sent_text()
+            .iter()
+            .any(|text| text.contains("🔊 Voice mode enabled")));
+
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/voice off", "/voice").unwrap();
+        assert!(!store.load(&key).voice_enabled);
+        assert!(tg
+            .sent_text()
+            .iter()
+            .any(|text| text.contains("🔇 Voice mode disabled")));
+    }
+
+    #[test]
     fn run_job_saves_sessions_and_uses_reaction_for_ok_results() {
         let dir = tempdir().unwrap();
         let cfg = test_config(dir.path());
@@ -4191,6 +4577,67 @@ printf 'final text\n' > "$out"
         run_job_with_codex(&cfg, &codex, &tg, &store, job("answer")).unwrap();
 
         assert!(tg.sent_text().contains(&"final text".to_string()));
+    }
+
+    #[test]
+    fn run_job_sends_voice_when_voice_delivery_is_enabled() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let codex = test_codex_config(
+            &cfg,
+            executable(
+                dir.path().join("codex-voice"),
+                r#"#!/bin/sh
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--output-last-message" ]; then out="$arg"; fi
+  prev="$arg"
+done
+cat >/dev/null
+printf 'spoken final text\n' > "$out"
+"#,
+            ),
+        );
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let tg = FakeTelegram::new();
+        let mut queued = job("answer");
+        queued.delivery = JobDelivery::Voice;
+        let render_dir = tempdir().unwrap();
+
+        run_job_with_codex_rendering(
+            &cfg,
+            &codex,
+            &tg,
+            &store,
+            &CancellationState::default(),
+            queued,
+            |_, text| {
+                assert_eq!(text, "spoken final text");
+                let path = render_dir.path().join("voice.ogg");
+                fs::write(&path, b"voice bytes").unwrap();
+                Ok(crate::tts::VoiceOutput::from_test_path(path))
+            },
+        )
+        .unwrap();
+
+        assert!(tg.calls().contains(&Call::Edit {
+            chat_id: 42,
+            message_id: 100,
+            text: "🔊 Speaking…".to_string()
+        }));
+        assert!(tg.calls().contains(&Call::Voice {
+            chat_id: 42,
+            reply_to: 7,
+            path: render_dir.path().join("voice.ogg"),
+        }));
+        assert!(tg.calls().contains(&Call::Delete {
+            chat_id: 42,
+            message_id: 100,
+        }));
     }
 
     #[test]
@@ -4419,6 +4866,11 @@ exit 2
         },
         Download {
             file_id: String,
+            path: PathBuf,
+        },
+        Voice {
+            chat_id: i64,
+            reply_to: i64,
             path: PathBuf,
         },
         Reaction {
@@ -4700,6 +5152,20 @@ exit 2
                 fs::create_dir_all(parent).map_err(|err| err.to_string())?;
             }
             fs::write(path, bytes).map_err(|err| err.to_string())
+        }
+
+        fn send_voice(
+            &self,
+            chat_id: i64,
+            voice_path: &Path,
+            reply_to_message_id: i64,
+        ) -> Result<(), String> {
+            self.state.lock().unwrap().calls.push(Call::Voice {
+                chat_id,
+                reply_to: reply_to_message_id,
+                path: voice_path.to_path_buf(),
+            });
+            Ok(())
         }
     }
 
@@ -5113,6 +5579,7 @@ exit 2
             },
             cancel_epoch: 0,
             stream_message_id: None,
+            delivery: JobDelivery::Text,
         }
     }
 

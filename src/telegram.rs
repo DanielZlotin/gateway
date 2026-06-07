@@ -304,6 +304,16 @@ impl TelegramClient {
         fs::write(path, bytes).map_err(|err| format!("write telegram file download: {err}"))
     }
 
+    pub fn send_voice(
+        &self,
+        chat_id: i64,
+        voice_path: &Path,
+        reply_to_message_id: i64,
+    ) -> Result<(), String> {
+        let _: Message = self.post_voice(chat_id, voice_path, reply_to_message_id)?;
+        Ok(())
+    }
+
     pub fn sync_my_commands(&self, chat_ids: &[i64]) -> Result<(), String> {
         let languages = ["", "en", "he"];
         let targets = command_scope_targets(chat_ids);
@@ -388,6 +398,26 @@ impl TelegramClient {
                 parse_markdown,
             ))
         })
+    }
+
+    fn post_voice<T: DeserializeOwned>(
+        &self,
+        chat_id: i64,
+        voice_path: &Path,
+        reply_to_message_id: i64,
+    ) -> Result<T, String> {
+        let boundary = "gateway-telegram-voice-boundary";
+        let body = send_voice_multipart_body(chat_id, voice_path, reply_to_message_id, boundary)?;
+        self.call_json(
+            self.agent
+                .post(&format!("{}/sendVoice", self.base_url))
+                .set(
+                    "Content-Type",
+                    &format!("multipart/form-data; boundary={boundary}"),
+                )
+                .send_bytes(&body),
+            "sendVoice",
+        )
     }
 
     fn post_redacted_text_form<T: DeserializeOwned>(
@@ -527,6 +557,63 @@ fn set_message_reaction_values(
     ]
 }
 
+fn send_voice_multipart_body(
+    chat_id: i64,
+    voice_path: &Path,
+    reply_to_message_id: i64,
+    boundary: &str,
+) -> Result<Vec<u8>, String> {
+    let mut body = Vec::new();
+    push_multipart_field(&mut body, boundary, "chat_id", &chat_id.to_string());
+    if reply_to_message_id > 0 {
+        push_multipart_field(
+            &mut body,
+            boundary,
+            "reply_to_message_id",
+            &reply_to_message_id.to_string(),
+        );
+        push_multipart_field(&mut body, boundary, "allow_sending_without_reply", "true");
+    }
+    let file_name = voice_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("voice.ogg");
+    let bytes = fs::read(voice_path).map_err(|err| format!("read Telegram voice file: {err}"))?;
+    push_multipart_file(&mut body, boundary, "voice", file_name, "audio/ogg", &bytes);
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    Ok(body)
+}
+
+fn push_multipart_field(body: &mut Vec<u8>, boundary: &str, name: &str, value: &str) {
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!("Content-Disposition: form-data; name=\"{name}\"\r\n").as_bytes(),
+    );
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(value.as_bytes());
+    body.extend_from_slice(b"\r\n");
+}
+
+fn push_multipart_file(
+    body: &mut Vec<u8>,
+    boundary: &str,
+    name: &str,
+    file_name: &str,
+    content_type: &str,
+    bytes: &[u8],
+) {
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!("Content-Disposition: form-data; name=\"{name}\"; filename=\"{file_name}\"\r\n")
+            .as_bytes(),
+    );
+    body.extend_from_slice(format!("Content-Type: {content_type}\r\n").as_bytes());
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(b"\r\n");
+}
+
 fn should_retry_plain_text(err: &str) -> bool {
     let lower = err.to_ascii_lowercase();
     lower.contains("can't parse entities")
@@ -636,7 +723,7 @@ mod tests {
             names,
             vec![
                 "status", "update", "list", "new", "resume", "rename", "model", "log", "restart",
-                "stop",
+                "voice", "stop",
             ]
         );
         assert!(!names.contains(&"config"));
@@ -808,6 +895,32 @@ mod tests {
         assert!(get_file.body.contains("file_id=file-1"));
         assert_eq!(download.method, "GET");
         assert_eq!(download.path, "/file/botsecret/docs/report.txt");
+    }
+
+    #[test]
+    fn send_voice_posts_ogg_opus_multipart() {
+        let dir = tempfile::tempdir().unwrap();
+        let voice_path = dir.path().join("voice.ogg");
+        std::fs::write(&voice_path, b"voice bytes").unwrap();
+        let server = TestServer::new(vec![json_response(message_json(77, None).as_str())]);
+        let client = server.client();
+
+        client.send_voice(42, &voice_path, 7).unwrap();
+
+        let request = server.request();
+        assert_eq!(request.path, "/botsecret/sendVoice");
+        assert!(request
+            .content_type
+            .starts_with("multipart/form-data; boundary="));
+        assert!(request.body.contains(r#"name="chat_id""#));
+        assert!(request.body.contains("42"));
+        assert!(request.body.contains(r#"name="reply_to_message_id""#));
+        assert!(request.body.contains("7"));
+        assert!(request
+            .body
+            .contains(r#"name="voice"; filename="voice.ogg""#));
+        assert!(request.body.contains("Content-Type: audio/ogg"));
+        assert!(request.body.contains("voice bytes"));
     }
 
     #[test]
@@ -1028,6 +1141,7 @@ mod tests {
     struct RecordedRequest {
         method: String,
         path: String,
+        content_type: String,
         body: String,
     }
 
@@ -1079,6 +1193,7 @@ mod tests {
         let mut first = String::new();
         reader.read_line(&mut first).unwrap();
         let mut content_length = 0;
+        let mut content_type = String::new();
         loop {
             let mut line = String::new();
             reader.read_line(&mut line).unwrap();
@@ -1086,8 +1201,18 @@ mod tests {
             if line.is_empty() {
                 break;
             }
-            if let Some(value) = line.strip_prefix("Content-Length:") {
+            let lower = line.to_ascii_lowercase();
+            if let Some((_, value)) = lower
+                .strip_prefix("content-length:")
+                .and_then(|_| line.split_once(':'))
+            {
                 content_length = value.trim().parse().unwrap();
+            }
+            if let Some((_, value)) = lower
+                .strip_prefix("content-type:")
+                .and_then(|_| line.split_once(':'))
+            {
+                content_type = value.trim().to_string();
             }
         }
         let mut body = vec![0; content_length];
@@ -1096,6 +1221,7 @@ mod tests {
         RecordedRequest {
             method: parts.next().unwrap_or_default().to_string(),
             path: parts.next().unwrap_or_default().to_string(),
+            content_type,
             body: String::from_utf8(body).unwrap(),
         }
     }

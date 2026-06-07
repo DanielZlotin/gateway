@@ -13,3 +13,4 @@ pub mod session;
 pub mod status;
 pub mod telegram;
 pub mod text;
+mod tts;

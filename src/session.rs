@@ -10,6 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct ChatSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub voice_enabled: bool,
     #[serde(default)]
     pub provider: Provider,
     pub model: String,
@@ -117,6 +119,18 @@ impl SessionStore {
                 &self.default_model,
             );
         }
+        self.save(key, &state)?;
+        Ok(state)
+    }
+
+    pub fn set_voice_enabled(
+        &self,
+        key: &SessionKey,
+        voice_enabled: bool,
+    ) -> Result<ChatSession, String> {
+        let mut state = self.load(key);
+        state.voice_enabled = voice_enabled;
+        state.updated_at = now_string();
         self.save(key, &state)?;
         Ok(state)
     }
@@ -330,6 +344,10 @@ impl SessionStore {
     }
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 fn saved_session_name<'a>(sessions: &'a [SavedSession], session_id: &str) -> Option<&'a str> {
     sessions
         .iter()
@@ -454,6 +472,29 @@ mod tests {
         assert!(!store.save_current_session(&key, 0, "stale").unwrap());
         assert!(store.save_current_session(&key, 1, "fresh").unwrap());
         assert_eq!(store.load(&key).session_id.as_deref(), Some("fresh"));
+    }
+
+    #[test]
+    fn voice_mode_persists_per_chat_thread() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::new(dir.path().join("chats"), "gpt-5.5".to_string());
+        let key = SessionKey::Chat {
+            chat_id: 42,
+            thread_id: None,
+        };
+        let thread_key = SessionKey::Chat {
+            chat_id: 42,
+            thread_id: Some(7),
+        };
+
+        assert!(!store.load(&key).voice_enabled);
+
+        assert!(store.set_voice_enabled(&key, true).unwrap().voice_enabled);
+        assert!(store.load(&key).voice_enabled);
+        assert!(!store.load(&thread_key).voice_enabled);
+
+        assert!(!store.set_voice_enabled(&key, false).unwrap().voice_enabled);
+        assert!(!store.load(&key).voice_enabled);
     }
 
     #[test]

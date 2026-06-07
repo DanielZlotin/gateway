@@ -82,6 +82,7 @@ mod tests {
     const SETUP_HOMEBREW_FORMULA_TOOLS: &[&str] = &[
         "cargo",
         "fastfetch",
+        "ffmpeg",
         "fzf",
         "gh",
         "git",
@@ -261,7 +262,10 @@ mod tests {
         let launchctl_log = fs::read_to_string(launchctl_log).unwrap();
         assert!(launchctl_log.contains("bootout"));
         assert!(launchctl_log.contains("sleep 1\nbootstrap"));
-        assert!(launchctl_log.contains("sleep 1\nkickstart"));
+        assert!(
+            !launchctl_log.contains("kickstart"),
+            "setup should let the RunAtLoad bootstrap start the gateway once:\n{launchctl_log}"
+        );
     }
 
     #[test]
@@ -272,6 +276,7 @@ mod tests {
         assert_eq!(required, setup_required_tool_names());
         assert!(!setup.contains("  rust\n"));
         assert!(setup.contains("cargo|rustc) print -r -- rust ;;"));
+        assert!(setup.contains("ffmpeg) print -r -- ffmpeg ;;"));
         assert!(setup.contains("rg) print -r -- ripgrep ;;"));
         assert!(setup.contains("whisper) print -r -- openai-whisper ;;"));
         assert!(setup.contains("codex) print -r -- codex ;;"));
@@ -320,7 +325,7 @@ mod tests {
         );
         let brew_log = fs::read_to_string(brew_log).unwrap();
         assert!(brew_log.contains(
-            "install rust fastfetch fzf gh git go jq node parallel ripgrep openai-whisper"
+            "install rust fastfetch ffmpeg fzf gh git go jq node parallel ripgrep openai-whisper"
         ));
         assert!(brew_log.contains("install --cask codex"));
     }

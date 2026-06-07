@@ -10,6 +10,7 @@ pub enum Directive {
     Rename,
     List,
     Stop,
+    Voice,
 }
 
 impl Directive {
@@ -25,6 +26,7 @@ impl Directive {
             Directive::Rename => "rename",
             Directive::List => "list",
             Directive::Stop => "stop",
+            Directive::Voice => "voice",
         }
     }
 }
@@ -112,6 +114,12 @@ pub const DIRECTIVE_SPECS: &[DirectiveSpec] = &[
         summary: "restart the gateway service",
     },
     DirectiveSpec {
+        directive: Directive::Voice,
+        icon: "🔊",
+        usage: " [on|off]",
+        summary: "toggle spoken audio replies for this session",
+    },
+    DirectiveSpec {
         directive: Directive::Stop,
         icon: "🛑",
         usage: "",
@@ -174,6 +182,7 @@ mod tests {
         assert!(list.contains("/status"));
         assert!(list.contains("/update"));
         assert!(list.contains("/stop"));
+        assert!(list.contains("/voice"));
         assert!(!list.contains("/config"));
         assert!(!list.contains("/help"));
         assert!(!list.contains("/commands"));

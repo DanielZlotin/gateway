@@ -118,6 +118,7 @@ Sessions are kept separately per chat, and commands are case-insensitive.
 🧠 /model [index] - choose a configured provider/model
 📜 /log [lines] - send recent gateway logs
 🔁 /restart - restart the gateway service
+🔊 /voice [on|off] - toggle spoken audio replies for this session
 🛑 /stop - cancel active and queued Codex work for this chat
 ```
 
@@ -135,3 +136,5 @@ Sessions are kept separately per chat, and commands are case-insensitive.
 6. 🎙️ Voice messages are downloaded, transcribed locally with Whisper `large`,
    and sent to Codex as prompt text. No extra `gateway/config.json` field is
    required.
+7. 🔊 `/voice` toggles sticky spoken replies for the current chat session;
+   ElevenLabs uses `ELEVENLABS_API_KEY` from the process environment.

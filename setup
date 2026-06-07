@@ -13,6 +13,7 @@ gateway_required_commands=(
   codex
   date
   fastfetch
+  ffmpeg
   fzf
   gh
   git
@@ -49,6 +50,7 @@ gateway_brew_formula_for_command() {
   case "$gateway_name" in
     cargo|rustc) print -r -- rust ;;
     fastfetch) print -r -- fastfetch ;;
+    ffmpeg) print -r -- ffmpeg ;;
     fzf) print -r -- fzf ;;
     gh) print -r -- gh ;;
     git) print -r -- git ;;
@@ -157,7 +159,5 @@ gateway_plist_tmp=
 launchctl bootout "$gateway_domain/$gateway_label" 2>/dev/null || true
 sleep 1
 launchctl bootstrap "$gateway_domain" "$gateway_plist_dest"
-sleep 1
-launchctl kickstart -k "$gateway_domain/$gateway_label"
 
 print -- "registered and started $gateway_label from $gateway_plist_dest"
