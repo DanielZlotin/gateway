@@ -28,7 +28,8 @@ const TELEGRAM_GET_UPDATES_CONFLICT_MARKER: &str = "terminated by other getUpdat
 const GATEWAY_UPDATE_JOB_LABEL: &str = "ai.gateway.update";
 const GATEWAY_UPDATE_PENDING_LOCK_TTL_SECS: u64 = 300;
 const VOICE_TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(120);
-const VOICE_TRANSCRIPTION_MODEL: &str = "small";
+const VOICE_TRANSCRIPTION_MODEL: &str = "large";
+const VOICE_TRANSCRIPTION_LANGUAGE: &str = "en";
 const VOICE_STATUS_MESSAGE: &str = "🎙️ Transcribing…";
 const THINKING_MESSAGE: &str = "🫧 Thinking…";
 const WHISPER_BIN: &str = "whisper";
@@ -681,6 +682,7 @@ fn handle_message(
         let cancellations = cancellations.clone();
         let tx = tx.clone();
         thread::spawn(move || {
+            let _typing = start_typing_loop(&worker_tg, chat_id);
             if let Err(err) = download_attachments_and_queue_job(
                 &cfg,
                 &worker_tg,
@@ -881,6 +883,8 @@ fn transcribe_voice_with_whisper(
         .args([
             "--model",
             VOICE_TRANSCRIPTION_MODEL,
+            "--language",
+            VOICE_TRANSCRIPTION_LANGUAGE,
             "--output_format",
             "txt",
             "--output_dir",
@@ -2846,7 +2850,8 @@ printf 'transcribed text\n' > "$outdir/$stem.txt"
         assert_eq!(text, "transcribed text");
         let args = fs::read_to_string(output_dir.join("args.txt")).unwrap();
         let args = args.lines().collect::<Vec<_>>();
-        assert!(args.windows(2).any(|pair| pair == ["--model", "small"]));
+        assert!(args.windows(2).any(|pair| pair == ["--model", "large"]));
+        assert!(args.windows(2).any(|pair| pair == ["--language", "en"]));
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--output_format", "txt"]));
@@ -2866,7 +2871,7 @@ printf 'transcribed text\n' > "$outdir/$stem.txt"
             cfg.default_provider_model().model.clone(),
         );
         let tg = FakeTelegram::new();
-        tg.delay_downloads(Duration::from_millis(300));
+        tg.delay_downloads(Duration::from_millis(3200));
         tg.push_download(Ok(b"photo bytes".to_vec()));
         let selections = RuntimeSelections::default();
         let (tx, rx) = mpsc::sync_channel(1);
@@ -2889,6 +2894,20 @@ printf 'transcribed text\n' > "$outdir/$stem.txt"
         let job = rx
             .recv_timeout(ASYNC_RENAME_TEST_TIMEOUT)
             .expect("attachment job was not queued");
+        let typing_actions = tg
+            .calls()
+            .iter()
+            .filter(|call| {
+                matches!(
+                    call,
+                    Call::Action { chat_id: 42, action } if action == "typing"
+                )
+            })
+            .count();
+        assert!(
+            typing_actions >= 3,
+            "expected typing to continue during attachment background work, got {typing_actions}"
+        );
         assert_eq!(job.image_paths.len(), 1);
         assert_eq!(fs::read(&job.image_paths[0]).unwrap(), b"photo bytes");
     }
