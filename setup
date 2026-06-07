@@ -29,15 +29,85 @@ gateway_required_commands=(
   rustc
   sed
   sleep
+  whisper
   xargs
 )
 gateway_missing_commands=()
 
-for name in "${gateway_required_commands[@]}"; do
-  if ! command -v "$name" >/dev/null 2>&1; then
-    gateway_missing_commands+=("$name")
+gateway_collect_missing_commands() {
+  gateway_missing_commands=()
+  local gateway_name
+  for gateway_name in "${gateway_required_commands[@]}"; do
+    if ! command -v "$gateway_name" >/dev/null 2>&1; then
+      gateway_missing_commands+=("$gateway_name")
+    fi
+  done
+}
+
+gateway_brew_formula_for_command() {
+  local gateway_name="$1"
+  case "$gateway_name" in
+    cargo|rustc) print -r -- rust ;;
+    fastfetch) print -r -- fastfetch ;;
+    fzf) print -r -- fzf ;;
+    gh) print -r -- gh ;;
+    git) print -r -- git ;;
+    go) print -r -- go ;;
+    jq) print -r -- jq ;;
+    node) print -r -- node ;;
+    parallel) print -r -- parallel ;;
+    rg) print -r -- ripgrep ;;
+    whisper) print -r -- openai-whisper ;;
+  esac
+}
+
+gateway_brew_cask_for_command() {
+  local gateway_name="$1"
+  case "$gateway_name" in
+    codex) print -r -- codex ;;
+  esac
+}
+
+gateway_install_missing_commands() {
+  local -a gateway_formulae=()
+  local -a gateway_casks=()
+  typeset -A gateway_seen_formulae=()
+  typeset -A gateway_seen_casks=()
+  local gateway_name gateway_formula gateway_cask
+
+  for gateway_name in "$@"; do
+    gateway_formula="$(gateway_brew_formula_for_command "$gateway_name")"
+    if [[ -n "$gateway_formula" && -z "${gateway_seen_formulae[$gateway_formula]-}" ]]; then
+      gateway_formulae+=("$gateway_formula")
+      gateway_seen_formulae[$gateway_formula]=1
+    fi
+    gateway_cask="$(gateway_brew_cask_for_command "$gateway_name")"
+    if [[ -n "$gateway_cask" && -z "${gateway_seen_casks[$gateway_cask]-}" ]]; then
+      gateway_casks+=("$gateway_cask")
+      gateway_seen_casks[$gateway_cask]=1
+    fi
+  done
+
+  if (( ${#gateway_formulae[@]} == 0 && ${#gateway_casks[@]} == 0 )); then
+    return 0
   fi
-done
+  if ! command -v brew >/dev/null 2>&1; then
+    print -u2 "setup cannot install missing commands because brew is missing from PATH."
+    exit 69
+  fi
+  if (( ${#gateway_formulae[@]} )); then
+    print -- "installing missing Homebrew formulae: ${gateway_formulae[*]}"
+    brew install "${gateway_formulae[@]}"
+  fi
+  if (( ${#gateway_casks[@]} )); then
+    print -- "installing missing Homebrew casks: ${gateway_casks[*]}"
+    brew install --cask "${gateway_casks[@]}"
+  fi
+}
+
+gateway_collect_missing_commands
+gateway_install_missing_commands "${gateway_missing_commands[@]}"
+gateway_collect_missing_commands
 
 if (( ${#gateway_missing_commands[@]} )); then
   print -u2 "setup cannot register ai.gateway because required commands are missing from PATH."

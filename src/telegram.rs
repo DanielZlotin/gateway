@@ -67,6 +67,8 @@ pub struct Message {
     pub photo: Vec<PhotoSize>,
     #[serde(default)]
     pub document: Option<Document>,
+    #[serde(default)]
+    pub voice: Option<Voice>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -87,6 +89,11 @@ pub struct Document {
     pub file_name: String,
     #[serde(default)]
     pub mime_type: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Voice {
+    pub file_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

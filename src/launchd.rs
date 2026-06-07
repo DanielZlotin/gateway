@@ -75,11 +75,36 @@ pub fn uninstall() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
-    const SETUP_LOCAL_TOOLS: &[&str] = &[
-        "awk", "fzf", "gh", "git", "go", "node", "parallel", "rg", "rustc", "sed", "xargs",
+    const SETUP_HOMEBREW_FORMULA_TOOLS: &[&str] = &[
+        "cargo",
+        "fastfetch",
+        "fzf",
+        "gh",
+        "git",
+        "go",
+        "jq",
+        "node",
+        "parallel",
+        "rg",
+        "rustc",
+        "whisper",
+    ];
+    const SETUP_HOMEBREW_CASK_TOOLS: &[&str] = &["codex"];
+    const SETUP_SYSTEM_TOOLS: &[&str] = &[
+        "awk",
+        "date",
+        "id",
+        "launchctl",
+        "mkdir",
+        "mv",
+        "rm",
+        "sed",
+        "sleep",
+        "xargs",
     ];
 
     #[test]
@@ -196,10 +221,7 @@ mod tests {
         let launchctl_log = root.join("launchctl.log");
 
         fs::create_dir_all(&stub_dir).unwrap();
-        for name in ["cargo", "codex", "fastfetch"]
-            .into_iter()
-            .chain(SETUP_LOCAL_TOOLS.iter().copied())
-        {
+        for name in setup_homebrew_tool_names() {
             write_executable(&stub_dir.join(name), "#!/bin/zsh\nexit 0\n");
         }
         write_executable(&stub_dir.join("jq"), "#!/bin/zsh\nprint -r -- \"$4\"\n");
@@ -243,20 +265,134 @@ mod tests {
     }
 
     #[test]
-    fn setup_checks_local_tools() {
-        let setup =
-            fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("setup")).unwrap();
+    fn setup_classifies_every_required_command_for_install_or_system_path() {
+        let setup = fs::read_to_string(setup_script()).unwrap();
+        let required = required_commands_from_setup(&setup);
 
-        for name in SETUP_LOCAL_TOOLS {
-            assert!(
-                setup.contains(&format!("  {name}\n")),
-                "setup should require {name}"
-            );
-        }
-        assert!(
-            !setup.contains("  rust\n"),
-            "setup should require the rustc command, not a nonexistent rust command"
+        assert_eq!(required, setup_required_tool_names());
+        assert!(!setup.contains("  rust\n"));
+        assert!(setup.contains("cargo|rustc) print -r -- rust ;;"));
+        assert!(setup.contains("rg) print -r -- ripgrep ;;"));
+        assert!(setup.contains("whisper) print -r -- openai-whisper ;;"));
+        assert!(setup.contains("codex) print -r -- codex ;;"));
+    }
+
+    #[test]
+    fn setup_installs_all_missing_homebrew_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let stub_dir = root.join("bin");
+        let home = root.join("home");
+        let launchctl_log = root.join("launchctl.log");
+        let brew_log = root.join("brew.log");
+
+        fs::create_dir_all(&stub_dir).unwrap();
+        write_setup_system_tools(&stub_dir);
+        write_executable(&stub_dir.join("brew"), fake_brew_installer());
+        write_executable(
+            &stub_dir.join("launchctl"),
+            "#!/bin/zsh\nprint -- \"$*\" >> \"$GATEWAY_TEST_LAUNCHCTL_LOG\"\nexit 0\n",
         );
+        write_executable(
+            &stub_dir.join("sleep"),
+            "#!/bin/zsh\nprint -- \"sleep $*\" >> \"$GATEWAY_TEST_LAUNCHCTL_LOG\"\nexit 0\n",
+        );
+
+        let path = stub_dir.display().to_string();
+        let output = Command::new("/bin/zsh")
+            .arg(setup_script())
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", path)
+            .env("GATEWAY_TEST_BREW_LOG", &brew_log)
+            .env("GATEWAY_TEST_LAUNCHCTL_LOG", &launchctl_log)
+            .env("GATEWAY_TEST_STUB_DIR", &stub_dir)
+            .env("GATEWAY_TELEGRAM_TOKEN", "fake-token")
+            .env("GATEWAY_TELEGRAM_CHAT_ID", "42")
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "setup failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let brew_log = fs::read_to_string(brew_log).unwrap();
+        assert!(brew_log.contains(
+            "install rust fastfetch fzf gh git go jq node parallel ripgrep openai-whisper"
+        ));
+        assert!(brew_log.contains("install --cask codex"));
+    }
+
+    fn setup_script() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("setup")
+    }
+
+    fn setup_required_tool_names() -> BTreeSet<&'static str> {
+        SETUP_HOMEBREW_FORMULA_TOOLS
+            .iter()
+            .chain(SETUP_HOMEBREW_CASK_TOOLS)
+            .chain(SETUP_SYSTEM_TOOLS)
+            .copied()
+            .collect()
+    }
+
+    fn setup_homebrew_tool_names() -> BTreeSet<&'static str> {
+        SETUP_HOMEBREW_FORMULA_TOOLS
+            .iter()
+            .chain(SETUP_HOMEBREW_CASK_TOOLS)
+            .copied()
+            .collect()
+    }
+
+    fn write_setup_system_tools(stub_dir: &Path) {
+        for name in SETUP_SYSTEM_TOOLS {
+            let body = match *name {
+                "id" => "#!/bin/zsh\nif [[ \"${1:-}\" == -u ]]; then print -r -- 501; else exec /usr/bin/id \"$@\"; fi\n",
+                "mkdir" => "#!/bin/zsh\nexec /bin/mkdir \"$@\"\n",
+                "mv" => "#!/bin/zsh\nexec /bin/mv \"$@\"\n",
+                "rm" => "#!/bin/zsh\nexec /bin/rm \"$@\"\n",
+                _ => "#!/bin/zsh\nexit 0\n",
+            };
+            write_executable(&stub_dir.join(name), body);
+        }
+    }
+
+    fn fake_brew_installer() -> &'static str {
+        "#!/bin/zsh\n\
+         print -r -- \"$*\" >> \"$GATEWAY_TEST_BREW_LOG\"\n\
+         if [[ \"${1:-}\" == install ]]; then\n\
+         \tshift\n\
+         \t[[ \"${1:-}\" == --cask ]] && shift\n\
+         \tfor gateway_formula in \"$@\"; do\n\
+         \t\tcase \"$gateway_formula\" in\n\
+         \t\t\trust) print -r -- '#!/bin/zsh\nexit 0' > \"$GATEWAY_TEST_STUB_DIR/cargo\"; /bin/chmod +x \"$GATEWAY_TEST_STUB_DIR/cargo\"; gateway_command=rustc ;;\n\
+         \t\t\tripgrep) gateway_command=rg ;;\n\
+         \t\t\topenai-whisper) gateway_command=whisper ;;\n\
+         \t\t\t*) gateway_command=\"$gateway_formula\" ;;\n\
+         \t\tesac\n\
+         \t\tprint -r -- '#!/bin/zsh\nexit 0' > \"$GATEWAY_TEST_STUB_DIR/$gateway_command\"\n\
+         \t\t/bin/chmod +x \"$GATEWAY_TEST_STUB_DIR/$gateway_command\"\n\
+         \tdone\n\
+         fi\n\
+         exit 0\n"
+    }
+
+    fn required_commands_from_setup(setup: &str) -> BTreeSet<&str> {
+        let start = setup
+            .find("gateway_required_commands=(")
+            .expect("setup should define gateway_required_commands");
+        let rest = &setup[start..];
+        let body = rest
+            .split_once('(')
+            .and_then(|(_, value)| value.split_once(')'))
+            .map(|(value, _)| value)
+            .expect("gateway_required_commands should be a parenthesized zsh array");
+        body.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect()
     }
 
     fn write_executable(path: &Path, contents: &str) {

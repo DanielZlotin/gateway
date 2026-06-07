@@ -11,8 +11,8 @@
 ./setup
 ```
 
-`setup` builds the release binary, installs the macOS LaunchAgent, and starts or
-restarts the bot.
+`setup` installs missing Homebrew-backed local tools, builds the release binary,
+installs the macOS LaunchAgent, and starts or restarts the bot.
 
 For local checks:
 
@@ -104,8 +104,8 @@ printf '%s\n' "Summarize status" | gateway run
 
 ## 🤖 Telegram Bot
 
-Allowed private chats can send text, captions, photos, and documents as Codex
-prompts.
+Allowed private chats can send text, captions, photos, documents, and voice
+messages as Codex prompts.
 Sessions are kept separately per chat, and commands are case-insensitive.
 
 ```text
@@ -132,3 +132,6 @@ Sessions are kept separately per chat, and commands are case-insensitive.
    failures to the requesting chat.
 5. 📎 Photos and image documents are attached to Codex as images; other documents
    are downloaded and listed as local file paths in the prompt.
+6. 🎙️ Voice messages are downloaded, transcribed locally with Whisper `large`,
+   and sent to Codex as prompt text. No extra `gateway/config.json` field is
+   required.

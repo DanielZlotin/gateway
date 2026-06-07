@@ -12,7 +12,7 @@ use crate::text::{
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc, Mutex,
@@ -27,6 +27,8 @@ const SESSION_WORKER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const TELEGRAM_GET_UPDATES_CONFLICT_MARKER: &str = "terminated by other getUpdates request";
 const GATEWAY_UPDATE_JOB_LABEL: &str = "ai.gateway.update";
 const GATEWAY_UPDATE_PENDING_LOCK_TTL_SECS: u64 = 300;
+const VOICE_TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(120);
+const WHISPER_BIN: &str = "whisper";
 const GATEWAY_UPDATE_SCRIPT: &str = r#"gateway_update_label="$1"
 gateway_update_lock="$2"
 gateway_update_root="$3"
@@ -185,6 +187,7 @@ struct Job {
 enum AttachmentKind {
     Image,
     File,
+    Voice,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,6 +202,7 @@ struct DownloadedAttachments {
     dir: Option<tempfile::TempDir>,
     image_paths: Vec<PathBuf>,
     file_paths: Vec<PathBuf>,
+    voice_paths: Vec<PathBuf>,
 }
 
 type RuntimeSelections = Arc<Mutex<HashMap<SessionKey, ProviderModel>>>;
@@ -485,11 +489,19 @@ fn message_attachment_specs(msg: &Message) -> Vec<AttachmentSpec> {
         let fallback = match kind {
             AttachmentKind::Image => format!("image-{}", msg.message_id),
             AttachmentKind::File => format!("file-{}", msg.message_id),
+            AttachmentKind::Voice => format!("voice-{}", msg.message_id),
         };
         attachments.push(AttachmentSpec {
             file_id: document.file_id.clone(),
             file_name: document_file_name(&document.file_name, &fallback),
             kind,
+        });
+    }
+    if let Some(voice) = msg.voice.as_ref() {
+        attachments.push(AttachmentSpec {
+            file_id: voice.file_id.clone(),
+            file_name: format!("voice-{}.ogg", msg.message_id),
+            kind: AttachmentKind::Voice,
         });
     }
     attachments
@@ -511,11 +523,15 @@ fn default_attachment_prompt(attachments: &[AttachmentSpec]) -> String {
     let has_file = attachments
         .iter()
         .any(|attachment| attachment.kind == AttachmentKind::File);
-    match (has_image, has_file) {
-        (true, true) => "Please review the attached Telegram images and files.".to_string(),
-        (true, false) => "Please review the attached Telegram image.".to_string(),
-        (false, true) => "Please review the attached Telegram file.".to_string(),
-        (false, false) => "Please review this Telegram message.".to_string(),
+    let has_voice = attachments
+        .iter()
+        .any(|attachment| attachment.kind == AttachmentKind::Voice);
+    match (has_image, has_file, has_voice) {
+        (true, true, _) => "Please review the attached Telegram images and files.".to_string(),
+        (true, false, _) => "Please review the attached Telegram image.".to_string(),
+        (false, true, _) => "Please review the attached Telegram file.".to_string(),
+        (false, false, true) => "Please transcribe this Telegram voice message.".to_string(),
+        (false, false, false) => "Please review this Telegram message.".to_string(),
     }
 }
 
@@ -534,6 +550,7 @@ fn download_message_attachments(
         .map_err(|err| format!("create attachment dir: {err}"))?;
     let mut image_paths = Vec::new();
     let mut file_paths = Vec::new();
+    let mut voice_paths = Vec::new();
     for (index, attachment) in attachments.iter().enumerate() {
         let path = dir
             .path()
@@ -542,12 +559,14 @@ fn download_message_attachments(
         match attachment.kind {
             AttachmentKind::Image => image_paths.push(path),
             AttachmentKind::File => file_paths.push(path),
+            AttachmentKind::Voice => voice_paths.push(path),
         }
     }
     Ok(DownloadedAttachments {
         dir: Some(dir),
         image_paths,
         file_paths,
+        voice_paths,
     })
 }
 
@@ -697,6 +716,35 @@ fn download_attachments_and_queue_job<T: TelegramApi>(
     text: String,
     attachment_specs: Vec<AttachmentSpec>,
 ) -> Result<(), String> {
+    download_attachments_transcribe_and_queue_job(
+        cfg,
+        tg,
+        selections,
+        cancellations,
+        tx,
+        msg,
+        text,
+        attachment_specs,
+        transcribe_voice_attachment,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn download_attachments_transcribe_and_queue_job<T, F>(
+    cfg: &Config,
+    tg: &T,
+    selections: &RuntimeSelections,
+    cancellations: &CancellationState,
+    tx: &mpsc::SyncSender<Job>,
+    msg: Message,
+    text: String,
+    attachment_specs: Vec<AttachmentSpec>,
+    mut transcribe_voice: F,
+) -> Result<(), String>
+where
+    T: TelegramApi,
+    F: FnMut(&Path) -> Result<String, String>,
+{
     let attachments = match download_message_attachments(cfg, tg, &attachment_specs) {
         Ok(attachments) => attachments,
         Err(err) => {
@@ -708,6 +756,21 @@ fn download_attachments_and_queue_job<T: TelegramApi>(
             return Ok(());
         }
     };
+    let mut voice_transcripts = Vec::new();
+    for path in &attachments.voice_paths {
+        match transcribe_voice(path) {
+            Ok(text) => voice_transcripts.push(text),
+            Err(err) => {
+                tg.send_message(
+                    msg.chat.id,
+                    &format!("⚠️ Failed to transcribe Telegram voice message: {err}"),
+                    msg.message_id,
+                )?;
+                return Ok(());
+            }
+        }
+    }
+    let text = prompt_text_with_voice_transcripts(&msg, &text, &voice_transcripts);
     queue_codex_job(
         cfg,
         tg,
@@ -718,6 +781,109 @@ fn download_attachments_and_queue_job<T: TelegramApi>(
         text,
         attachments,
     )
+}
+
+fn prompt_text_with_voice_transcripts(
+    msg: &Message,
+    text: &str,
+    voice_transcripts: &[String],
+) -> String {
+    if voice_transcripts.is_empty() {
+        return text.to_string();
+    }
+    let transcript = voice_transcripts
+        .iter()
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if msg.text.trim().is_empty() && msg.caption.trim().is_empty() {
+        return transcript;
+    }
+    format!(
+        "{}\n\nTelegram voice transcript:\n{}",
+        text.trim(),
+        transcript
+    )
+}
+
+fn transcribe_voice_attachment(path: &Path) -> Result<String, String> {
+    let output_dir = path
+        .parent()
+        .ok_or_else(|| "voice attachment has no parent directory".to_string())?;
+    transcribe_voice_with_whisper(
+        Path::new(WHISPER_BIN),
+        path,
+        output_dir,
+        VOICE_TRANSCRIPTION_TIMEOUT,
+    )
+}
+
+fn transcribe_voice_with_whisper(
+    whisper: &Path,
+    audio_path: &Path,
+    output_dir: &Path,
+    timeout: Duration,
+) -> Result<String, String> {
+    fs::create_dir_all(output_dir).map_err(|err| format!("create whisper output dir: {err}"))?;
+    let stem = audio_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "voice attachment has no file stem".to_string())?;
+    let transcript_path = output_dir.join(format!("{stem}.txt"));
+    let child = Command::new(whisper)
+        .args(["--model", "large", "--output_format", "txt", "--output_dir"])
+        .arg(output_dir)
+        .arg(audio_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("start whisper: {err}"))?;
+    let (output, timed_out) = wait_for_command_with_timeout(child, timeout)?;
+    if timed_out {
+        return Err(format!("whisper timed out after {}s", timeout.as_secs()));
+    }
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail = if stderr.is_empty() {
+            output.status.to_string()
+        } else {
+            format!("{}: {stderr}", output.status)
+        };
+        return Err(format!("whisper exited with {detail}"));
+    }
+    let transcript = fs::read_to_string(&transcript_path)
+        .map_err(|err| format!("read whisper transcript: {err}"))?
+        .trim()
+        .to_string();
+    if transcript.is_empty() {
+        return Err("whisper produced no transcript".to_string());
+    }
+    Ok(transcript)
+}
+
+fn wait_for_command_with_timeout(
+    mut child: Child,
+    timeout: Duration,
+) -> Result<(Output, bool), String> {
+    let start = Instant::now();
+    loop {
+        if child.try_wait().map_err(|err| err.to_string())?.is_some() {
+            return child
+                .wait_with_output()
+                .map(|output| (output, false))
+                .map_err(|err| err.to_string());
+        }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            return child
+                .wait_with_output()
+                .map(|output| (output, true))
+                .map_err(|err| err.to_string());
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1974,7 +2140,7 @@ mod tests {
     use super::*;
     use crate::config::ModelRole;
     use crate::provider::Provider;
-    use crate::telegram::{Chat, Document, PhotoSize, User};
+    use crate::telegram::{Chat, Document, PhotoSize, User, Voice};
     use std::collections::VecDeque;
     use std::ffi::OsStr;
     use std::io::{BufRead, BufReader, Read, Write};
@@ -2405,6 +2571,121 @@ mod tests {
             file_id: "doc-1".to_string(),
             path: file_path.clone(),
         }));
+    }
+
+    #[test]
+    fn download_voice_and_queue_job_transcribes_for_codex() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let tg = FakeTelegram::new();
+        tg.push_download(Ok(b"voice bytes".to_vec()));
+        let selections = RuntimeSelections::default();
+        let cancellations = CancellationState::default();
+        let (tx, rx) = mpsc::sync_channel(1);
+        let msg = message_with_voice(42, 6, "voice-1");
+        let attachment_specs = message_attachment_specs(&msg);
+
+        download_attachments_transcribe_and_queue_job(
+            &cfg,
+            &tg,
+            &selections,
+            &cancellations,
+            &tx,
+            msg,
+            String::new(),
+            attachment_specs,
+            |path| {
+                assert_eq!(fs::read(path).unwrap(), b"voice bytes");
+                Ok("hello from voice".to_string())
+            },
+        )
+        .unwrap();
+
+        let job = rx.recv().unwrap();
+        assert_eq!(job.prompt, "hello from voice");
+        assert!(job.image_paths.is_empty());
+        assert!(job.file_paths.is_empty());
+        assert!(tg.calls().contains(&Call::Download {
+            file_id: "voice-1".to_string(),
+            path: job
+                ._attachment_dir
+                .as_ref()
+                .unwrap()
+                .path()
+                .join("01-voice-6.ogg"),
+        }));
+    }
+
+    #[test]
+    fn download_voice_reports_transcription_failures() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let tg = FakeTelegram::new();
+        tg.push_download(Ok(b"voice bytes".to_vec()));
+        let selections = RuntimeSelections::default();
+        let cancellations = CancellationState::default();
+        let (tx, rx) = mpsc::sync_channel(1);
+        let msg = message_with_voice(42, 6, "voice-1");
+
+        download_attachments_transcribe_and_queue_job(
+            &cfg,
+            &tg,
+            &selections,
+            &cancellations,
+            &tx,
+            msg.clone(),
+            String::new(),
+            message_attachment_specs(&msg),
+            |_| Err("whisper exited with 2".to_string()),
+        )
+        .unwrap();
+
+        assert!(rx.try_recv().is_err());
+        assert!(tg.sent_text().iter().any(|text| {
+            text == "⚠️ Failed to transcribe Telegram voice message: whisper exited with 2"
+        }));
+    }
+
+    #[test]
+    fn transcribe_voice_with_whisper_reads_txt_output() {
+        let dir = tempdir().unwrap();
+        let audio = dir.path().join("voice-message.ogg");
+        let output_dir = dir.path().join("whisper");
+        fs::write(&audio, b"voice bytes").unwrap();
+        let whisper = executable(
+            dir.path().join("whisper-bin"),
+            r#"#!/bin/sh
+outdir=""
+prev=""
+audio=""
+for arg in "$@"; do
+  if [ "$prev" = "--output_dir" ]; then outdir="$arg"; fi
+  prev="$arg"
+  audio="$arg"
+done
+base=$(basename "$audio")
+stem=${base%.*}
+mkdir -p "$outdir"
+printf '%s\n' "$@" > "$outdir/args.txt"
+printf 'transcribed text\n' > "$outdir/$stem.txt"
+"#,
+        );
+
+        let text =
+            transcribe_voice_with_whisper(&whisper, &audio, &output_dir, Duration::from_secs(10))
+                .unwrap();
+
+        assert_eq!(text, "transcribed text");
+        let args = fs::read_to_string(output_dir.join("args.txt")).unwrap();
+        let args = args.lines().collect::<Vec<_>>();
+        assert!(args.windows(2).any(|pair| pair == ["--model", "large"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--output_format", "txt"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--output_dir", output_dir.to_str().unwrap()]));
+        assert_eq!(args.last().copied(), Some(audio.to_str().unwrap()));
     }
 
     #[test]
@@ -4481,7 +4762,16 @@ exit 2
             caption: String::new(),
             photo: Vec::new(),
             document: None,
+            voice: None,
         }
+    }
+
+    fn message_with_voice(chat_id: i64, message_id: i64, file_id: &str) -> Message {
+        let mut msg = message(chat_id, message_id, "");
+        msg.voice = Some(Voice {
+            file_id: file_id.to_string(),
+        });
+        msg
     }
 
     fn callback_query(id: &str, message: Message, data: &str) -> CallbackQuery {
@@ -4532,6 +4822,7 @@ exit 2
             caption: String::new(),
             photo: Vec::new(),
             document: None,
+            voice: None,
         }
     }
 
