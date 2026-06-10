@@ -74,15 +74,8 @@ enum GatewayUpdateLockStatus {
 
 pub fn start_gateway_update(cfg: &Config) -> Result<GatewayUpdateStart, String> {
     let lock_file = gateway_update_lock_file(cfg);
-    match try_acquire_gateway_update_lock(&lock_file)? {
-        GatewayUpdateLockAcquire::Acquired => {}
-        GatewayUpdateLockAcquire::AlreadyRunning => {
-            logs::warn(format_args!(
-                "gateway update lock active lock_file={}",
-                lock_file.display()
-            ));
-            return Ok(GatewayUpdateStart::AlreadyRunning);
-        }
+    if !acquire_gateway_update_lock(&lock_file)? {
+        return Ok(GatewayUpdateStart::AlreadyRunning);
     }
     logs::info(format_args!(
         "gateway update lock pending lock_file={}",
@@ -103,15 +96,8 @@ pub fn start_gateway_update(cfg: &Config) -> Result<GatewayUpdateStart, String> 
 
 pub fn run_gateway_update_inline(cfg: &Config) -> Result<GatewayUpdateRun, String> {
     let lock_file = gateway_update_lock_file(cfg);
-    match try_acquire_gateway_update_lock(&lock_file)? {
-        GatewayUpdateLockAcquire::Acquired => {}
-        GatewayUpdateLockAcquire::AlreadyRunning => {
-            logs::warn(format_args!(
-                "gateway update lock active lock_file={}",
-                lock_file.display()
-            ));
-            return Ok(GatewayUpdateRun::AlreadyRunning);
-        }
+    if !acquire_gateway_update_lock(&lock_file)? {
+        return Ok(GatewayUpdateRun::AlreadyRunning);
     }
 
     let run_result = gateway_update_script_command(&lock_file, None)
@@ -165,6 +151,19 @@ fn gateway_update_lock_status(lock_file: &Path) -> Result<GatewayUpdateLockStatu
             .map(|_| GatewayUpdateLockStatus::Active)
             .unwrap_or(GatewayUpdateLockStatus::Stale)),
         _ => Ok(GatewayUpdateLockStatus::Stale),
+    }
+}
+
+fn acquire_gateway_update_lock(lock_file: &Path) -> Result<bool, String> {
+    match try_acquire_gateway_update_lock(lock_file)? {
+        GatewayUpdateLockAcquire::Acquired => Ok(true),
+        GatewayUpdateLockAcquire::AlreadyRunning => {
+            logs::warn(format_args!(
+                "gateway update lock active lock_file={}",
+                lock_file.display()
+            ));
+            Ok(false)
+        }
     }
 }
 

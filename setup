@@ -221,24 +221,31 @@ gateway_xml_escape() {
   jq -nr --arg value "$1" '$value | @html'
 }
 
+gateway_render_plist() {
+  local gateway_template="$1"
+  local gateway_dest="$2"
+  local gateway_tmp="$3"
+  local gateway_placeholder="$4"
+  local gateway_replacement="$5"
+  local gateway_line
+
+  while IFS= read -r gateway_line || [[ -n "$gateway_line" ]]; do
+    gateway_line="${gateway_line//$gateway_placeholder/$gateway_replacement}"
+    print -r -- "$gateway_line"
+  done < "$gateway_template" > "$gateway_tmp"
+  mv -f "$gateway_tmp" "$gateway_dest"
+}
+
 gateway_launch_xml="$(gateway_xml_escape "$gateway_launch")"
 gateway_release_bin_xml="$(gateway_xml_escape "$gateway_release_bin")"
 gateway_plist_tmp="$gateway_plist_dest.$$"
 gateway_heartbeat_plist_tmp="$gateway_heartbeat_plist_dest.$$"
 
 mkdir -p "${gateway_plist_dest:h}"
-while IFS= read -r line || [[ -n "$line" ]]; do
-  line="${line//__GATEWAY_LAUNCH__/$gateway_launch_xml}"
-  print -r -- "$line"
-done < "$gateway_plist_template" > "$gateway_plist_tmp"
-mv -f "$gateway_plist_tmp" "$gateway_plist_dest"
+gateway_render_plist "$gateway_plist_template" "$gateway_plist_dest" "$gateway_plist_tmp" "__GATEWAY_LAUNCH__" "$gateway_launch_xml"
 gateway_plist_tmp=
 
-while IFS= read -r line || [[ -n "$line" ]]; do
-  line="${line//__GATEWAY_RELEASE_BIN__/$gateway_release_bin_xml}"
-  print -r -- "$line"
-done < "$gateway_heartbeat_plist_template" > "$gateway_heartbeat_plist_tmp"
-mv -f "$gateway_heartbeat_plist_tmp" "$gateway_heartbeat_plist_dest"
+gateway_render_plist "$gateway_heartbeat_plist_template" "$gateway_heartbeat_plist_dest" "$gateway_heartbeat_plist_tmp" "__GATEWAY_RELEASE_BIN__" "$gateway_release_bin_xml"
 gateway_heartbeat_plist_tmp=
 
 launchctl bootout "$gateway_domain/$gateway_label" 2>/dev/null || true
