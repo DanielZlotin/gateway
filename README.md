@@ -60,6 +60,7 @@ Gateway reads `$XDG_CONFIG_HOME/gateway/config.json`; if missing, it creates:
     { "provider": "claude", "model": "claude-opus-4-8" },
     { "provider": "openrouter", "model": "openai/gpt-5.5" }
   ],
+  "heartbeat": "1d",
   "timeout_mins": 30
 }
 ```
@@ -68,8 +69,9 @@ Gateway reads `$XDG_CONFIG_HOME/gateway/config.json`; if missing, it creates:
 
 1. 🤖 `provider` must be `codex`, `claude`, or `openrouter`.
 2. 🧠 Missing `role` means `default`; `role: "light"` marks the helper model.
-3. ⏱️ `timeout_mins` defaults to `30`.
-4. 🔊 Optional `tts` tries ElevenLabs before local Voicebox:
+3. 🫀 `heartbeat` defaults to `1d`; use `m`, `h`, or `d` durations like `3h`.
+4. ⏱️ `timeout_mins` defaults to `30`.
+5. 🔊 Optional `tts` tries ElevenLabs before local Voicebox:
 
 ```json
 {
@@ -90,6 +92,7 @@ Voicebox.
 ```zsh
 gateway
 gateway bot
+gateway heartbeat
 gateway logs [lines]
 gateway uninstall
 gateway version

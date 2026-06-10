@@ -17,6 +17,11 @@ fn run() -> Result<(), String> {
     };
     match mode {
         Mode::Bot => gateway::bot::run(gateway::config::load()?),
+        Mode::Heartbeat => {
+            let output = gateway::heartbeat::run(gateway::config::load()?)?;
+            println!("{output}");
+            Ok(())
+        }
         Mode::Logs(lines) => {
             let output = gateway::logs::read_gateway_logs(&gateway::config::current_env(), lines)?;
             println!("{output}");

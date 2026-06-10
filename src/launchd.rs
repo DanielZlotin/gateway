@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 pub const LABEL: &str = "ai.gateway";
+pub const HEARTBEAT_LABEL: &str = "ai.gateway.heartbeat";
 
 pub fn target() -> Result<String, String> {
     let output = Command::new("id")
@@ -17,14 +18,14 @@ pub fn target() -> Result<String, String> {
     if uid.is_empty() {
         return Err("id -u returned empty uid".to_string());
     }
-    Ok(format!("gui/{uid}/{LABEL}"))
+    Ok(target_for_uid_and_label(&uid, LABEL))
 }
 
 pub fn plist_path() -> Result<PathBuf, String> {
     let home = std::env::var("HOME")
         .map_err(|_| "HOME is required".to_string())
         .map(|value| value.trim().to_string())?;
-    plist_path_from_home(&home)
+    plist_path_from_home(&home, LABEL)
 }
 
 pub fn plist_path_from_env(env: &BTreeMap<String, String>) -> Result<PathBuf, String> {
@@ -32,42 +33,71 @@ pub fn plist_path_from_env(env: &BTreeMap<String, String>) -> Result<PathBuf, St
         .get("HOME")
         .map(|value| value.trim().to_string())
         .ok_or_else(|| "HOME is required".to_string())?;
-    plist_path_from_home(&home)
+    plist_path_from_home(&home, LABEL)
 }
 
-fn plist_path_from_home(home: &str) -> Result<PathBuf, String> {
+fn plist_path_from_home(home: &str, label: &str) -> Result<PathBuf, String> {
     if home.is_empty() {
         return Err("HOME is required".to_string());
     }
     Ok(PathBuf::from(home)
         .join("Library")
         .join("LaunchAgents")
-        .join(format!("{LABEL}.plist")))
+        .join(format!("{label}.plist")))
 }
 
 pub fn uninstall() -> Result<String, String> {
-    let target = target()?;
-    let plist_path = plist_path()?;
+    let uid = uid()?;
+    let home = std::env::var("HOME")
+        .map_err(|_| "HOME is required".to_string())
+        .map(|value| value.trim().to_string())?;
+    let mut lines = Vec::new();
+    for label in [LABEL, HEARTBEAT_LABEL] {
+        let target = target_for_uid_and_label(&uid, label);
+        let plist_path = plist_path_from_home(&home, label)?;
+        lines.push(bootout_line(&target)?);
+        lines.push(remove_plist_line(&plist_path)?);
+    }
+    Ok(lines.join("\n"))
+}
+
+fn uid() -> Result<String, String> {
+    let output = Command::new("id")
+        .arg("-u")
+        .output()
+        .map_err(|err| format!("run id -u: {err}"))?;
+    if !output.status.success() {
+        return Err(format!("id -u exited with {}", output.status));
+    }
+    let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if uid.is_empty() {
+        return Err("id -u returned empty uid".to_string());
+    }
+    Ok(uid)
+}
+
+fn target_for_uid_and_label(uid: &str, label: &str) -> String {
+    format!("gui/{uid}/{label}")
+}
+
+fn bootout_line(target: &str) -> Result<String, String> {
     let bootout = Command::new("/bin/launchctl")
-        .args(["bootout", &target])
+        .args(["bootout", target])
         .status()
         .map_err(|err| format!("run launchctl bootout: {err}"))?;
-
-    let bootout_line = if bootout.success() {
-        format!("launchd={target} booted out")
+    if bootout.success() {
+        Ok(format!("launchd={target} booted out"))
     } else {
-        format!("launchd={target} bootout exited with {bootout}")
-    };
+        Ok(format!("launchd={target} bootout exited with {bootout}"))
+    }
+}
 
-    match fs::remove_file(&plist_path) {
-        Ok(()) => Ok(format!(
-            "{bootout_line}\nplist={} removed",
-            plist_path.display()
-        )),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(format!(
-            "{bootout_line}\nplist={} already absent",
-            plist_path.display()
-        )),
+fn remove_plist_line(plist_path: &PathBuf) -> Result<String, String> {
+    match fs::remove_file(plist_path) {
+        Ok(()) => Ok(format!("plist={} removed", plist_path.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Ok(format!("plist={} already absent", plist_path.display()))
+        }
         Err(err) => Err(format!("remove LaunchAgent plist: {err}")),
     }
 }
@@ -260,20 +290,87 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         let plist = fs::read_to_string(home.join("Library/LaunchAgents/ai.gateway.plist")).unwrap();
+        let heartbeat_plist =
+            fs::read_to_string(home.join("Library/LaunchAgents/ai.gateway.heartbeat.plist"))
+                .unwrap();
         assert!(!plist.contains("EnvironmentVariables"));
         assert!(!plist.contains("GATEWAY_TELEGRAM_TOKEN"));
         assert!(!plist.contains("XDG_DATA_HOME"));
         assert!(!plist.contains("XDG_STATE_HOME"));
         assert!(plist.contains(&format!("exec {}", env!("CARGO_MANIFEST_DIR"))));
+        assert!(heartbeat_plist.contains("<string>ai.gateway.heartbeat</string>"));
+        assert!(heartbeat_plist.contains("<key>StartInterval</key>"));
+        assert!(heartbeat_plist.contains("<integer>60</integer>"));
+        assert!(!heartbeat_plist.contains("GATEWAY_HEARTBEAT_ACTIVE"));
+        assert!(heartbeat_plist.contains(&format!(
+            "<string>{}/target/release/gateway</string>",
+            env!("CARGO_MANIFEST_DIR")
+        )));
+        assert!(heartbeat_plist.contains("<string>heartbeat</string>"));
+        assert!(!heartbeat_plist.contains("/bin/zsh"));
+        assert!(!heartbeat_plist.contains("__GATEWAY_HEARTBEAT_LAUNCH__"));
         let launchctl_log = fs::read_to_string(launchctl_log).unwrap();
         assert!(launchctl_log.contains("bootout"));
         assert!(launchctl_log.contains("sleep 1\nbootstrap"));
+        assert!(launchctl_log.contains("ai.gateway.heartbeat"));
         assert!(
             !launchctl_log.contains("kickstart"),
             "setup should let the RunAtLoad bootstrap start the gateway once:\n{launchctl_log}"
         );
         assert!(root
             .join("home/.local/share/gateway/voicebox/Voicebox.app/Contents/MacOS/Voicebox")
+            .exists());
+    }
+
+    #[test]
+    fn setup_does_not_reload_heartbeat_when_running_inside_heartbeat() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let stub_dir = root.join("bin");
+        let home = root.join("home");
+        let launchctl_log = root.join("launchctl.log");
+
+        fs::create_dir_all(&stub_dir).unwrap();
+        for name in setup_homebrew_tool_names() {
+            write_executable(&stub_dir.join(name), "#!/bin/zsh\nexit 0\n");
+        }
+        write_setup_system_tools(&stub_dir);
+        write_executable(&stub_dir.join("jq"), "#!/bin/zsh\nprint -r -- \"$4\"\n");
+        write_executable(
+            &stub_dir.join("launchctl"),
+            "#!/bin/zsh\nprint -- \"$*\" >> \"$GATEWAY_TEST_LAUNCHCTL_LOG\"\nexit 0\n",
+        );
+        write_executable(
+            &stub_dir.join("sleep"),
+            "#!/bin/zsh\nprint -- \"sleep $*\" >> \"$GATEWAY_TEST_LAUNCHCTL_LOG\"\nexit 0\n",
+        );
+
+        let output = Command::new("/bin/zsh")
+            .arg(setup_script())
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", format!("{}:/bin:/usr/bin", stub_dir.display()))
+            .env("GATEWAY_TEST_LAUNCHCTL_LOG", &launchctl_log)
+            .env("GATEWAY_TELEGRAM_TOKEN", "fake-token")
+            .env("GATEWAY_TELEGRAM_CHAT_ID", "42")
+            .env("GATEWAY_HEARTBEAT_ACTIVE", "1")
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "setup failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let launchctl_log = fs::read_to_string(launchctl_log).unwrap();
+        assert!(launchctl_log.contains("ai.gateway"));
+        assert!(
+            !launchctl_log.contains("ai.gateway.heartbeat"),
+            "heartbeat should not be reloaded while heartbeat is active:\n{launchctl_log}"
+        );
+        assert!(home
+            .join("Library/LaunchAgents/ai.gateway.heartbeat.plist")
             .exists());
     }
 
@@ -337,9 +434,9 @@ mod tests {
         );
         let brew_log = fs::read_to_string(brew_log).unwrap();
         assert!(brew_log.contains(
-            "install rust fastfetch ffmpeg fzf gh git go jq node parallel ripgrep openai-whisper"
+            "install --yes rust fastfetch ffmpeg fzf gh git go jq node parallel ripgrep openai-whisper"
         ));
-        assert!(brew_log.contains("install --cask codex"));
+        assert!(brew_log.contains("install --yes --cask codex"));
         assert!(root
             .join("data/gateway/voicebox/Voicebox.app/Contents/MacOS/Voicebox")
             .exists());
@@ -449,7 +546,7 @@ mod tests {
          print -r -- \"$*\" >> \"$GATEWAY_TEST_BREW_LOG\"\n\
          if [[ \"${1:-}\" == install ]]; then\n\
          \tshift\n\
-         \t[[ \"${1:-}\" == --cask ]] && shift\n\
+         \twhile [[ \"${1:-}\" == --yes || \"${1:-}\" == --cask ]]; do shift; done\n\
          \tfor gateway_formula in \"$@\"; do\n\
          \t\tcase \"$gateway_formula\" in\n\
          \t\t\trust) print -r -- '#!/bin/zsh\nexit 0' > \"$GATEWAY_TEST_STUB_DIR/cargo\"; /bin/chmod +x \"$GATEWAY_TEST_STUB_DIR/cargo\"; gateway_command=rustc ;;\n\

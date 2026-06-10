@@ -10,6 +10,7 @@ use crate::text::{
     split_telegram_message, tail_log_text,
 };
 use crate::tts::{self, VoiceOutput};
+use crate::update::{start_gateway_update, GatewayUpdateStart};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -19,15 +20,13 @@ use std::sync::{
     mpsc, Arc, Mutex,
 };
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 const TYPING_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 const POLL_CONFLICT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const POLL_REQUEST_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const SESSION_WORKER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const TELEGRAM_GET_UPDATES_CONFLICT_MARKER: &str = "terminated by other getUpdates request";
-const GATEWAY_UPDATE_JOB_LABEL: &str = "ai.gateway.update";
-const GATEWAY_UPDATE_PENDING_LOCK_TTL_SECS: u64 = 300;
 const VOICE_TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(120);
 const VOICE_TRANSCRIPTION_MODEL: &str = "large";
 const VOICE_TRANSCRIPTION_LANGUAGE: &str = "en";
@@ -35,34 +34,6 @@ const VOICE_STATUS_MESSAGE: &str = "🎙️ Transcribing…";
 const THINKING_MESSAGE: &str = "🫧 Thinking…";
 const SPEAKING_MESSAGE: &str = "🔊 Speaking…";
 const WHISPER_BIN: &str = "whisper";
-const GATEWAY_UPDATE_SCRIPT: &str = r#"gateway_update_label="$1"
-gateway_update_lock="$2"
-gateway_update_root="$3"
-gateway_update_log="${gateway_update_lock:h}/logs/update.log"
-set -o pipefail
-mkdir -p "${gateway_update_log:h}"
-print -r -- "$$" > "$gateway_update_lock"
-{
-  print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] starting gateway update"
-  cd "$gateway_update_root" &&
-    print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] gateway update phase: git pull" &&
-    git pull &&
-    print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] gateway update phase: brew update" &&
-    brew update &&
-    print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] gateway update phase: brew upgrade" &&
-    brew upgrade &&
-    print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] gateway update phase: brew cleanup" &&
-    brew cleanup &&
-    print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] gateway update phase: foundryup" &&
-    (curl -sSfL "https://raw.githubusercontent.com/foundry-rs/foundry/refs/heads/master/foundryup/foundryup" | bash) &&
-    print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] gateway update phase: setup" &&
-    ./setup
-  gateway_update_code=$?
-  print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] gateway update exited $gateway_update_code"
-} >>"$gateway_update_log" 2>&1
-rm -f "$gateway_update_lock"
-/bin/launchctl remove "$gateway_update_label" >/dev/null 2>&1 || true
-exit 0"#;
 
 trait TelegramApi: Clone + Send + 'static {
     fn get_updates(&self, offset: i64, timeout_sec: u64) -> Result<Vec<Update>, String>;
@@ -2361,169 +2332,6 @@ fn restart_gateway(launchd_target: &str) {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum GatewayUpdateStart {
-    Started,
-    AlreadyRunning,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum GatewayUpdateLockStatus {
-    Absent,
-    Active,
-    Stale,
-}
-
-fn start_gateway_update(cfg: &Config) -> Result<GatewayUpdateStart, String> {
-    let lock_file = gateway_update_lock_file(cfg);
-    match gateway_update_lock_status(&lock_file)? {
-        GatewayUpdateLockStatus::Active => {
-            logs::warn(format_args!(
-                "gateway update lock active lock_file={}",
-                lock_file.display()
-            ));
-            return Ok(GatewayUpdateStart::AlreadyRunning);
-        }
-        GatewayUpdateLockStatus::Stale => logs::warn(format_args!(
-            "gateway update lock stale lock_file={}",
-            lock_file.display()
-        )),
-        GatewayUpdateLockStatus::Absent => {}
-    }
-
-    remove_gateway_update_lock(&lock_file)?;
-    fs::create_dir_all(&cfg.state_dir).map_err(|err| format!("create update state dir: {err}"))?;
-    fs::write(&lock_file, format!("pending {}\n", current_unix_seconds()))
-        .map_err(|err| format!("write update lock: {err}"))?;
-    logs::info(format_args!(
-        "gateway update lock pending lock_file={}",
-        lock_file.display()
-    ));
-
-    if let Err(err) = submit_gateway_update(&lock_file) {
-        let _ = fs::remove_file(&lock_file);
-        return Err(err);
-    }
-    logs::info(format_args!(
-        "gateway update launchd job submitted lock_file={}",
-        lock_file.display()
-    ));
-
-    Ok(GatewayUpdateStart::Started)
-}
-
-fn gateway_update_lock_file(cfg: &Config) -> std::path::PathBuf {
-    cfg.state_dir.join("update.lock")
-}
-
-fn gateway_update_lock_status(lock_file: &Path) -> Result<GatewayUpdateLockStatus, String> {
-    let text = match fs::read_to_string(lock_file) {
-        Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(GatewayUpdateLockStatus::Absent);
-        }
-        Err(err) => return Err(format!("read update lock: {err}")),
-    };
-    let mut parts = text.split_whitespace();
-    let kind = parts.next().unwrap_or_default();
-    let value = parts.next().unwrap_or_default();
-
-    match kind {
-        "pid" => Ok(value
-            .parse::<u32>()
-            .ok()
-            .filter(|pid| process_is_running(*pid))
-            .map(|_| GatewayUpdateLockStatus::Active)
-            .unwrap_or(GatewayUpdateLockStatus::Stale)),
-        "pending" => Ok(value
-            .parse::<u64>()
-            .ok()
-            .filter(|seconds| {
-                current_unix_seconds().saturating_sub(*seconds)
-                    < GATEWAY_UPDATE_PENDING_LOCK_TTL_SECS
-            })
-            .map(|_| GatewayUpdateLockStatus::Active)
-            .unwrap_or(GatewayUpdateLockStatus::Stale)),
-        _ => Ok(GatewayUpdateLockStatus::Stale),
-    }
-}
-
-fn remove_gateway_update_lock(lock_file: &Path) -> Result<(), String> {
-    match fs::remove_file(lock_file) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(format!("remove update lock: {err}")),
-    }
-}
-
-fn process_is_running(pid: u32) -> bool {
-    Command::new("/bin/kill")
-        .args(["-0", &pid.to_string()])
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
-}
-
-fn current_unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-#[cfg(not(test))]
-fn submit_gateway_update(lock_file: &Path) -> Result<(), String> {
-    let _ = Command::new("/bin/launchctl")
-        .args(["remove", GATEWAY_UPDATE_JOB_LABEL])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    let status = gateway_update_command(lock_file)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|err| format!("run launchctl submit: {err}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("launchctl submit exited with {status}"))
-    }
-}
-
-#[cfg(test)]
-fn submit_gateway_update(_lock_file: &Path) -> Result<(), String> {
-    Ok(())
-}
-
-fn gateway_update_command(lock_file: &Path) -> Command {
-    let mut command = Command::new("/bin/launchctl");
-    command
-        .args([
-            "submit",
-            "-l",
-            GATEWAY_UPDATE_JOB_LABEL,
-            "-o",
-            "/dev/null",
-            "-e",
-            "/dev/null",
-            "--",
-            "/bin/zsh",
-            "-lc",
-            GATEWAY_UPDATE_SCRIPT,
-            "gateway-update",
-            GATEWAY_UPDATE_JOB_LABEL,
-        ])
-        .arg(lock_file)
-        .arg(gateway_root());
-    command
-}
-
-fn gateway_root() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-}
-
 pub const fn typing_refresh_interval() -> Duration {
     TYPING_REFRESH_INTERVAL
 }
@@ -3557,7 +3365,7 @@ printf 'session id: session-12345678\n' >&2
         let cfg = test_config(dir.path());
         fs::create_dir_all(&cfg.state_dir).unwrap();
         fs::write(
-            gateway_update_lock_file(&cfg),
+            crate::update::gateway_update_lock_file(&cfg),
             format!("pid {}\n", std::process::id()),
         )
         .unwrap();
@@ -3579,8 +3387,10 @@ printf 'session id: session-12345678\n' >&2
     #[test]
     fn gateway_update_command_submits_stable_launchd_job_with_lock_cleanup() {
         let lock_file = Path::new("/tmp/gateway-state/update.lock");
-        let command = gateway_update_command(lock_file);
+        let command = crate::update::gateway_update_command(lock_file);
         let args = command.get_args().collect::<Vec<_>>();
+        let foundry_installer =
+            "https://raw.githubusercontent.com/foundry-rs/foundry/refs/heads/master/foundryup/foundryup";
 
         assert_eq!(command.get_program(), OsStr::new("/bin/launchctl"));
         assert_eq!(
@@ -3602,19 +3412,21 @@ printf 'session id: session-12345678\n' >&2
         assert!(script.contains("gateway_update_label=\"$1\""));
         assert!(script.contains("gateway_update_lock=\"$2\""));
         assert!(script.contains("gateway_update_root=\"$3\""));
-        assert!(script.contains("print -r -- \"$$\" > \"$gateway_update_lock\""));
+        assert!(script.contains("gateway_foundry_installer_url=\"$4\""));
+        assert!(script.contains("print -r -- \"pid $$\" > \"$gateway_update_lock\""));
         assert!(script.contains("set -o pipefail"));
+        assert!(script.contains("export HOMEBREW_NO_ASK=1"));
         assert!(script.contains("brew update"));
-        assert!(script.contains("brew upgrade"));
+        assert!(script.contains("brew upgrade --yes"));
         assert!(script.contains("brew cleanup"));
-        assert!(script.contains("https://raw.githubusercontent.com/foundry-rs/foundry/refs/heads/master/foundryup/foundryup"));
+        assert!(script.contains("curl -sSfL \"$gateway_foundry_installer_url\" | bash"));
         assert!(script.contains("git pull"));
         assert!(script.contains("./setup"));
         assert!(script.contains("gateway update phase: git pull"));
         assert!(script.contains("gateway update phase: brew update"));
         assert!(script.contains("gateway update phase: brew upgrade"));
         assert!(script.contains("gateway update phase: brew cleanup"));
-        assert!(script.contains("gateway update phase: foundryup"));
+        assert!(script.contains("gateway update phase: foundry installer"));
         assert!(script.contains("gateway update phase: setup"));
         assert!(script.contains("gateway_update_code=$?"));
         assert!(script.contains("gateway_update_log=\"${gateway_update_lock:h}/logs/update.log\""));
@@ -3623,7 +3435,7 @@ printf 'session id: session-12345678\n' >&2
         let brew_upgrade = script.find("brew upgrade").unwrap();
         let brew_cleanup = script.find("brew cleanup").unwrap();
         let foundry_update = script
-            .find("https://raw.githubusercontent.com/foundry-rs/foundry/refs/heads/master/foundryup/foundryup")
+            .find("gateway update phase: foundry installer")
             .unwrap();
         let setup = script.find("./setup").unwrap();
         assert!(git_pull < brew_update);
@@ -3640,6 +3452,7 @@ printf 'session id: session-12345678\n' >&2
         assert_eq!(args[12], OsStr::new("ai.gateway.update"));
         assert_eq!(args[13], OsStr::new("/tmp/gateway-state/update.lock"));
         assert_eq!(args[14], OsStr::new(env!("CARGO_MANIFEST_DIR")));
+        assert_eq!(args[15], OsStr::new(foundry_installer));
     }
 
     #[test]
@@ -5535,6 +5348,7 @@ exit 2
             poll_timeout_sec: 50,
             queue_depth: 8,
             codex_timeout: Duration::from_secs(5),
+            heartbeat_interval: Duration::from_secs(24 * 60 * 60),
         }
     }
 

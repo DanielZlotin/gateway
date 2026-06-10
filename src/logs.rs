@@ -58,7 +58,7 @@ fn log_icon(level: &str) -> &'static str {
     }
 }
 
-fn current_utc_timestamp() -> String {
+pub fn current_utc_timestamp() -> String {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

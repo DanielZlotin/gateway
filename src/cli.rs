@@ -7,6 +7,7 @@ use std::path::PathBuf;
 const CLI_AFTER_HELP: &str = r#"Examples:
   gateway
   gateway bot
+  gateway heartbeat
   gateway logs [lines]
   gateway uninstall
   gateway version
@@ -31,6 +32,7 @@ pub enum CliAction {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Mode {
     Bot,
+    Heartbeat,
     Logs(usize),
     Run(RunArgs),
     Uninstall,
@@ -60,6 +62,8 @@ struct Cli {
 enum Command {
     #[command(about = "Run the Telegram bot for allowed chats.")]
     Bot,
+    #[command(about = "Run scheduled heartbeat work when due.")]
+    Heartbeat,
     #[command(about = "Print recent gateway logs.")]
     Logs(LogsCli),
     #[command(
@@ -144,6 +148,7 @@ where
 fn mode_from_cli(cli: Cli) -> Mode {
     match cli.command {
         None | Some(Command::Bot) => Mode::Bot,
+        Some(Command::Heartbeat) => Mode::Heartbeat,
         Some(Command::Logs(args)) => Mode::Logs(normalize_log_line_count(args.lines)),
         Some(Command::Run(args)) => Mode::Run(RunArgs {
             prompt: args.prompt,
@@ -229,6 +234,12 @@ mod tests {
     }
 
     #[test]
+    fn parses_heartbeat_mode() {
+        let mode = parse_args_from(["gateway", "heartbeat"]).unwrap();
+        assert_eq!(mode, Mode::Heartbeat);
+    }
+
+    #[test]
     fn top_level_help_documents_commands_and_examples() {
         let help = help_from(&["gateway", "-h"]);
 
@@ -239,6 +250,8 @@ mod tests {
                 "Usage: gateway [COMMAND]",
                 "bot",
                 "Run the Telegram bot for allowed chats.",
+                "heartbeat",
+                "Run scheduled heartbeat work when due.",
                 "logs",
                 "Print recent gateway logs.",
                 "run",
@@ -248,6 +261,7 @@ mod tests {
                 "version",
                 "Print the running binary version.",
                 "gateway run --prompt \"Summarize status\"",
+                "gateway heartbeat",
                 "gateway run --chat 123456789 --prompt \"Summarize status\"",
                 "gateway run --prompt-file ./prompt.txt",
                 "printf '%s\\n' \"Summarize status\" | gateway run",

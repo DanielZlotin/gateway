@@ -104,11 +104,11 @@ gateway_install_missing_commands() {
   fi
   if (( ${#gateway_formulae[@]} )); then
     print -- "installing missing Homebrew formulae: ${gateway_formulae[*]}"
-    brew install "${gateway_formulae[@]}"
+    HOMEBREW_NO_ASK=1 brew install --yes "${gateway_formulae[@]}"
   fi
   if (( ${#gateway_casks[@]} )); then
     print -- "installing missing Homebrew casks: ${gateway_casks[*]}"
-    brew install --cask "${gateway_casks[@]}"
+    HOMEBREW_NO_ASK=1 brew install --yes --cask "${gateway_casks[@]}"
   fi
 }
 
@@ -132,7 +132,8 @@ gateway_voicebox_executable="$gateway_voicebox_app/Contents/MacOS/Voicebox"
 gateway_voicebox_archive=
 gateway_voicebox_stage=
 gateway_plist_tmp=
-trap '[[ -z "${gateway_voicebox_archive:-}" ]] || rm -f "$gateway_voicebox_archive"; [[ -z "${gateway_voicebox_stage:-}" ]] || rm -rf "$gateway_voicebox_stage"; [[ -z "${gateway_plist_tmp:-}" ]] || rm -f "$gateway_plist_tmp"' EXIT
+gateway_heartbeat_plist_tmp=
+trap '[[ -z "${gateway_voicebox_archive:-}" ]] || rm -f "$gateway_voicebox_archive"; [[ -z "${gateway_voicebox_stage:-}" ]] || rm -rf "$gateway_voicebox_stage"; [[ -z "${gateway_plist_tmp:-}" ]] || rm -f "$gateway_plist_tmp"; [[ -z "${gateway_heartbeat_plist_tmp:-}" ]] || rm -f "$gateway_heartbeat_plist_tmp"' EXIT
 
 gateway_voicebox_asset_name() {
   local gateway_arch
@@ -184,10 +185,14 @@ gateway_install_voicebox_app() {
 gateway_install_voicebox_app
 
 gateway_label="ai.gateway"
+gateway_heartbeat_label="ai.gateway.heartbeat"
 gateway_domain="gui/$(id -u)"
 gateway_launch="$gateway_root/launch"
+gateway_release_bin="$gateway_root/target/release/gateway"
 gateway_plist_template="$gateway_root/$gateway_label.plist"
+gateway_heartbeat_plist_template="$gateway_root/$gateway_heartbeat_label.plist"
 gateway_plist_dest="$HOME/Library/LaunchAgents/$gateway_label.plist"
+gateway_heartbeat_plist_dest="$HOME/Library/LaunchAgents/$gateway_heartbeat_label.plist"
 
 if [[ ! -x "$gateway_launch" ]]; then
   print -u2 "LaunchAgent launcher is missing or not executable: $gateway_launch"
@@ -199,15 +204,27 @@ if [[ ! -f "$gateway_plist_template" ]]; then
   exit 66
 fi
 
+if [[ ! -f "$gateway_heartbeat_plist_template" ]]; then
+  print -u2 "Heartbeat LaunchAgent plist template is missing: $gateway_heartbeat_plist_template"
+  exit 66
+fi
+
 cd "$gateway_root"
 cargo build --release
+
+if [[ ! -x "$gateway_release_bin" ]]; then
+  print -u2 "Gateway release binary is missing or not executable after build: $gateway_release_bin"
+  exit 66
+fi
 
 gateway_xml_escape() {
   jq -nr --arg value "$1" '$value | @html'
 }
 
 gateway_launch_xml="$(gateway_xml_escape "$gateway_launch")"
+gateway_release_bin_xml="$(gateway_xml_escape "$gateway_release_bin")"
 gateway_plist_tmp="$gateway_plist_dest.$$"
+gateway_heartbeat_plist_tmp="$gateway_heartbeat_plist_dest.$$"
 
 mkdir -p "${gateway_plist_dest:h}"
 while IFS= read -r line || [[ -n "$line" ]]; do
@@ -217,8 +234,20 @@ done < "$gateway_plist_template" > "$gateway_plist_tmp"
 mv -f "$gateway_plist_tmp" "$gateway_plist_dest"
 gateway_plist_tmp=
 
+while IFS= read -r line || [[ -n "$line" ]]; do
+  line="${line//__GATEWAY_RELEASE_BIN__/$gateway_release_bin_xml}"
+  print -r -- "$line"
+done < "$gateway_heartbeat_plist_template" > "$gateway_heartbeat_plist_tmp"
+mv -f "$gateway_heartbeat_plist_tmp" "$gateway_heartbeat_plist_dest"
+gateway_heartbeat_plist_tmp=
+
 launchctl bootout "$gateway_domain/$gateway_label" 2>/dev/null || true
 sleep 1
 launchctl bootstrap "$gateway_domain" "$gateway_plist_dest"
+
+if [[ -z "${GATEWAY_HEARTBEAT_ACTIVE:-}" ]]; then
+  launchctl bootout "$gateway_domain/$gateway_heartbeat_label" 2>/dev/null || true
+  launchctl bootstrap "$gateway_domain" "$gateway_heartbeat_plist_dest"
+fi
 
 print -- "registered and started $gateway_label from $gateway_plist_dest"

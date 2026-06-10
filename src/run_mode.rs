@@ -452,6 +452,7 @@ printf 'done\n' > "$out"
             poll_timeout_sec: 50,
             queue_depth: 8,
             codex_timeout: std::time::Duration::from_secs(5),
+            heartbeat_interval: std::time::Duration::from_secs(24 * 60 * 60),
         }
     }
 

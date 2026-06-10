@@ -14,6 +14,7 @@ pub const DEFAULT_LIGHT_CODEX_MODEL: &str = "gpt-5.4-mini";
 pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-4-8";
 pub const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-5.5";
 pub const DEFAULT_CODEX_TIMEOUT_MINS: u64 = 30;
+pub const DEFAULT_HEARTBEAT: &str = "1d";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -36,6 +37,7 @@ pub struct Config {
     pub poll_timeout_sec: u64,
     pub queue_depth: usize,
     pub codex_timeout: Duration,
+    pub heartbeat_interval: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +62,8 @@ pub struct GatewayConfigFile {
     pub models: Vec<ProviderModel>,
     #[serde(default = "default_timeout_mins")]
     pub timeout_mins: u64,
+    #[serde(default = "default_heartbeat")]
+    pub heartbeat: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tts: Option<serde_json::Value>,
 }
@@ -110,6 +114,7 @@ pub fn load_from_env(env: &BTreeMap<String, String>) -> Result<Config, String> {
     let xdg_state_home = resolve_xdg_state_home(env)?;
     let gateway_config_file = xdg_config_home.join("gateway/config.json");
     let gateway_config = load_gateway_config(&gateway_config_file)?;
+    let heartbeat_interval = gateway_config.heartbeat_interval()?;
     let state_dir = xdg_state_home.join("gateway");
     let chat_state_dir = state_dir.join("chats");
     let launchd_target = launchd::target()?;
@@ -137,6 +142,7 @@ pub fn load_from_env(env: &BTreeMap<String, String>) -> Result<Config, String> {
         poll_timeout_sec: 50,
         queue_depth: 8,
         codex_timeout: Duration::from_secs(timeout_secs(gateway_config.timeout_mins)?),
+        heartbeat_interval,
     })
 }
 
@@ -302,6 +308,7 @@ impl Default for GatewayConfigFile {
         Self {
             models: default_models(),
             timeout_mins: default_timeout_mins(),
+            heartbeat: default_heartbeat(),
             tts: None,
         }
     }
@@ -313,7 +320,13 @@ impl GatewayConfigFile {
         if self.timeout_mins == 0 {
             return Err("timeout_mins must be greater than zero".to_string());
         }
+        self.heartbeat = self.heartbeat.trim().to_ascii_lowercase();
+        self.heartbeat_interval()?;
         Ok(())
+    }
+
+    pub fn heartbeat_interval(&self) -> Result<Duration, String> {
+        heartbeat_interval(&self.heartbeat)
     }
 }
 
@@ -346,10 +359,38 @@ const fn default_timeout_mins() -> u64 {
     DEFAULT_CODEX_TIMEOUT_MINS
 }
 
+fn default_heartbeat() -> String {
+    DEFAULT_HEARTBEAT.to_string()
+}
+
 fn timeout_secs(timeout_mins: u64) -> Result<u64, String> {
     timeout_mins
         .checked_mul(60)
         .ok_or_else(|| "timeout_mins is too large".to_string())
+}
+
+fn heartbeat_interval(value: &str) -> Result<Duration, String> {
+    let value = value.trim();
+    if value.len() < 2 {
+        return Err("heartbeat must use a positive duration like 1m, 3h, or 1d".to_string());
+    }
+    let (number, unit) = value.split_at(value.len() - 1);
+    let count = number
+        .parse::<u64>()
+        .map_err(|_| "heartbeat must use a positive duration like 1m, 3h, or 1d".to_string())?;
+    if count == 0 {
+        return Err("heartbeat must be greater than zero".to_string());
+    }
+    let seconds_per_unit = match unit {
+        "m" => 60,
+        "h" => 60 * 60,
+        "d" => 24 * 60 * 60,
+        _ => return Err("heartbeat unit must be m, h, or d".to_string()),
+    };
+    count
+        .checked_mul(seconds_per_unit)
+        .map(Duration::from_secs)
+        .ok_or_else(|| "heartbeat is too large".to_string())
 }
 
 impl Config {
@@ -831,6 +872,64 @@ mod tests {
         assert_eq!(cfg.timeout_mins, DEFAULT_CODEX_TIMEOUT_MINS);
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains("\"timeout_mins\": 30"));
+    }
+
+    #[test]
+    fn gateway_config_defaults_missing_heartbeat() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gateway/config.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"models":[{"provider":"codex","model":"gpt-test"}]}"#,
+        )
+        .unwrap();
+
+        let cfg = load_gateway_config(&path).unwrap();
+
+        assert_eq!(cfg.heartbeat, "1d");
+        assert_eq!(
+            cfg.heartbeat_interval().unwrap(),
+            Duration::from_secs(24 * 60 * 60)
+        );
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"heartbeat\": \"1d\""));
+    }
+
+    #[test]
+    fn parses_valid_heartbeat_durations() {
+        for (heartbeat, seconds) in [
+            ("1m", 60),
+            ("3m", 180),
+            ("1h", 60 * 60),
+            ("3h", 3 * 60 * 60),
+            ("1d", 24 * 60 * 60),
+            ("7d", 7 * 24 * 60 * 60),
+        ] {
+            let mut cfg = GatewayConfigFile::default();
+            cfg.heartbeat = heartbeat.to_string();
+
+            assert_eq!(
+                cfg.heartbeat_interval().unwrap(),
+                Duration::from_secs(seconds),
+                "heartbeat={heartbeat}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_heartbeat_durations() {
+        for heartbeat in ["", " ", "0m", "1", "m", "3x", "-1h"] {
+            let mut cfg = GatewayConfigFile::default();
+            cfg.heartbeat = heartbeat.to_string();
+
+            let err = cfg.normalize().unwrap_err();
+
+            assert!(
+                err.contains("heartbeat"),
+                "heartbeat={heartbeat:?} error={err}"
+            );
+        }
     }
 
     #[test]

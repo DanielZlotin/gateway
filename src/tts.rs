@@ -1141,6 +1141,7 @@ done
             poll_timeout_sec: 50,
             queue_depth: 8,
             codex_timeout: Duration::from_secs(5),
+            heartbeat_interval: Duration::from_secs(24 * 60 * 60),
         }
     }
 
