@@ -123,16 +123,16 @@ messages as Codex prompts.
 Sessions are kept separately per chat, and commands are case-insensitive.
 
 ```text
-📊 /status - show Codex, gateway, and system status
+🔊 /voice [on|off] - toggle spoken audio replies for the current session
 📦 /update - pull latest gateway code, update Brew/Foundry, and run setup
 📚 /list - list saved sessions
 ✨ /new - start a fresh Codex session
 ↩️ /resume [SESSION_OR_NAME|index] - list or resume a saved session
 🏷️ /rename [NAME] - rename the current session
-🧠 /model [index] - choose a configured provider/model
 📜 /log [lines] - send recent gateway logs
+📊 /status - show Codex, gateway, and system status
 🔁 /restart - restart the gateway service
-🔊 /voice [on|off] - toggle spoken audio replies for the current session
+🧠 /model [index] - choose a configured provider/model
 🛑 /stop - cancel active and queued Codex work for this chat
 ```
 

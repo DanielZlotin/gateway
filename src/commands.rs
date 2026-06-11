@@ -60,10 +60,10 @@ impl DirectiveSpec {
 
 pub const DIRECTIVE_SPECS: &[DirectiveSpec] = &[
     DirectiveSpec {
-        directive: Directive::Status,
-        icon: "📊",
-        usage: "",
-        summary: "show Codex, gateway, and system status",
+        directive: Directive::Voice,
+        icon: "🔊",
+        usage: " [on|off]",
+        summary: "toggle spoken audio replies for the current session",
     },
     DirectiveSpec {
         directive: Directive::Update,
@@ -96,16 +96,16 @@ pub const DIRECTIVE_SPECS: &[DirectiveSpec] = &[
         summary: "rename the current session",
     },
     DirectiveSpec {
-        directive: Directive::Model,
-        icon: "🧠",
-        usage: " [index]",
-        summary: "choose a configured provider/model",
-    },
-    DirectiveSpec {
         directive: Directive::Log,
         icon: "📜",
         usage: " [lines]",
         summary: "send recent gateway logs",
+    },
+    DirectiveSpec {
+        directive: Directive::Status,
+        icon: "📊",
+        usage: "",
+        summary: "show Codex, gateway, and system status",
     },
     DirectiveSpec {
         directive: Directive::Restart,
@@ -114,10 +114,10 @@ pub const DIRECTIVE_SPECS: &[DirectiveSpec] = &[
         summary: "restart the gateway service",
     },
     DirectiveSpec {
-        directive: Directive::Voice,
-        icon: "🔊",
-        usage: " [on|off]",
-        summary: "toggle spoken audio replies for the current session",
+        directive: Directive::Model,
+        icon: "🧠",
+        usage: " [index]",
+        summary: "choose a configured provider/model",
     },
     DirectiveSpec {
         directive: Directive::Stop,
