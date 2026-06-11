@@ -4,8 +4,8 @@ use crate::logs;
 use crate::run_mode;
 use crate::update::{run_gateway_update_inline, GatewayUpdateRun};
 use chrono::{Local, NaiveDate, Timelike};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use serde::{Deserialize, Serialize};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const HEARTBEAT_ACTIVE_ENV: &str = "GATEWAY_HEARTBEAT_ACTIVE";
@@ -15,6 +15,15 @@ enum HeartbeatDecision {
     Run(i64),
     MarkOnly(i64),
     Skip,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeartbeatRunState {
+    pub started_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    pub result: String,
+    pub message: String,
 }
 
 pub fn run(cfg: Config) -> Result<String, String> {
@@ -35,7 +44,6 @@ fn run_due_heartbeat(
 ) -> Result<String, String> {
     fs::create_dir_all(&cfg.state_dir)
         .map_err(|err| format!("create heartbeat state dir: {err}"))?;
-    append_heartbeat_log(&cfg, "INFO", "starting gateway heartbeat")?;
 
     let interval_minutes = cfg.heartbeat_interval.as_secs() / 60;
     let boundary = heartbeat_boundary_minutes(now_minutes, interval_minutes);
@@ -45,12 +53,15 @@ fn run_due_heartbeat(
 
     match heartbeat_decision(last_boundary, boundary, at_boundary) {
         HeartbeatDecision::Skip => {
-            append_heartbeat_log(&cfg, "INFO", "heartbeat not due")?;
             return Ok("heartbeat not due".to_string());
         }
         HeartbeatDecision::MarkOnly(boundary) => {
             write_heartbeat_boundary(&state_file, boundary)?;
-            append_heartbeat_log(&cfg, "INFO", "heartbeat initialized")?;
+            write_heartbeat_run_state(
+                &cfg,
+                HeartbeatRunState::finished("initialized", "initialized"),
+            )?;
+            append_heartbeat_log(&cfg, "INFO", "🫀 hb init")?;
             return Ok("heartbeat initialized".to_string());
         }
         HeartbeatDecision::Run(boundary) => {
@@ -58,16 +69,26 @@ fn run_due_heartbeat(
         }
     }
 
+    let started_at = logs::current_utc_timestamp();
+    write_heartbeat_run_state(&cfg, HeartbeatRunState::running(&started_at))?;
+    append_heartbeat_log(&cfg, "INFO", "🫀 hb start")?;
+
     match run_update(&cfg) {
-        Ok(GatewayUpdateRun::Completed) => {
-            append_heartbeat_log(&cfg, "INFO", "heartbeat update completed")?
-        }
+        Ok(GatewayUpdateRun::Completed) => append_heartbeat_log(&cfg, "INFO", "🫀 hb update ok")?,
         Ok(GatewayUpdateRun::AlreadyRunning) => {
-            append_heartbeat_log(&cfg, "WARN", "gateway update already running")?;
+            write_heartbeat_run_state(
+                &cfg,
+                HeartbeatRunState::finished_from(&started_at, "update-running", "update busy"),
+            )?;
+            append_heartbeat_log(&cfg, "WARN", "🫀 hb update busy")?;
             return Ok("gateway update already running".to_string());
         }
         Err(err) => {
-            append_heartbeat_log(&cfg, "ERROR", &format!("heartbeat update failed: {err}"))?;
+            write_heartbeat_run_state(
+                &cfg,
+                HeartbeatRunState::finished_from(&started_at, "failed", &err),
+            )?;
+            append_heartbeat_log(&cfg, "ERROR", &format!("🫀 hb update failed: {err}"))?;
             return Err(err);
         }
     }
@@ -83,10 +104,47 @@ fn run_due_heartbeat(
         cfg.clone(),
     );
     match &result {
-        Ok(_) => append_heartbeat_log(&cfg, "INFO", "heartbeat completed")?,
-        Err(err) => append_heartbeat_log(&cfg, "ERROR", &format!("heartbeat failed: {err}"))?,
+        Ok(output) => {
+            write_heartbeat_run_state(
+                &cfg,
+                HeartbeatRunState::finished_from(&started_at, "completed", output),
+            )?;
+            append_heartbeat_log(&cfg, "INFO", "🫀 hb done")?;
+        }
+        Err(err) => {
+            write_heartbeat_run_state(
+                &cfg,
+                HeartbeatRunState::finished_from(&started_at, "failed", err),
+            )?;
+            append_heartbeat_log(&cfg, "ERROR", &format!("🫀 hb failed: {err}"))?;
+        }
     }
     result
+}
+
+impl HeartbeatRunState {
+    fn running(started_at: &str) -> Self {
+        Self {
+            started_at: started_at.to_string(),
+            finished_at: None,
+            result: "running".to_string(),
+            message: "started".to_string(),
+        }
+    }
+
+    fn finished(result: &str, message: &str) -> Self {
+        let now = logs::current_utc_timestamp();
+        Self::finished_from(&now, result, message)
+    }
+
+    fn finished_from(started_at: &str, result: &str, message: &str) -> Self {
+        Self {
+            started_at: started_at.to_string(),
+            finished_at: Some(logs::current_utc_timestamp()),
+            result: result.to_string(),
+            message: message.to_string(),
+        }
+    }
 }
 
 fn current_total_minutes() -> i64 {
@@ -118,30 +176,34 @@ fn heartbeat_state_file(cfg: &Config) -> PathBuf {
     cfg.state_dir.join("heartbeat.last")
 }
 
-fn heartbeat_log_file(cfg: &Config) -> PathBuf {
-    cfg.state_dir.join("logs/heartbeat.log")
+fn heartbeat_run_state_file(cfg: &Config) -> PathBuf {
+    cfg.state_dir.join("heartbeat.json")
 }
 
 fn append_heartbeat_log(cfg: &Config, level: &str, message: &str) -> Result<(), String> {
-    append_log_line(&heartbeat_log_file(cfg), level, message)
+    logs::append_log_file(&cfg.gateway_log_file, level, message)
 }
 
-fn append_log_line(path: &Path, level: &str, message: &str) -> Result<(), String> {
+pub fn read_heartbeat_run_state(cfg: &Config) -> Result<Option<HeartbeatRunState>, String> {
+    let path = heartbeat_run_state_file(cfg);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("read heartbeat state: {err}")),
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|err| format!("parse heartbeat state: {err}"))
+}
+
+fn write_heartbeat_run_state(cfg: &Config, state: HeartbeatRunState) -> Result<(), String> {
+    let path = heartbeat_run_state_file(cfg);
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|err| format!("create heartbeat log dir: {err}"))?;
+        fs::create_dir_all(parent).map_err(|err| format!("create heartbeat state dir: {err}"))?;
     }
-    let line = logs::format_log_line(
-        &logs::current_utc_timestamp(),
-        env!("CARGO_PKG_VERSION"),
-        level,
-        message,
-    );
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|err| format!("open heartbeat log: {err}"))?;
-    writeln!(file, "{line}").map_err(|err| format!("write heartbeat log: {err}"))
+    let text = serde_json::to_string_pretty(&state)
+        .map_err(|err| format!("serialize heartbeat state: {err}"))?;
+    fs::write(path, format!("{text}\n")).map_err(|err| format!("write heartbeat state: {err}"))
 }
 
 fn read_heartbeat_boundary(path: &Path) -> Result<Option<i64>, String> {
@@ -254,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn heartbeat_writes_log_under_derived_state_dir() {
+    fn heartbeat_writes_canonical_gateway_log_and_state() {
         let dir = tempdir().unwrap();
         let cfg = test_config(dir.path());
         fs::create_dir_all(&cfg.state_dir).unwrap();
@@ -269,9 +331,38 @@ mod tests {
         .unwrap();
 
         assert_eq!(output, "heartbeat body ran");
-        let log = fs::read_to_string(cfg.state_dir.join("logs/heartbeat.log")).unwrap();
-        assert!(log.contains("starting gateway heartbeat"));
-        assert!(log.contains("heartbeat completed"));
+        let log = fs::read_to_string(&cfg.gateway_log_file).unwrap();
+        assert!(log.contains("🫀 hb start"));
+        assert!(log.contains("🫀 hb done"));
+        assert!(!cfg.state_dir.join("logs/heartbeat.log").exists());
+
+        let state = fs::read_to_string(cfg.state_dir.join("heartbeat.json")).unwrap();
+        assert!(state.contains(r#""result": "completed""#), "{state}");
+        assert!(
+            state.contains(r#""message": "heartbeat body ran""#),
+            "{state}"
+        );
+    }
+
+    #[test]
+    fn heartbeat_state_records_failure() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        fs::create_dir_all(&cfg.state_dir).unwrap();
+        fs::write(cfg.state_dir.join("heartbeat.last"), "0\n").unwrap();
+
+        let err = run_due_heartbeat(
+            cfg.clone(),
+            60,
+            |_| Ok(GatewayUpdateRun::Completed),
+            |_, _| Err("prompt failed".to_string()),
+        )
+        .unwrap_err();
+
+        assert_eq!(err, "prompt failed");
+        let state = fs::read_to_string(cfg.state_dir.join("heartbeat.json")).unwrap();
+        assert!(state.contains(r#""result": "failed""#), "{state}");
+        assert!(state.contains(r#""message": "prompt failed""#), "{state}");
     }
 
     fn test_config(root: &Path) -> Config {

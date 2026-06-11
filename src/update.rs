@@ -15,34 +15,41 @@ const GATEWAY_UPDATE_SCRIPT: &str = r#"gateway_update_label="$1"
 gateway_update_lock="$2"
 gateway_update_root="$3"
 gateway_foundry_installer_url="$4"
-gateway_update_log="${gateway_update_lock:h}/logs/update.log"
+gateway_update_version="$5"
+gateway_update_log="${gateway_update_lock:h}/logs/gateway.log"
 set -o pipefail
 mkdir -p "${gateway_update_log:h}"
 print -r -- "pid $$" > "$gateway_update_lock"
-{
-  print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] starting gateway update"
-  cd "$gateway_update_root" &&
-    export HOMEBREW_NO_ASK=1 &&
-    print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] gateway update phase: git pull" &&
-    git pull &&
-    print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] gateway update phase: brew update" &&
-    brew update &&
-    print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] gateway update phase: brew upgrade" &&
-    brew upgrade --yes &&
-    print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] gateway update phase: brew cleanup" &&
-    brew cleanup &&
-    print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] gateway update phase: brewsave" &&
-    : "${XDG_CONFIG_HOME:?XDG_CONFIG_HOME is required}" &&
-    gateway_brewfile="$XDG_CONFIG_HOME/homebrew/Brewfile" &&
-    mkdir -p "${gateway_brewfile:h}" &&
-    HOMEBREW_BUNDLE_FILE_GLOBAL="$gateway_brewfile" brew bundle dump --global --force --describe &&
-    print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] gateway update phase: foundry installer" &&
-    (curl -sSfL "$gateway_foundry_installer_url" | bash) &&
-    print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] gateway update phase: setup" &&
-    ./setup
-  gateway_update_code=$?
-  print -r -- "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] gateway update exited $gateway_update_code"
-} >>"$gateway_update_log" 2>&1
+gateway_log() {
+  print -r -- "$1 $(date -u '+%Y-%m-%d %H:%M:%S') v=$gateway_update_version $2" >>"$gateway_update_log"
+}
+gateway_step() {
+  gateway_update_phase="$1"
+  shift
+  gateway_log "ℹ️" "📦 update $gateway_update_phase"
+  "$@" >/dev/null 2>&1
+}
+gateway_log "ℹ️" "📦 update start"
+cd "$gateway_update_root" &&
+  export HOMEBREW_NO_ASK=1 &&
+  gateway_step git git pull &&
+  gateway_step brew-update brew update &&
+  gateway_step brew-upgrade brew upgrade --yes &&
+  gateway_step brew-cleanup brew cleanup &&
+  gateway_log "ℹ️" "📦 update brewsave" &&
+  : "${XDG_CONFIG_HOME:?XDG_CONFIG_HOME is required}" &&
+  gateway_brewfile="$XDG_CONFIG_HOME/homebrew/Brewfile" &&
+  mkdir -p "${gateway_brewfile:h}" &&
+  HOMEBREW_BUNDLE_FILE_GLOBAL="$gateway_brewfile" brew bundle dump --global --force --describe >/dev/null 2>&1 &&
+  gateway_log "ℹ️" "📦 update foundry" &&
+  (curl -sSfL "$gateway_foundry_installer_url" | bash) >/dev/null 2>&1 &&
+  gateway_step setup ./setup
+gateway_update_code=$?
+if [[ "$gateway_update_code" -eq 0 ]]; then
+  gateway_log "ℹ️" "📦 update done"
+else
+  gateway_log "❌" "📦 update failed code=$gateway_update_code"
+fi
 rm -f "$gateway_update_lock"
 [[ -z "$gateway_update_label" ]] || /bin/launchctl remove "$gateway_update_label" >/dev/null 2>&1 || true
 exit "$gateway_update_code""#;
@@ -78,7 +85,7 @@ pub fn start_gateway_update(cfg: &Config) -> Result<GatewayUpdateStart, String> 
         return Ok(GatewayUpdateStart::AlreadyRunning);
     }
     logs::info(format_args!(
-        "gateway update lock pending lock_file={}",
+        "📦 update pending lock={}",
         lock_file.display()
     ));
 
@@ -87,7 +94,7 @@ pub fn start_gateway_update(cfg: &Config) -> Result<GatewayUpdateStart, String> 
         return Err(err);
     }
     logs::info(format_args!(
-        "gateway update launchd job submitted lock_file={}",
+        "📦 update submitted lock={}",
         lock_file.display()
     ));
 
@@ -159,7 +166,7 @@ fn acquire_gateway_update_lock(lock_file: &Path) -> Result<bool, String> {
         GatewayUpdateLockAcquire::Acquired => Ok(true),
         GatewayUpdateLockAcquire::AlreadyRunning => {
             logs::warn(format_args!(
-                "gateway update lock active lock_file={}",
+                "📦 update active lock={}",
                 lock_file.display()
             ));
             Ok(false)
@@ -190,10 +197,7 @@ fn try_acquire_gateway_update_lock(lock_file: &Path) -> Result<GatewayUpdateLock
                         return Ok(GatewayUpdateLockAcquire::AlreadyRunning);
                     }
                     GatewayUpdateLockStatus::Stale => {
-                        logs::warn(format_args!(
-                            "gateway update lock stale lock_file={}",
-                            lock_file.display()
-                        ));
+                        logs::warn(format_args!("📦 update stale lock={}", lock_file.display()));
                         remove_gateway_update_lock(lock_file)?;
                     }
                     GatewayUpdateLockStatus::Absent => {}
@@ -247,7 +251,8 @@ pub(crate) fn gateway_update_command(lock_file: &Path) -> Command {
         ])
         .arg(lock_file)
         .arg(gateway_root())
-        .arg(FOUNDRY_INSTALLER_URL);
+        .arg(FOUNDRY_INSTALLER_URL)
+        .arg(env!("CARGO_PKG_VERSION"));
     command
 }
 
@@ -288,7 +293,8 @@ fn gateway_update_script_command(lock_file: &Path, label: Option<&str>) -> Comma
         ])
         .arg(lock_file)
         .arg(gateway_root())
-        .arg(FOUNDRY_INSTALLER_URL);
+        .arg(FOUNDRY_INSTALLER_URL)
+        .arg(env!("CARGO_PKG_VERSION"));
     command
 }
 
@@ -328,7 +334,7 @@ mod tests {
             "HOMEBREW_BUNDLE_FILE_GLOBAL=\"$gateway_brewfile\" brew bundle dump --global --force --describe"
         ));
         assert!(script.contains("gateway_foundry_installer_url=\"$4\""));
-        assert!(script.contains("gateway update phase: foundry installer"));
+        assert!(script.contains("📦 update foundry"));
         assert!(script.contains("curl -sSfL \"$gateway_foundry_installer_url\" | bash"));
         assert!(script.contains("./setup"));
         assert!(script.contains("rm -f \"$gateway_update_lock\""));
@@ -336,6 +342,9 @@ mod tests {
             "[[ -z \"$gateway_update_label\" ]] || /bin/launchctl remove \"$gateway_update_label\""
         ));
         assert!(script.contains("exit \"$gateway_update_code\""));
+        assert!(script.contains("gateway_update_version=\"$5\""));
+        assert!(script.contains("gateway_update_log=\"${gateway_update_lock:h}/logs/gateway.log\""));
+        assert!(!script.contains("logs/update.log"));
         assert!(args
             .iter()
             .any(|arg| *arg == OsStr::new(FOUNDRY_INSTALLER_URL)));
@@ -343,9 +352,7 @@ mod tests {
         let brewsave = script
             .find("brew bundle dump --global --force --describe")
             .unwrap();
-        let foundry_update = script
-            .find("gateway update phase: foundry installer")
-            .unwrap();
+        let foundry_update = script.find("📦 update foundry").unwrap();
         assert!(brew_cleanup < brewsave);
         assert!(brewsave < foundry_update);
     }

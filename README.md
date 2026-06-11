@@ -45,8 +45,9 @@ positions.
 
 1. ⚙️ Config: `$XDG_CONFIG_HOME/gateway/config.json`
 2. 💾 State: `$XDG_STATE_HOME/gateway`
-3. 📜 Logs: `$XDG_STATE_HOME/gateway/logs/gateway.log`
-4. 🚀 LaunchAgent: `$HOME/Library/LaunchAgents/ai.gateway.plist`
+3. 📜 Events: `$XDG_STATE_HOME/gateway/logs/gateway.log`
+4. 🫀 Heartbeat state: `$XDG_STATE_HOME/gateway/heartbeat.json`
+5. 🚀 LaunchAgent: `$HOME/Library/LaunchAgents/ai.gateway.plist`
 
 ## ⚙️ Config
 
@@ -113,6 +114,7 @@ printf '%s\n' "Summarize status" | gateway run
    chat ID; with `--chat ID`, it goes only to that configured ID.
 
 🧭 `gateway logs [lines]` defaults to `10` lines and caps at `200`.
+It tails the canonical event log, including bot, heartbeat, and update events.
 
 ## 🤖 Telegram Bot
 

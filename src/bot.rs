@@ -10,7 +10,7 @@ use crate::text::{
     split_telegram_message, tail_log_text,
 };
 use crate::tts::{self, VoiceOutput};
-use crate::update::{start_gateway_update, GatewayUpdateStart};
+use crate::update::{gateway_update_lock_file, start_gateway_update, GatewayUpdateStart};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -33,6 +33,8 @@ const VOICE_TRANSCRIPTION_LANGUAGE: &str = "en";
 const VOICE_STATUS_MESSAGE: &str = "🎙️ Transcribing…";
 const THINKING_MESSAGE: &str = "🫧 Thinking…";
 const SPEAKING_MESSAGE: &str = "🔊 Speaking…";
+const UPDATE_TYPING_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const UPDATE_TYPING_MAX_DURATION: Duration = Duration::from_secs(60 * 60);
 const WHISPER_BIN: &str = "whisper";
 
 trait TelegramApi: Clone + Send + 'static {
@@ -455,7 +457,13 @@ fn startup_statuses_in_background<T: TelegramApi>(
                 if let Err(err) = send_long_message(
                     &tg,
                     chat_id,
-                    &format_status_message(&state, &sections.codex, &sections.git, &sections.fetch),
+                    &format_status_message(
+                        &state,
+                        &sections.heartbeat,
+                        &sections.codex,
+                        &sections.git,
+                        &sections.fetch,
+                    ),
                     0,
                 ) {
                     logs::warn(format_args!(
@@ -1824,6 +1832,7 @@ fn handle_status_command_in_background<T: TelegramApi>(
         msg.chat.id,
         &format_status_message(
             &state_with_provider_model(&state, &selected_provider_model(cfg, selections, key)),
+            &sections.heartbeat,
             &sections.codex,
             &sections.git,
             &sections.fetch,
@@ -2283,37 +2292,57 @@ fn send_long_message(
 
 fn handle_update_command(cfg: &Config, tg: &impl TelegramApi, msg: &Message) -> Result<(), String> {
     logs::info(format_args!(
-        "gateway update requested chat={} message={}",
+        "📦 update requested chat={} message={}",
         msg.chat.id, msg.message_id
     ));
-    let message = match start_gateway_update(cfg) {
+    let (message, keep_typing) = match start_gateway_update(cfg) {
         Ok(GatewayUpdateStart::Started) => {
             logs::info(format_args!(
-                "gateway update submitted chat={} message={}",
+                "📦 update submitted chat={} message={}",
                 msg.chat.id, msg.message_id
             ));
-            "🔄 Updating...".to_string()
+            ("🔄 Updating...".to_string(), true)
         }
         Ok(GatewayUpdateStart::AlreadyRunning) => {
             logs::warn(format_args!(
-                "gateway update already running chat={} message={}",
+                "📦 update already running chat={} message={}",
                 msg.chat.id, msg.message_id
             ));
-            "⏳ Gateway update already running. Details go to `gateway/logs/update.log`."
-                .to_string()
+            (
+                "⏳ Gateway update already running. Details are in /log.".to_string(),
+                true,
+            )
         }
         Err(err) => {
             logs::warn(format_args!(
-                "gateway update submit failed chat={} message={} error={}",
+                "📦 update submit failed chat={} message={} error={}",
                 msg.chat.id,
                 msg.message_id,
                 single_line(&err)
             ));
-            format!("⚠️ Gateway update failed to start: {err}")
+            (format!("⚠️ Gateway update failed to start: {err}"), false)
         }
     };
+    if keep_typing {
+        start_update_typing_monitor(tg, msg.chat.id, gateway_update_lock_file(cfg));
+    }
     tg.send_message(msg.chat.id, &message, msg.message_id)?;
     Ok(())
+}
+
+fn start_update_typing_monitor<T: TelegramApi>(tg: &T, chat_id: i64, lock_file: PathBuf) {
+    let tg = tg.clone();
+    thread::spawn(move || {
+        let _typing = start_typing_loop(&tg, chat_id);
+        wait_for_update_lock_to_clear(&lock_file);
+    });
+}
+
+fn wait_for_update_lock_to_clear(lock_file: &Path) {
+    let deadline = Instant::now() + UPDATE_TYPING_MAX_DURATION;
+    while lock_file.exists() && Instant::now() < deadline {
+        thread::sleep(UPDATE_TYPING_POLL_INTERVAL);
+    }
 }
 
 fn restart_gateway(launchd_target: &str) {
@@ -3379,9 +3408,82 @@ printf 'session id: session-12345678\n' >&2
 
         handle_command(&cfg, &tg, &store, &selections, &msg, "/update", "/update").unwrap();
 
-        assert!(tg.sent_text().iter().any(|text| {
-            text == "⏳ Gateway update already running. Details go to `gateway/logs/update.log`."
-        }));
+        assert!(
+            tg.sent_text()
+                .iter()
+                .any(|text| text.as_str()
+                    == "⏳ Gateway update already running. Details are in /log.")
+        );
+    }
+
+    #[test]
+    fn manual_update_keeps_typing_while_update_lock_exists() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let tg = FakeTelegram::new();
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let selections = RuntimeSelections::default();
+        let msg = message(42, 10, "/update");
+
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/update", "/update").unwrap();
+        thread::sleep(typing_refresh_interval() + Duration::from_millis(250));
+
+        let typing_actions = tg
+            .calls()
+            .iter()
+            .filter(|call| {
+                matches!(
+                    call,
+                    Call::Action { chat_id: 42, action } if action == "typing"
+                )
+            })
+            .count();
+        assert!(
+            typing_actions >= 2,
+            "expected manual update to keep typing while lock exists, got {typing_actions}"
+        );
+    }
+
+    #[test]
+    fn status_command_reports_last_heartbeat_state() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        fs::create_dir_all(&cfg.state_dir).unwrap();
+        fs::write(
+            cfg.state_dir.join("heartbeat.json"),
+            r#"{
+  "started_at": "2026-06-11 06:48:12",
+  "finished_at": "2026-06-11 06:49:00",
+  "result": "completed",
+  "message": "heartbeat body ran"
+}
+"#,
+        )
+        .unwrap();
+        let tg = FakeTelegram::new();
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let selections = RuntimeSelections::default();
+        let msg = message(42, 10, "/status");
+        let key = SessionKey::Chat {
+            chat_id: 42,
+            thread_id: None,
+        };
+        let codex = inert_codex_config(&cfg);
+
+        handle_status_command_in_background(&cfg, &codex, &tg, &store, &selections, &msg, &key)
+            .unwrap();
+
+        let sent = tg.sent_text().join("\n");
+        assert!(
+            sent.contains("🫀 Heartbeat: completed at 2026-06-11 06:49:00 · heartbeat body ran"),
+            "{sent}"
+        );
     }
 
     #[test]
@@ -3422,21 +3524,21 @@ printf 'session id: session-12345678\n' >&2
         assert!(script.contains("curl -sSfL \"$gateway_foundry_installer_url\" | bash"));
         assert!(script.contains("git pull"));
         assert!(script.contains("./setup"));
-        assert!(script.contains("gateway update phase: git pull"));
-        assert!(script.contains("gateway update phase: brew update"));
-        assert!(script.contains("gateway update phase: brew upgrade"));
-        assert!(script.contains("gateway update phase: brew cleanup"));
-        assert!(script.contains("gateway update phase: foundry installer"));
-        assert!(script.contains("gateway update phase: setup"));
+        assert!(script.contains("gateway_step git git pull"));
+        assert!(script.contains("gateway_step brew-update brew update"));
+        assert!(script.contains("gateway_step brew-upgrade brew upgrade --yes"));
+        assert!(script.contains("gateway_step brew-cleanup brew cleanup"));
+        assert!(script.contains("📦 update foundry"));
+        assert!(script.contains("gateway_step setup ./setup"));
         assert!(script.contains("gateway_update_code=$?"));
-        assert!(script.contains("gateway_update_log=\"${gateway_update_lock:h}/logs/update.log\""));
+        assert!(script.contains("gateway_update_version=\"$5\""));
+        assert!(script.contains("gateway_update_log=\"${gateway_update_lock:h}/logs/gateway.log\""));
+        assert!(!script.contains("logs/update.log"));
         let git_pull = script.find("git pull").unwrap();
         let brew_update = script.find("brew update").unwrap();
         let brew_upgrade = script.find("brew upgrade").unwrap();
         let brew_cleanup = script.find("brew cleanup").unwrap();
-        let foundry_update = script
-            .find("gateway update phase: foundry installer")
-            .unwrap();
+        let foundry_update = script.find("📦 update foundry").unwrap();
         let setup = script.find("./setup").unwrap();
         assert!(git_pull < brew_update);
         assert!(brew_update < brew_upgrade);
@@ -3453,6 +3555,7 @@ printf 'session id: session-12345678\n' >&2
         assert_eq!(args[13], OsStr::new("/tmp/gateway-state/update.lock"));
         assert_eq!(args[14], OsStr::new(env!("CARGO_MANIFEST_DIR")));
         assert_eq!(args[15], OsStr::new(foundry_installer));
+        assert_eq!(args[16], OsStr::new(env!("CARGO_PKG_VERSION")));
     }
 
     #[test]

@@ -85,9 +85,15 @@ fn current_session_label(state: &ChatSession) -> String {
         .unwrap_or(label)
 }
 
-pub fn format_status_message(state: &ChatSession, codex: &str, git: &str, fetch: &str) -> String {
+pub fn format_status_message(
+    state: &ChatSession,
+    heartbeat: &str,
+    codex: &str,
+    git: &str,
+    fetch: &str,
+) -> String {
     let mut sections = vec![status_header(state)];
-    for section in [codex, git, fetch] {
+    for section in [heartbeat, codex, git, fetch] {
         let section = section.trim();
         if !section.is_empty() {
             sections.push(section.to_string());
@@ -97,20 +103,28 @@ pub fn format_status_message(state: &ChatSession, codex: &str, git: &str, fetch:
 }
 
 pub struct StatusSections {
+    pub heartbeat: String,
     pub codex: String,
     pub git: String,
     pub fetch: String,
 }
 
 pub fn status_sections(cfg: &Config, codex: &CodexConfig) -> StatusSections {
+    let heartbeat = heartbeat_status(cfg);
     let codex_cfg = cfg.clone();
     let git_cfg = cfg.clone();
     let git_codex = codex.clone();
-    collect_status_sections(
+    let sections = collect_status_sections(
         move || codex_status(&codex_cfg),
         move || git_status(&git_cfg, &git_codex),
         fastfetch_status,
-    )
+    );
+    StatusSections {
+        heartbeat,
+        codex: sections.codex,
+        git: sections.git,
+        fetch: sections.fetch,
+    }
 }
 
 fn collect_status_sections<C, G, F>(codex: C, git: G, fetch: F) -> StatusSections
@@ -124,10 +138,51 @@ where
     let fetch = thread::spawn(fetch);
 
     StatusSections {
+        heartbeat: String::new(),
         codex: join_status_worker(codex, "🧠 Codex"),
         git: join_status_worker(git, "🧾 Git"),
         fetch: join_status_worker(fetch, "🖥️ fastfetch"),
     }
+}
+
+pub fn heartbeat_status(cfg: &Config) -> String {
+    match crate::heartbeat::read_heartbeat_run_state(cfg) {
+        Ok(state) => heartbeat_status_section(state.as_ref()),
+        Err(err) => format!("🫀 Heartbeat: {err}"),
+    }
+}
+
+fn heartbeat_status_section(state: Option<&crate::heartbeat::HeartbeatRunState>) -> String {
+    let Some(state) = state else {
+        return "🫀 Heartbeat: no state".to_string();
+    };
+    let line = if state.result == "running" {
+        format!("🫀 Heartbeat: running since {}", state.started_at)
+    } else {
+        format!(
+            "🫀 Heartbeat: {} at {}",
+            state.result,
+            state.finished_at.as_deref().unwrap_or(&state.started_at)
+        )
+    };
+    let message = concise_status_detail(&state.message);
+    if message.is_empty() {
+        line
+    } else {
+        format!("{line} · {message}")
+    }
+}
+
+fn concise_status_detail(message: &str) -> String {
+    let detail = message.trim();
+    if detail.is_empty() {
+        return String::new();
+    }
+    let mut truncated: String = detail.chars().take(120).collect();
+    if detail.chars().count() > 120 {
+        truncated.push('…');
+    }
+    truncated
 }
 
 fn join_status_worker(handle: JoinHandle<String>, label: &str) -> String {
@@ -854,13 +909,16 @@ mod tests {
 
         let got = format_status_message(
             &state,
+            "🫀 Heartbeat: completed at 2026-06-11 06:49:00",
             "🧠 Codex: ok",
             "🧾 Git\n• 🌉 Gateway: clean",
             "OS: test",
         );
 
         assert!(got.contains("🤖 Model: gpt-test"));
-        assert!(got.contains("🧠 Codex: ok\n\n🧾 Git\n• 🌉 Gateway: clean\n\nOS: test"));
+        assert!(got.contains(
+            "🫀 Heartbeat: completed at 2026-06-11 06:49:00\n\n🧠 Codex: ok\n\n🧾 Git\n• 🌉 Gateway: clean\n\nOS: test"
+        ));
         assert!(got.contains("OS: test"));
         assert!(!got.contains("Gateway restarted."));
     }

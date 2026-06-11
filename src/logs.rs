@@ -1,8 +1,9 @@
 use crate::text::tail_log_plain_text;
 use std::collections::BTreeMap;
 use std::fmt::Arguments;
-use std::fs;
-use std::path::PathBuf;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn read_gateway_logs(env: &BTreeMap<String, String>, lines: usize) -> Result<String, String> {
@@ -28,6 +29,24 @@ pub fn error(args: Arguments<'_>) {
     write("ERROR", args);
 }
 
+pub fn append_log_file(path: &Path, level: &str, message: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| format!("create log dir: {err}"))?;
+    }
+    let line = format_log_line(
+        &current_utc_timestamp(),
+        env!("CARGO_PKG_VERSION"),
+        level,
+        message,
+    );
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|err| format!("open log: {err}"))?;
+    writeln!(file, "{line}").map_err(|err| format!("write log: {err}"))
+}
+
 fn write(level: &str, args: Arguments<'_>) {
     eprintln!(
         "{}",
@@ -42,11 +61,8 @@ fn write(level: &str, args: Arguments<'_>) {
 
 pub fn format_log_line(timestamp: &str, version: &str, level: &str, message: &str) -> String {
     let level = level.trim();
-    format!(
-        "{} {timestamp} v={version} {}",
-        log_icon(level),
-        one_line(message)
-    )
+    let message = message_with_event_icon(&one_line(message));
+    format!("{} {timestamp} v={version} {message}", log_icon(level))
 }
 
 fn log_icon(level: &str) -> &'static str {
@@ -102,6 +118,51 @@ fn one_line(message: &str) -> String {
     message.lines().collect::<Vec<_>>().join(" | ")
 }
 
+fn message_with_event_icon(message: &str) -> String {
+    let message = message.trim();
+    if message.is_empty() {
+        return "🧾 empty".to_string();
+    }
+    if has_event_icon(message) {
+        message.to_string()
+    } else {
+        format!("{} {message}", inferred_event_icon(message))
+    }
+}
+
+fn has_event_icon(message: &str) -> bool {
+    message
+        .chars()
+        .next()
+        .map(|ch| !ch.is_ascii_alphanumeric())
+        .unwrap_or(false)
+}
+
+fn inferred_event_icon(message: &str) -> &'static str {
+    let lower = message.to_ascii_lowercase();
+    if lower.starts_with("telegram") {
+        "🤖"
+    } else if lower.starts_with("gateway update") || lower.starts_with("update") {
+        "📦"
+    } else if lower.starts_with("heartbeat") || lower.starts_with("hb") {
+        "🫀"
+    } else if lower.starts_with("codex") {
+        "🧠"
+    } else if lower.starts_with("tts")
+        || lower.starts_with("voice")
+        || lower.starts_with("voicebox")
+        || lower.starts_with("elevenlabs")
+    {
+        "🔊"
+    } else if lower.starts_with("launch") || lower.starts_with("setup") {
+        "🚀"
+    } else if lower.starts_with("job") {
+        "🧵"
+    } else {
+        "🧾"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,26 +171,33 @@ mod tests {
     fn format_log_line_includes_timestamp_version_level_icon_and_message() {
         let line = format_log_line("2026-06-02 15:30:43", "0.1.6", "WARN", "poll failed");
 
-        assert_eq!(line, "⚠️ 2026-06-02 15:30:43 v=0.1.6 poll failed");
+        assert_eq!(line, "⚠️ 2026-06-02 15:30:43 v=0.1.6 🧾 poll failed");
     }
 
     #[test]
     fn format_log_line_flattens_multiline_messages() {
         let line = format_log_line("2026-06-02 15:30:43", "0.1.6", " WARN ", "one\ntwo");
 
-        assert_eq!(line, "⚠️ 2026-06-02 15:30:43 v=0.1.6 one | two");
+        assert_eq!(line, "⚠️ 2026-06-02 15:30:43 v=0.1.6 🧾 one | two");
     }
 
     #[test]
     fn format_log_line_uses_level_icons() {
         assert_eq!(
             format_log_line("2026-06-02 15:30:43", "0.1.6", "INFO", "started"),
-            "ℹ️ 2026-06-02 15:30:43 v=0.1.6 started"
+            "ℹ️ 2026-06-02 15:30:43 v=0.1.6 🧾 started"
         );
         assert_eq!(
             format_log_line("2026-06-02 15:30:43", "0.1.6", "ERROR", "failed"),
-            "❌ 2026-06-02 15:30:43 v=0.1.6 failed"
+            "❌ 2026-06-02 15:30:43 v=0.1.6 🧾 failed"
         );
+    }
+
+    #[test]
+    fn format_log_line_preserves_domain_icon_when_present() {
+        let line = format_log_line("2026-06-02 15:30:43", "0.1.6", "INFO", "🫀 hb done");
+
+        assert_eq!(line, "ℹ️ 2026-06-02 15:30:43 v=0.1.6 🫀 hb done");
     }
 
     #[test]
