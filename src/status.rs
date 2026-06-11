@@ -15,7 +15,7 @@ const CODEX_USAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const FASTFETCH_TIMEOUT: Duration = Duration::from_secs(5);
 const GIT_STATUS_TIMEOUT: Duration = Duration::from_secs(2);
-const GIT_SUMMARY_TIMEOUT: Duration = Duration::from_secs(20);
+const GIT_SUMMARY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_GIT_SUMMARY_INPUT_CHARS: usize = 12_000;
 const FASTFETCH_CONFIG: &str = r#"{
   "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
@@ -849,10 +849,14 @@ pub const fn typing_interval() -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codex::CodexConfig;
+    use crate::config::{ModelRole, ProviderModel, TelegramBotConfig};
+    use crate::provider::Provider;
     use std::fs;
     use std::io::{BufRead, BufReader, Write as IoWrite};
     use std::net::TcpListener;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
     use std::sync::{mpsc, Arc, Condvar, Mutex};
     use std::thread;
 
@@ -1044,6 +1048,31 @@ mod tests {
     }
 
     #[test]
+    fn dirty_git_status_falls_back_to_local_summary_when_codex_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        assert!(Command::new("git")
+            .arg("init")
+            .arg(repo.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success());
+        fs::write(repo.path().join("note.txt"), "dirty\n").unwrap();
+        let codex = CodexConfig {
+            bin: PathBuf::from("/bin/false"),
+            workdir: dir.path().to_path_buf(),
+            default_model: "gpt-test".to_string(),
+        };
+        let cfg = test_config(dir.path());
+
+        let got = git_status_short_summary(&codex, &cfg, "gateway", repo.path());
+
+        assert_eq!(got, "1 changed: 1 untracked");
+    }
+
+    #[test]
     fn git_summary_prompt_asks_for_content_change_summary() {
         let input = "status:\n M src/status.rs\n\nunstaged patch:\n+new behavior";
 
@@ -1072,6 +1101,62 @@ mod tests {
             Some("status summary".to_string())
         );
         assert_eq!(concise_git_summary(" \n\t"), None);
+    }
+
+    #[test]
+    fn dirty_git_status_uses_codex_light_model_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        assert!(Command::new("git")
+            .arg("init")
+            .arg(repo.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success());
+        fs::write(repo.path().join("note.txt"), "before\n").unwrap();
+        assert!(Command::new("git")
+            .args(["-C"])
+            .arg(repo.path())
+            .args(["add", "note.txt"])
+            .status()
+            .unwrap()
+            .success());
+        fs::write(repo.path().join("note.txt"), "after\n").unwrap();
+
+        let args_path = dir.path().join("codex.args");
+        let prompt_path = dir.path().join("codex.prompt");
+        let codex = CodexConfig {
+            bin: executable(
+                dir.path().join("codex-summary"),
+                &format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\nout=''\nprev=''\nfor arg in \"$@\"; do\n  if [ \"$prev\" = '--output-last-message' ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\ncat > \"{}\"\nprintf 'codex-powered summary\\n' > \"$out\"\n",
+                    args_path.display(),
+                    prompt_path.display()
+                ),
+            ),
+            workdir: dir.path().to_path_buf(),
+            default_model: "gpt-test".to_string(),
+        };
+        let cfg = test_config(dir.path());
+
+        let got = git_status_short_summary(&codex, &cfg, "gateway", repo.path());
+
+        assert_eq!(got, "codex-powered summary");
+        let args = fs::read_to_string(args_path).unwrap();
+        assert!(args
+            .lines()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|pair| pair == ["-m", "gpt-light"]));
+        let prompt = fs::read_to_string(prompt_path).unwrap();
+        assert!(prompt.contains("actual content changes"));
+    }
+
+    #[test]
+    fn git_summary_timeout_keeps_status_responsive() {
+        assert!(GIT_SUMMARY_TIMEOUT <= Duration::from_secs(5));
     }
 
     #[test]
@@ -1369,6 +1454,46 @@ exit 2
         let (lock, cvar) = &**gate;
         *lock.lock().unwrap() = true;
         cvar.notify_all();
+    }
+
+    fn test_config(root: &Path) -> Config {
+        Config {
+            bot_token: "token".to_string(),
+            telegram_chat_ids: vec![42],
+            telegram_bots: vec![TelegramBotConfig {
+                bot_token: "token".to_string(),
+                chat_ids: vec![42],
+                offset_file: root.join("state/gateway/telegram.offset"),
+            }],
+            xdg_config_home: root.join("config"),
+            xdg_cache_home: root.join("cache"),
+            xdg_data_home: root.join("data"),
+            xdg_state_home: root.join("state"),
+            gateway_config_file: root.join("config/gateway/config.json"),
+            codex_workdir: root.to_path_buf(),
+            models: vec![
+                ProviderModel {
+                    provider: Provider::Codex,
+                    model: "gpt-default".to_string(),
+                    role: ModelRole::Default,
+                },
+                ProviderModel {
+                    provider: Provider::Codex,
+                    model: "gpt-light".to_string(),
+                    role: ModelRole::Light,
+                },
+            ],
+            tts: None,
+            state_dir: root.join("state/gateway"),
+            chat_state_dir: root.join("state/gateway/chats"),
+            offset_file: root.join("state/gateway/telegram.offset"),
+            gateway_log_file: root.join("state/gateway/logs/gateway.log"),
+            launchd_target: "gui/0/ai.gateway-test".to_string(),
+            poll_timeout_sec: 50,
+            queue_depth: 8,
+            codex_timeout: Duration::from_secs(30),
+            heartbeat_interval: Duration::from_secs(24 * 60 * 60),
+        }
     }
 
     fn executable(path: std::path::PathBuf, body: &str) -> std::path::PathBuf {

@@ -1819,6 +1819,7 @@ fn handle_status_command_in_background<T: TelegramApi>(
     msg: &Message,
     key: &SessionKey,
 ) -> Result<(), String> {
+    let _typing = start_typing_loop(tg, msg.chat.id);
     let mut state = store.load(key);
     if current_session_is_unnamed(&state)
         && !auto_rename_current_session(cfg, codex, tg, store, msg, key)?
@@ -2227,11 +2228,12 @@ fn single_line(text: &str) -> String {
 fn start_typing_loop<T: TelegramApi>(tg: &T, chat_id: i64) -> TypingLoop {
     let tg = tg.clone();
     let (stop, stopped) = mpsc::channel();
+    let _ = tg.send_chat_action(chat_id, "typing");
     let handle = thread::spawn(move || loop {
-        let _ = tg.send_chat_action(chat_id, "typing");
         if stopped.recv_timeout(typing_refresh_interval()).is_ok() {
             break;
         }
+        let _ = tg.send_chat_action(chat_id, "typing");
     });
     TypingLoop {
         stop: Some(stop),
@@ -3484,6 +3486,43 @@ printf 'session id: session-12345678\n' >&2
             sent.contains("🫀 Heartbeat: completed at 2026-06-11 06:49:00 · heartbeat body ran"),
             "{sent}"
         );
+    }
+
+    #[test]
+    fn status_command_sends_typing_before_status_message() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let tg = FakeTelegram::new();
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let selections = RuntimeSelections::default();
+        let msg = message(42, 10, "/status");
+        let key = SessionKey::Chat {
+            chat_id: 42,
+            thread_id: None,
+        };
+        let codex = inert_codex_config(&cfg);
+
+        handle_status_command_in_background(&cfg, &codex, &tg, &store, &selections, &msg, &key)
+            .unwrap();
+
+        let calls = tg.calls();
+        assert!(
+            matches!(
+                calls.first(),
+                Some(Call::Action { chat_id: 42, action }) if action == "typing"
+            ),
+            "{calls:?}"
+        );
+        assert!(calls.iter().any(|call| {
+            matches!(
+                call,
+                Call::Send { chat_id: 42, reply_to: 10, text }
+                    if text.contains("📦 Gateway version:")
+            )
+        }));
     }
 
     #[test]
