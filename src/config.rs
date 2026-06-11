@@ -906,8 +906,7 @@ mod tests {
             ("1d", 24 * 60 * 60),
             ("7d", 7 * 24 * 60 * 60),
         ] {
-            let mut cfg = GatewayConfigFile::default();
-            cfg.heartbeat = heartbeat.to_string();
+            let cfg = gateway_config_with_heartbeat(heartbeat);
 
             assert_eq!(
                 cfg.heartbeat_interval().unwrap(),
@@ -920,8 +919,7 @@ mod tests {
     #[test]
     fn rejects_invalid_heartbeat_durations() {
         for heartbeat in ["", " ", "0m", "1", "m", "3x", "-1h"] {
-            let mut cfg = GatewayConfigFile::default();
-            cfg.heartbeat = heartbeat.to_string();
+            let mut cfg = gateway_config_with_heartbeat(heartbeat);
 
             let err = cfg.normalize().unwrap_err();
 
@@ -929,6 +927,13 @@ mod tests {
                 err.contains("heartbeat"),
                 "heartbeat={heartbeat:?} error={err}"
             );
+        }
+    }
+
+    fn gateway_config_with_heartbeat(heartbeat: &str) -> GatewayConfigFile {
+        GatewayConfigFile {
+            heartbeat: heartbeat.to_string(),
+            ..Default::default()
         }
     }
 

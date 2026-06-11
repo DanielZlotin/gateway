@@ -1584,10 +1584,12 @@ fn handle_auto_rename_command(
         codex,
         tg,
         store,
-        msg.chat.id,
-        msg.message_id,
-        key,
-        true,
+        AutoRenameRequest {
+            chat_id: msg.chat.id,
+            reply_to_message_id: msg.message_id,
+            key,
+            react_on_complete: true,
+        },
     )?;
     Ok(())
 }
@@ -1605,10 +1607,12 @@ fn auto_rename_current_session(
         codex,
         tg,
         store,
-        msg.chat.id,
-        msg.message_id,
-        key,
-        false,
+        AutoRenameRequest {
+            chat_id: msg.chat.id,
+            reply_to_message_id: msg.message_id,
+            key,
+            react_on_complete: false,
+        },
     )
 }
 
@@ -1624,7 +1628,25 @@ fn auto_rename_startup_session(
     if !current_session_is_unnamed(&state) {
         return Ok(false);
     }
-    auto_rename_session(cfg, codex, tg, store, chat_id, 0, key, false)
+    auto_rename_session(
+        cfg,
+        codex,
+        tg,
+        store,
+        AutoRenameRequest {
+            chat_id,
+            reply_to_message_id: 0,
+            key,
+            react_on_complete: false,
+        },
+    )
+}
+
+struct AutoRenameRequest<'a> {
+    chat_id: i64,
+    reply_to_message_id: i64,
+    key: &'a SessionKey,
+    react_on_complete: bool,
 }
 
 fn auto_rename_session(
@@ -1632,11 +1654,14 @@ fn auto_rename_session(
     codex: &CodexConfig,
     tg: &impl TelegramApi,
     store: &SessionStore,
-    chat_id: i64,
-    reply_to_message_id: i64,
-    key: &SessionKey,
-    react_on_complete: bool,
+    request: AutoRenameRequest<'_>,
 ) -> Result<bool, String> {
+    let AutoRenameRequest {
+        chat_id,
+        reply_to_message_id,
+        key,
+        react_on_complete,
+    } = request;
     let state = store.load(key);
     if state.session_id.is_none() {
         return Ok(false);
@@ -1645,7 +1670,7 @@ fn auto_rename_session(
     let codex = codex.clone();
     let tg = tg.clone();
     let store = store.clone();
-    let key = key.clone();
+    let key = key.to_owned();
     thread::spawn(move || {
         if let Err(err) = auto_rename_session_in_background(&cfg, &codex, &store, &key, state) {
             logs::warn(format_args!(
@@ -3091,7 +3116,7 @@ printf 'transcribed text\n' > "$outdir/$stem.txt"
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--output_format", "txt"]));
-        assert!(!args.iter().any(|arg| *arg == "--task"));
+        assert!(!args.contains(&"--task"));
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--output_dir", output_dir.to_str().unwrap()]));
