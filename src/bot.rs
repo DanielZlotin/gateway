@@ -3519,14 +3519,16 @@ printf 'session id: session-12345678\n' >&2
         assert!(script.contains("set -o pipefail"));
         assert!(script.contains("export HOMEBREW_NO_ASK=1"));
         assert!(script.contains("brew update"));
-        assert!(script.contains("brew upgrade --yes"));
+        assert!(script.contains("gateway_step brew-upgrade brew upgrade"));
+        assert!(!script.contains("brew upgrade --yes"));
         assert!(script.contains("brew cleanup"));
         assert!(script.contains("curl -sSfL \"$gateway_foundry_installer_url\" | bash"));
         assert!(script.contains("git pull"));
         assert!(script.contains("./setup"));
         assert!(script.contains("gateway_step git git pull"));
         assert!(script.contains("gateway_step brew-update brew update"));
-        assert!(script.contains("gateway_step brew-upgrade brew upgrade --yes"));
+        assert!(script.contains("gateway_step brew-upgrade brew upgrade"));
+        assert!(!script.contains("brew upgrade --yes"));
         assert!(script.contains("gateway_step brew-cleanup brew cleanup"));
         assert!(script.contains("📦 update foundry"));
         assert!(script.contains("gateway_step setup ./setup"));

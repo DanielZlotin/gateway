@@ -72,16 +72,16 @@ pub const DIRECTIVE_SPECS: &[DirectiveSpec] = &[
         summary: "pull latest gateway code, update Brew/Foundry, and run setup",
     },
     DirectiveSpec {
-        directive: Directive::List,
-        icon: "📚",
-        usage: "",
-        summary: "list saved sessions",
-    },
-    DirectiveSpec {
         directive: Directive::New,
         icon: "✨",
         usage: "",
         summary: "start a fresh Codex session",
+    },
+    DirectiveSpec {
+        directive: Directive::List,
+        icon: "📚",
+        usage: "",
+        summary: "list saved sessions",
     },
     DirectiveSpec {
         directive: Directive::Resume,
@@ -96,10 +96,10 @@ pub const DIRECTIVE_SPECS: &[DirectiveSpec] = &[
         summary: "rename the current session",
     },
     DirectiveSpec {
-        directive: Directive::Log,
-        icon: "📜",
-        usage: " [lines]",
-        summary: "send recent gateway logs",
+        directive: Directive::Model,
+        icon: "🧠",
+        usage: " [index]",
+        summary: "choose a configured provider/model",
     },
     DirectiveSpec {
         directive: Directive::Status,
@@ -108,16 +108,16 @@ pub const DIRECTIVE_SPECS: &[DirectiveSpec] = &[
         summary: "show Codex, gateway, and system status",
     },
     DirectiveSpec {
+        directive: Directive::Log,
+        icon: "📜",
+        usage: " [lines]",
+        summary: "send recent gateway logs",
+    },
+    DirectiveSpec {
         directive: Directive::Restart,
         icon: "🔁",
         usage: "",
         summary: "restart the gateway service",
-    },
-    DirectiveSpec {
-        directive: Directive::Model,
-        icon: "🧠",
-        usage: " [index]",
-        summary: "choose a configured provider/model",
     },
     DirectiveSpec {
         directive: Directive::Stop,

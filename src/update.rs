@@ -34,7 +34,7 @@ cd "$gateway_update_root" &&
   export HOMEBREW_NO_ASK=1 &&
   gateway_step git git pull &&
   gateway_step brew-update brew update &&
-  gateway_step brew-upgrade brew upgrade --yes &&
+  gateway_step brew-upgrade brew upgrade &&
   gateway_step brew-cleanup brew cleanup &&
   gateway_log "ℹ️" "📦 update brewsave" &&
   : "${XDG_CONFIG_HOME:?XDG_CONFIG_HOME is required}" &&
@@ -327,7 +327,8 @@ mod tests {
         assert!(script.contains("gateway_update_root=\"$3\""));
         assert!(script.contains("print -r -- \"pid $$\" > \"$gateway_update_lock\""));
         assert!(script.contains("export HOMEBREW_NO_ASK=1"));
-        assert!(script.contains("brew upgrade --yes"));
+        assert!(script.contains("gateway_step brew-upgrade brew upgrade"));
+        assert!(!script.contains("brew upgrade --yes"));
         assert!(script.contains("gateway_brewfile=\"$XDG_CONFIG_HOME/homebrew/Brewfile\""));
         assert!(script.contains("mkdir -p \"${gateway_brewfile:h}\""));
         assert!(script.contains(

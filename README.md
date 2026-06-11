@@ -125,14 +125,14 @@ Sessions are kept separately per chat, and commands are case-insensitive.
 ```text
 🔊 /voice [on|off] - toggle spoken audio replies for the current session
 📦 /update - pull latest gateway code, update Brew/Foundry, and run setup
-📚 /list - list saved sessions
 ✨ /new - start a fresh Codex session
+📚 /list - list saved sessions
 ↩️ /resume [SESSION_OR_NAME|index] - list or resume a saved session
 🏷️ /rename [NAME] - rename the current session
-📜 /log [lines] - send recent gateway logs
-📊 /status - show Codex, gateway, and system status
-🔁 /restart - restart the gateway service
 🧠 /model [index] - choose a configured provider/model
+📊 /status - show Codex, gateway, and system status
+📜 /log [lines] - send recent gateway logs
+🔁 /restart - restart the gateway service
 🛑 /stop - cancel active and queued Codex work for this chat
 ```
 
