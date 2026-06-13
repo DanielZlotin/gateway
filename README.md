@@ -68,11 +68,14 @@ Gateway reads `$XDG_CONFIG_HOME/gateway/config.json`; if missing, it creates:
 
 📋 Notes:
 
-1. 🤖 `provider` must be `codex`, `claude`, or `openrouter`.
-2. 🧠 Missing `role` means `default`; `role: "light"` marks the helper model.
-3. 🫀 `heartbeat` defaults to `1d`; use `m`, `h`, or `d` durations like `3h`.
-4. ⏱️ `timeout_mins` defaults to `30`.
-5. 🔊 Optional `tts` tries ElevenLabs before local Voicebox:
+1. 🧱 Unknown config fields are rejected.
+2. 🤖 `models` must include at least one item; empty `model` values are ignored.
+3. 🔌 `models[].provider` must be `codex`, `claude`, or `openrouter`.
+4. 🧠 `models[].role` is optional; missing means `default`, and `light` marks the helper model.
+5. ⏱️ `timeout_mins` is the Codex/job timeout in minutes; it defaults to `30` and must be greater than zero.
+6. 🫀 `heartbeat` defaults to `1d`; use positive `m`, `h`, or `d` durations like `15m`, `3h`, or `1d`.
+7. 🕰️ Heartbeat scheduling is anchored to local wall-clock boundaries. For example, `3h` runs at `00:00`, `03:00`, `06:00`, `09:00`, `12:00`, `15:00`, `18:00`, and `21:00`.
+8. 🔊 Optional `tts` tries ElevenLabs before local Voicebox:
 
 ```json
 {
@@ -87,6 +90,9 @@ Gateway reads `$XDG_CONFIG_HOME/gateway/config.json`; if missing, it creates:
 
 `speed` is optional. Invalid, missing, or failing `tts` falls back to local
 Voicebox.
+
+`tts.provider` must be `elevenlabs`; `tts.model` and `tts.voice` are required
+non-empty strings; `tts.speed` is optional and must be positive.
 
 ## 🧰 CLI
 
