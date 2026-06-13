@@ -12,8 +12,9 @@
     <integer>63</integer>
     <key>ProgramArguments</key>
     <array>
-      <string>__GATEWAY_RELEASE_BIN__</string>
-      <string>heartbeat</string>
+      <string>/bin/zsh</string>
+      <string>-lc</string>
+      <string>exec __GATEWAY_RELEASE_BIN__ heartbeat</string>
     </array>
   </dict>
 </plist>

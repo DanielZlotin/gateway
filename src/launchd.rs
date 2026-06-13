@@ -302,12 +302,12 @@ mod tests {
         assert!(heartbeat_plist.contains("<key>StartInterval</key>"));
         assert!(heartbeat_plist.contains("<integer>60</integer>"));
         assert!(!heartbeat_plist.contains("GATEWAY_HEARTBEAT_ACTIVE"));
+        assert!(heartbeat_plist.contains("<string>/bin/zsh</string>"));
+        assert!(heartbeat_plist.contains("<string>-lc</string>"));
         assert!(heartbeat_plist.contains(&format!(
-            "<string>{}/target/release/gateway</string>",
+            "<string>exec {}/target/release/gateway heartbeat</string>",
             env!("CARGO_MANIFEST_DIR")
         )));
-        assert!(heartbeat_plist.contains("<string>heartbeat</string>"));
-        assert!(!heartbeat_plist.contains("/bin/zsh"));
         assert!(!heartbeat_plist.contains("__GATEWAY_HEARTBEAT_LAUNCH__"));
         let launchctl_log = fs::read_to_string(launchctl_log).unwrap();
         assert!(launchctl_log.contains("bootout"));
