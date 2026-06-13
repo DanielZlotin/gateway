@@ -48,11 +48,21 @@ fn run_due_heartbeat(
     let interval_minutes = cfg.heartbeat_interval.as_secs() / 60;
     let boundary = heartbeat_boundary_minutes(now_minutes, interval_minutes);
     let state_file = heartbeat_state_file(&cfg);
+    let run_state_missing = !heartbeat_run_state_file(&cfg)
+        .try_exists()
+        .map_err(|err| format!("read heartbeat state: {err}"))?;
     let last_boundary = read_heartbeat_boundary(&state_file)?;
     let at_boundary = now_minutes == boundary;
 
     match heartbeat_decision(last_boundary, boundary, at_boundary) {
         HeartbeatDecision::Skip => {
+            if run_state_missing {
+                write_heartbeat_run_state(
+                    &cfg,
+                    HeartbeatRunState::finished("initialized", "initialized"),
+                )?;
+                append_heartbeat_log(&cfg, "INFO", "🫀 hb init")?;
+            }
             return Ok("heartbeat not due".to_string());
         }
         HeartbeatDecision::MarkOnly(boundary) => {
@@ -313,6 +323,27 @@ mod tests {
         assert!(update_ran.get());
         assert!(prompt_ran.get());
         assert!(cfg.state_dir.join("heartbeat.lock").exists());
+    }
+
+    #[test]
+    fn heartbeat_initializes_missing_run_state_when_not_due() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        fs::create_dir_all(&cfg.state_dir).unwrap();
+        fs::write(cfg.state_dir.join("heartbeat.last"), "60\n").unwrap();
+
+        let output = run_due_heartbeat(
+            cfg.clone(),
+            60,
+            |_| panic!("heartbeat update should not run"),
+            |_, _| panic!("heartbeat prompt should not run"),
+        )
+        .unwrap();
+
+        assert_eq!(output, "heartbeat not due");
+        let state = fs::read_to_string(cfg.state_dir.join("heartbeat.json")).unwrap();
+        assert!(state.contains(r#""result": "initialized""#), "{state}");
+        assert!(state.contains(r#""message": "initialized""#), "{state}");
     }
 
     #[test]
