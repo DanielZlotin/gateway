@@ -495,6 +495,12 @@ fn fastfetch_status_with_bin(bin: &Path) -> String {
 
 fn format_fastfetch_status(raw: &str, timed_out: bool) -> String {
     let text = format_fastfetch_output(raw);
+    let power_warning = ac_power_warning(raw);
+    let text = match (power_warning, text.is_empty()) {
+        (Some(warning), false) => format!("{warning}\n{text}"),
+        (Some(warning), true) => warning.to_string(),
+        (None, _) => text,
+    };
     match (text.is_empty(), timed_out) {
         (false, false) => text,
         (false, true) => format!("{text}\n• ⏳ Fastfetch: timed out; showing partial output"),
@@ -567,6 +573,47 @@ pub fn format_fastfetch_output(raw: &str) -> String {
         lines.push(format!("• {emoji} {key}: {value}"));
     }
     lines.join("\n")
+}
+
+fn ac_power_warning(raw: &str) -> Option<&'static str> {
+    let mut battery_value = None;
+    for raw_line in strip_ansi(raw).lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('-') || !line.contains(':') {
+            continue;
+        }
+        let (key, value) = line
+            .rsplit_once(':')
+            .expect("line contains a colon after earlier check");
+        let key = fastfetch_key_label(key);
+        let value = value.trim();
+        if key == "Power Adapter" {
+            return ac_adapter_disconnected(value).then_some(
+                "⚠️ Power: AC power is disconnected; connect power before long gateway runs.",
+            );
+        }
+        if key.starts_with("Battery") && !value.is_empty() {
+            battery_value = Some(value.to_string());
+        }
+    }
+    battery_value
+        .as_deref()
+        .is_some_and(battery_discharging)
+        .then_some("⚠️ Power: AC power is disconnected; connect power before long gateway runs.")
+}
+
+fn ac_adapter_disconnected(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    value.contains("disconnected")
+        || value.contains("not connected")
+        || value == "none"
+        || value == "n/a"
+        || value.contains("no adapter")
+}
+
+fn battery_discharging(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    value.contains("discharging") || value.contains("on battery")
 }
 
 fn fastfetch_key_label(raw_key: &str) -> String {
@@ -1249,6 +1296,47 @@ mod tests {
             format_fastfetch_status("OS: macOS\n", true),
             "• 🖥️ OS: macOS\n• ⏳ Fastfetch: timed out; showing partial output"
         );
+    }
+
+    #[test]
+    fn fastfetch_status_warns_when_ac_power_is_disconnected() {
+        let raw = [
+            "Battery (bq40z651): 82% [Discharging]",
+            "Power Adapter: Disconnected",
+        ]
+        .join("\n");
+
+        let got = format_fastfetch_status(&raw, false);
+
+        assert!(got.starts_with(
+            "⚠️ Power: AC power is disconnected; connect power before long gateway runs.\n"
+        ));
+        assert!(got.contains("• 🔌 Power Adapter: Disconnected"));
+    }
+
+    #[test]
+    fn fastfetch_status_warns_from_battery_when_power_adapter_is_missing() {
+        let raw = "Battery (bq40z651): 82% [Discharging]";
+
+        let got = format_fastfetch_status(raw, false);
+
+        assert!(got.starts_with(
+            "⚠️ Power: AC power is disconnected; connect power before long gateway runs.\n"
+        ));
+    }
+
+    #[test]
+    fn fastfetch_status_does_not_warn_when_ac_power_is_connected() {
+        let raw = [
+            "Battery (bq40z651): 100% [AC Connected]",
+            "Power Adapter: 87W USB-C Power Adapter",
+        ]
+        .join("\n");
+
+        let got = format_fastfetch_status(&raw, false);
+
+        assert!(!got.contains("⚠️ Power:"));
+        assert!(got.contains("• 🔋 Battery (bq40z651): 100% [AC Connected]"));
     }
 
     #[test]
