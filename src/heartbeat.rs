@@ -9,6 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const HEARTBEAT_ACTIVE_ENV: &str = "GATEWAY_HEARTBEAT_ACTIVE";
+const HEARTBEAT_PROMPT_SKELETON: &str = include_str!("../prompts/HEARTBEAT.md");
 
 #[derive(Debug, PartialEq, Eq)]
 enum HeartbeatDecision {
@@ -103,7 +104,7 @@ fn run_due_heartbeat(
         }
     }
 
-    let heartbeat_file = cfg.xdg_config_home.join("gateway/HEARTBEAT.md");
+    let heartbeat_file = ensure_heartbeat_prompt_file(&cfg)?;
     let result = run_prompt(
         RunArgs {
             prompt: None,
@@ -188,6 +189,22 @@ fn heartbeat_state_file(cfg: &Config) -> PathBuf {
 
 fn heartbeat_run_state_file(cfg: &Config) -> PathBuf {
     cfg.state_dir.join("heartbeat.json")
+}
+
+fn ensure_heartbeat_prompt_file(cfg: &Config) -> Result<PathBuf, String> {
+    let path = cfg.xdg_config_home.join("gateway/HEARTBEAT.md");
+    if path
+        .try_exists()
+        .map_err(|err| format!("read heartbeat prompt file: {err}"))?
+    {
+        return Ok(path);
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| format!("create heartbeat prompt dir: {err}"))?;
+    }
+    fs::write(&path, HEARTBEAT_PROMPT_SKELETON)
+        .map_err(|err| format!("write heartbeat prompt file: {err}"))?;
+    Ok(path)
 }
 
 fn append_heartbeat_log(cfg: &Config, level: &str, message: &str) -> Result<(), String> {
@@ -292,6 +309,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let cfg = test_config(dir.path());
         fs::create_dir_all(&cfg.state_dir).unwrap();
+        fs::create_dir_all(cfg.xdg_config_home.join("gateway")).unwrap();
+        fs::write(
+            cfg.xdg_config_home.join("gateway/HEARTBEAT.md"),
+            "custom heartbeat prompt\n",
+        )
+        .unwrap();
         fs::write(cfg.state_dir.join("heartbeat.last"), "0\n").unwrap();
         fs::write(
             cfg.state_dir.join("heartbeat.lock"),
@@ -314,6 +337,10 @@ mod tests {
                     args.prompt_file,
                     Some(cfg.xdg_config_home.join("gateway/HEARTBEAT.md"))
                 );
+                assert_eq!(
+                    fs::read_to_string(cfg.xdg_config_home.join("gateway/HEARTBEAT.md")).unwrap(),
+                    "custom heartbeat prompt\n"
+                );
                 Ok("heartbeat body ran".to_string())
             },
         )
@@ -323,6 +350,34 @@ mod tests {
         assert!(update_ran.get());
         assert!(prompt_ran.get());
         assert!(cfg.state_dir.join("heartbeat.lock").exists());
+    }
+
+    #[test]
+    fn heartbeat_creates_custom_prompt_file_from_skeleton_when_missing() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        fs::create_dir_all(&cfg.state_dir).unwrap();
+        fs::write(cfg.state_dir.join("heartbeat.last"), "0\n").unwrap();
+        let heartbeat_file = cfg.xdg_config_home.join("gateway/HEARTBEAT.md");
+
+        let output = run_due_heartbeat(
+            cfg.clone(),
+            60,
+            |_| Ok(GatewayUpdateRun::Completed),
+            |args, cfg| {
+                assert_eq!(
+                    args.prompt_file,
+                    Some(cfg.xdg_config_home.join("gateway/HEARTBEAT.md"))
+                );
+                assert!(heartbeat_file.exists());
+                let prompt = fs::read_to_string(&heartbeat_file).unwrap();
+                assert!(prompt.contains("Return exactly `OK`"), "{prompt}");
+                Ok("heartbeat body ran".to_string())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(output, "heartbeat body ran");
     }
 
     #[test]

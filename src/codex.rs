@@ -47,7 +47,7 @@ pub struct CodexRun<'a> {
     pub cancel: Option<Arc<AtomicBool>>,
 }
 
-const GATEWAY_DEVELOPER_INSTRUCTIONS: &str = include_str!("SYSTEM.md");
+const GATEWAY_DEVELOPER_INSTRUCTIONS: &str = include_str!("../prompts/SYSTEM.md");
 
 #[allow(clippy::too_many_arguments)]
 pub fn codex_args(

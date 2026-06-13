@@ -2,6 +2,7 @@ use crate::codex::{run_codex, CodexConfig};
 use crate::config::Config;
 use crate::session::ChatSession;
 use crate::text::{redact_private_data, session_label};
+use chrono::{DateTime, Local, NaiveDateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 use std::fs;
@@ -17,6 +18,7 @@ const FASTFETCH_TIMEOUT: Duration = Duration::from_secs(5);
 const GIT_STATUS_TIMEOUT: Duration = Duration::from_secs(2);
 const GIT_SUMMARY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_GIT_SUMMARY_INPUT_CHARS: usize = 12_000;
+const HEARTBEAT_TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 const FASTFETCH_CONFIG: &str = r#"{
   "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
   "modules": [
@@ -148,21 +150,22 @@ where
 pub fn heartbeat_status(cfg: &Config) -> String {
     match crate::heartbeat::read_heartbeat_run_state(cfg) {
         Ok(state) => heartbeat_status_section(state.as_ref()),
-        Err(err) => format!("🫀 Heartbeat: {err}"),
+        Err(err) => format!("🫀 hb: {err}"),
     }
 }
 
 fn heartbeat_status_section(state: Option<&crate::heartbeat::HeartbeatRunState>) -> String {
     let Some(state) = state else {
-        return "🫀 Heartbeat: no state".to_string();
+        return "🫀 hb: no state".to_string();
     };
     let line = if state.result == "running" {
-        format!("🫀 Heartbeat: running since {}", state.started_at)
+        format!("🫀 hb: running {}", local_heartbeat_time(&state.started_at))
     } else {
+        let finished_at = state.finished_at.as_deref().unwrap_or(&state.started_at);
         format!(
-            "🫀 Heartbeat: {} at {}",
-            state.result,
-            state.finished_at.as_deref().unwrap_or(&state.started_at)
+            "🫀 hb: {} {}",
+            heartbeat_result_label(&state.result),
+            local_heartbeat_time(finished_at)
         )
     };
     let message = concise_status_detail(&state.message);
@@ -171,6 +174,26 @@ fn heartbeat_status_section(state: Option<&crate::heartbeat::HeartbeatRunState>)
     } else {
         format!("{line} · {message}")
     }
+}
+
+fn heartbeat_result_label(result: &str) -> &str {
+    match result {
+        "completed" => "done",
+        "initialized" => "init",
+        "update-running" => "busy",
+        _ => result,
+    }
+}
+
+fn local_heartbeat_time(timestamp: &str) -> String {
+    parse_utc_heartbeat_timestamp(timestamp)
+        .map(|time| time.with_timezone(&Local).format("%H:%M").to_string())
+        .unwrap_or_else(|| timestamp.to_string())
+}
+
+fn parse_utc_heartbeat_timestamp(timestamp: &str) -> Option<DateTime<Utc>> {
+    let naive = NaiveDateTime::parse_from_str(timestamp, HEARTBEAT_TIMESTAMP_FORMAT).ok()?;
+    Some(DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc))
 }
 
 fn concise_status_detail(message: &str) -> String {
@@ -972,6 +995,31 @@ mod tests {
         ));
         assert!(got.contains("OS: test"));
         assert!(!got.contains("Gateway restarted."));
+    }
+
+    #[test]
+    fn heartbeat_status_section_formats_local_time_concisely() {
+        let state = crate::heartbeat::HeartbeatRunState {
+            started_at: "2026-06-11 06:48:12".to_string(),
+            finished_at: Some("2026-06-11 06:49:00".to_string()),
+            result: "completed".to_string(),
+            message: "heartbeat body ran".to_string(),
+        };
+        let finished_at =
+            chrono::NaiveDateTime::parse_from_str("2026-06-11 06:49:00", "%Y-%m-%d %H:%M:%S")
+                .unwrap();
+        let local_time =
+            chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(finished_at, chrono::Utc)
+                .with_timezone(&chrono::Local)
+                .format("%H:%M")
+                .to_string();
+
+        let got = heartbeat_status_section(Some(&state));
+
+        assert_eq!(
+            got,
+            format!("🫀 hb: done {local_time} · heartbeat body ran")
+        );
     }
 
     #[test]

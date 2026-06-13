@@ -3506,9 +3506,17 @@ printf 'session id: session-12345678\n' >&2
         handle_status_command_in_background(&cfg, &codex, &tg, &store, &selections, &msg, &key)
             .unwrap();
 
+        let finished_at =
+            chrono::NaiveDateTime::parse_from_str("2026-06-11 06:49:00", "%Y-%m-%d %H:%M:%S")
+                .unwrap();
+        let local_time =
+            chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(finished_at, chrono::Utc)
+                .with_timezone(&chrono::Local)
+                .format("%H:%M")
+                .to_string();
         let sent = tg.sent_text().join("\n");
         assert!(
-            sent.contains("🫀 Heartbeat: completed at 2026-06-11 06:49:00 · heartbeat body ran"),
+            sent.contains(&format!("🫀 hb: done {local_time} · heartbeat body ran")),
             "{sent}"
         );
     }
