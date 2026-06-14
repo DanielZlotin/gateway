@@ -248,6 +248,12 @@ gateway_plist_tmp=
 gateway_render_plist "$gateway_heartbeat_plist_template" "$gateway_heartbeat_plist_dest" "$gateway_heartbeat_plist_tmp" "__GATEWAY_RELEASE_BIN__" "$gateway_release_bin_xml"
 gateway_heartbeat_plist_tmp=
 
+if [[ -n "${GATEWAY_HEARTBEAT_ACTIVE:-}" ]]; then
+  gateway_state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/gateway"
+  mkdir -p "$gateway_state_dir"
+  print -r -- "heartbeat setup $(date -u '+%Y-%m-%d %H:%M:%S')" > "$gateway_state_dir/suppress-startup-status.once"
+fi
+
 launchctl bootout "$gateway_domain/$gateway_label" 2>/dev/null || true
 sleep 1
 launchctl bootstrap "$gateway_domain" "$gateway_plist_dest"

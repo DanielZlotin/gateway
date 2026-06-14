@@ -370,6 +370,9 @@ mod tests {
             "heartbeat should not be reloaded while heartbeat is active:\n{launchctl_log}"
         );
         assert!(home
+            .join(".local/state/gateway/suppress-startup-status.once")
+            .exists());
+        assert!(home
             .join("Library/LaunchAgents/ai.gateway.heartbeat.plist")
             .exists());
     }

@@ -326,7 +326,11 @@ fn run_with_client_with_codex<T: TelegramApi>(
         default_model.model.clone(),
         default_model.provider,
     );
-    startup_statuses_in_background(cfg.clone(), codex.clone(), tg.clone(), store.clone());
+    if consume_startup_status_suppression(&cfg) {
+        logs::info(format_args!("telegram startup status suppressed"));
+    } else {
+        startup_statuses_in_background(cfg.clone(), codex.clone(), tg.clone(), store.clone());
+    }
 
     let (tx, rx) = mpsc::sync_channel::<Job>(cfg.queue_depth);
     let cancellations = CancellationState::default();
@@ -478,6 +482,24 @@ fn startup_statuses_in_background<T: TelegramApi>(
             }
         }
     });
+}
+
+fn startup_status_suppression_file(cfg: &Config) -> PathBuf {
+    cfg.state_dir.join("suppress-startup-status.once")
+}
+
+fn consume_startup_status_suppression(cfg: &Config) -> bool {
+    let path = startup_status_suppression_file(cfg);
+    match fs::remove_file(&path) {
+        Ok(()) => true,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(err) => {
+            logs::warn(format_args!(
+                "telegram startup status suppression read failed: {err}"
+            ));
+            false
+        }
+    }
 }
 
 fn is_get_updates_conflict(err: &str) -> bool {
@@ -2617,6 +2639,29 @@ mod tests {
         let err = run_with_client_with_codex(cfg, tg, &codex).unwrap_err();
 
         assert_eq!(err, "stop");
+    }
+
+    #[test]
+    fn run_with_client_suppresses_startup_status_once_when_marker_exists() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        fs::create_dir_all(&cfg.state_dir).unwrap();
+        fs::write(startup_status_suppression_file(&cfg), "heartbeat setup\n").unwrap();
+        let tg = FakeTelegram::new();
+        tg.push_update(Err("stop".to_string()));
+
+        let codex = inert_codex_config(&cfg);
+        let err = run_with_client_with_codex(cfg.clone(), tg.clone(), &codex).unwrap_err();
+
+        assert_eq!(err, "stop");
+        assert!(!startup_status_suppression_file(&cfg).exists());
+        assert!(
+            !tg.calls()
+                .iter()
+                .any(|call| matches!(call, Call::Send { reply_to: 0, .. })),
+            "startup status should be suppressed: {:?}",
+            tg.calls()
+        );
     }
 
     #[test]
