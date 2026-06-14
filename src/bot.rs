@@ -3561,7 +3561,9 @@ printf 'session id: session-12345678\n' >&2
                 .to_string();
         let sent = tg.sent_text().join("\n");
         assert!(
-            sent.contains(&format!("🫀 hb: done {local_time} · heartbeat body ran")),
+            sent.contains(&format!(
+                "🫀 Heartbeat: done {local_time} · heartbeat body ran"
+            )),
             "{sent}"
         );
     }

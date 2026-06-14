@@ -17,6 +17,7 @@ const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const FASTFETCH_TIMEOUT: Duration = Duration::from_secs(5);
 const GIT_STATUS_TIMEOUT: Duration = Duration::from_secs(2);
 const GIT_SUMMARY_TIMEOUT: Duration = Duration::from_secs(5);
+const HEARTBEAT_STATUS_LABEL: &str = "🫀 Heartbeat";
 const MAX_GIT_SUMMARY_INPUT_CHARS: usize = 12_000;
 const HEARTBEAT_TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 const FASTFETCH_CONFIG: &str = r#"{
@@ -150,20 +151,23 @@ where
 pub fn heartbeat_status(cfg: &Config) -> String {
     match crate::heartbeat::read_heartbeat_run_state(cfg) {
         Ok(state) => heartbeat_status_section(state.as_ref()),
-        Err(err) => format!("🫀 hb: {err}"),
+        Err(err) => format!("{HEARTBEAT_STATUS_LABEL}: {err}"),
     }
 }
 
 fn heartbeat_status_section(state: Option<&crate::heartbeat::HeartbeatRunState>) -> String {
     let Some(state) = state else {
-        return "🫀 hb: no state".to_string();
+        return format!("{HEARTBEAT_STATUS_LABEL}: no state");
     };
     let line = if state.result == "running" {
-        format!("🫀 hb: running {}", local_heartbeat_time(&state.started_at))
+        format!(
+            "{HEARTBEAT_STATUS_LABEL}: running {}",
+            local_heartbeat_time(&state.started_at)
+        )
     } else {
         let finished_at = state.finished_at.as_deref().unwrap_or(&state.started_at);
         format!(
-            "🫀 hb: {} {}",
+            "{HEARTBEAT_STATUS_LABEL}: {} {}",
             heartbeat_result_label(&state.result),
             local_heartbeat_time(finished_at)
         )
@@ -1018,7 +1022,7 @@ mod tests {
 
         assert_eq!(
             got,
-            format!("🫀 hb: done {local_time} · heartbeat body ran")
+            format!("🫀 Heartbeat: done {local_time} · heartbeat body ran")
         );
     }
 
