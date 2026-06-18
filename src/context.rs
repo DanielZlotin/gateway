@@ -4,13 +4,13 @@ use std::path::{Path, PathBuf};
 
 pub const MAX_DEVELOPER_INSTRUCTIONS_BYTES: usize = 256 * 1024;
 
-const SYSTEM_PROMPT: &str = include_str!("prompts/SYSTEM.md");
-const AGENTS_TEMPLATE: &str = include_str!("prompts/AGENTS.md");
-const IDENTITY_TEMPLATE: &str = include_str!("prompts/IDENTITY.md");
-const USER_TEMPLATE: &str = include_str!("prompts/USER.md");
-const TOOLS_TEMPLATE: &str = include_str!("prompts/TOOLS.md");
-const MEMORY_TEMPLATE: &str = include_str!("prompts/MEMORY.md");
-const HEARTBEAT_TEMPLATE: &str = include_str!("prompts/HEARTBEAT.md");
+const SYSTEM_PROMPT: &str = include_str!("../prompts/SYSTEM.md");
+const AGENTS_TEMPLATE: &str = include_str!("../prompts/AGENTS.md");
+const IDENTITY_TEMPLATE: &str = include_str!("../prompts/IDENTITY.md");
+const USER_TEMPLATE: &str = include_str!("../prompts/USER.md");
+const TOOLS_TEMPLATE: &str = include_str!("../prompts/TOOLS.md");
+const MEMORY_TEMPLATE: &str = include_str!("../prompts/MEMORY.md");
+const HEARTBEAT_TEMPLATE: &str = include_str!("../prompts/HEARTBEAT.md");
 
 struct ContextFile {
     name: &'static str,
