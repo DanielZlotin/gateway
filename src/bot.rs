@@ -5578,10 +5578,12 @@ exit 2
     }
 
     fn test_codex_config(cfg: &Config, bin: PathBuf) -> CodexConfig {
+        crate::context::ensure_gateway_context_files(&cfg.xdg_config_home).unwrap();
         CodexConfig {
             bin,
             workdir: cfg.codex_workdir.clone(),
             default_model: cfg.default_provider_model().model.clone(),
+            xdg_config_home: cfg.xdg_config_home.clone(),
         }
     }
 

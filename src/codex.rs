@@ -1,5 +1,6 @@
 use crate::anthropic_proxy::AnthropicProxy;
 use crate::config::Config;
+use crate::context;
 use crate::provider::Provider;
 use serde::Deserialize;
 use std::fs;
@@ -18,6 +19,7 @@ pub struct CodexConfig {
     pub bin: PathBuf,
     pub workdir: PathBuf,
     pub default_model: String,
+    pub xdg_config_home: PathBuf,
 }
 
 impl From<&Config> for CodexConfig {
@@ -26,6 +28,7 @@ impl From<&Config> for CodexConfig {
             bin: PathBuf::from("codex"),
             workdir: cfg.codex_workdir.clone(),
             default_model: cfg.default_provider_model().model.clone(),
+            xdg_config_home: cfg.xdg_config_home.clone(),
         }
     }
 }
@@ -59,6 +62,7 @@ pub fn codex_args(
     workdir: &Path,
     claude_proxy_base_url: Option<&str>,
     image_paths: &[PathBuf],
+    developer_instructions: &str,
 ) -> Result<Vec<String>, String> {
     let model = if model.trim().is_empty() {
         default_model
@@ -69,7 +73,7 @@ pub fn codex_args(
     let workdir = workdir.to_string_lossy().to_string();
     let developer_instructions_config = format!(
         "developer_instructions={}",
-        serde_json::to_string(GATEWAY_DEVELOPER_INSTRUCTIONS)
+        serde_json::to_string(developer_instructions)
             .expect("gateway developer instructions should serialize")
     );
     if let Some(session_id) = session_id.filter(|value| !value.trim().is_empty()) {
@@ -168,6 +172,7 @@ pub fn run_codex_stream(
     fs::create_dir_all(run.state_dir).map_err(|err| format!("create state dir: {err}"))?;
     let out_file = tempfile::NamedTempFile::new_in(run.state_dir).map_err(|err| err.to_string())?;
     let out_path = out_file.path().to_path_buf();
+    let developer_instructions = context::developer_instructions(&cfg.xdg_config_home)?;
     let claude_proxy = if run.provider == Provider::Claude {
         Some(AnthropicProxy::start(run.timeout)?)
     } else {
@@ -182,6 +187,7 @@ pub fn run_codex_stream(
         &cfg.workdir,
         claude_proxy.as_ref().map(|proxy| proxy.base_url()),
         run.image_paths,
+        &developer_instructions,
     )?;
 
     let mut child = Command::new(&cfg.bin)
@@ -401,6 +407,7 @@ mod tests {
             Path::new("/work"),
             None,
             &[],
+            GATEWAY_DEVELOPER_INSTRUCTIONS,
         )
         .unwrap();
         let joined = args.join(" ");
@@ -417,6 +424,29 @@ mod tests {
     }
 
     #[test]
+    fn codex_args_use_runtime_core_context_as_developer_instructions() {
+        let developer_instructions = "# system\n\n# AGENTS.md\nagent rules";
+        let args = codex_args(
+            Path::new("/tmp/out"),
+            None,
+            crate::provider::Provider::Codex,
+            "gpt-test",
+            "gpt-5.5",
+            Path::new("/work"),
+            None,
+            &[],
+            developer_instructions,
+        )
+        .unwrap();
+        let joined = args.join(" ");
+
+        assert!(
+            joined.contains("developer_instructions=\"# system\\n\\n# AGENTS.md\\nagent rules\"")
+        );
+        assert!(!joined.contains("model_instructions_file"));
+    }
+
+    #[test]
     fn codex_args_resume_session() {
         let args = codex_args(
             Path::new("/tmp/out"),
@@ -427,6 +457,7 @@ mod tests {
             Path::new("/work"),
             None,
             &[],
+            GATEWAY_DEVELOPER_INSTRUCTIONS,
         )
         .unwrap();
         let joined = args.join(" ");
@@ -454,6 +485,7 @@ mod tests {
             Path::new("/work"),
             None,
             &[],
+            GATEWAY_DEVELOPER_INSTRUCTIONS,
         )
         .unwrap();
         let joined = args.join(" ");
@@ -480,6 +512,7 @@ mod tests {
             Path::new("/work"),
             None,
             &image_paths,
+            GATEWAY_DEVELOPER_INSTRUCTIONS,
         )
         .unwrap();
         let resume_args = codex_args(
@@ -491,6 +524,7 @@ mod tests {
             Path::new("/work"),
             None,
             &image_paths,
+            GATEWAY_DEVELOPER_INSTRUCTIONS,
         )
         .unwrap();
 
@@ -519,6 +553,7 @@ mod tests {
             Path::new("/work"),
             Some("http://127.0.0.1:12345/v1"),
             &[],
+            GATEWAY_DEVELOPER_INSTRUCTIONS,
         )
         .unwrap();
         let joined = args.join(" ");
@@ -545,6 +580,7 @@ mod tests {
             Path::new("/work"),
             None,
             &[],
+            GATEWAY_DEVELOPER_INSTRUCTIONS,
         )
         .unwrap_err();
 
@@ -612,6 +648,7 @@ mod tests {
         assert_eq!(codex.bin, PathBuf::from("codex"));
         assert_eq!(codex.workdir, PathBuf::from("/work"));
         assert_eq!(codex.default_model, "gpt-default");
+        assert_eq!(codex.xdg_config_home, PathBuf::from("/xdg/config"));
     }
 
     #[test]
@@ -676,6 +713,91 @@ printf 'session id: session-123\n' >&2
             }
         );
         assert!(streamed.contains("streamed"));
+    }
+
+    #[test]
+    fn run_codex_stream_reads_context_before_starting_codex() {
+        let dir = tempdir().unwrap();
+        let xdg_config_home = dir.path().join("config");
+        crate::context::ensure_gateway_context_files(&xdg_config_home).unwrap();
+        let memory_path = xdg_config_home.join("gateway/MEMORY.md");
+        let memory = fs::read_to_string(&memory_path).unwrap();
+        fs::write(&memory_path, format!("{memory}\nruntime-memory-marker\n")).unwrap();
+        let args_path = dir.path().join("codex.args");
+        let fake_codex = executable(
+            dir.path().join("codex-context"),
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\nout=''\nprev=''\nfor arg in \"$@\"; do\n  if [ \"$prev\" = '--output-last-message' ]; then out=\"$arg\"; fi\n  prev=\"$arg\"\ndone\ncat >/dev/null\nprintf 'ok\\n' > \"$out\"\n",
+                args_path.display(),
+            ),
+        );
+        let cfg = CodexConfig {
+            bin: fake_codex,
+            workdir: dir.path().to_path_buf(),
+            default_model: "gpt-default".to_string(),
+            xdg_config_home,
+        };
+
+        let output = run_codex_stream(
+            &cfg,
+            CodexRun {
+                prompt: "prompt",
+                session_id: None,
+                provider: Provider::Codex,
+                model: "",
+                image_paths: &[],
+                timeout: Duration::from_secs(5),
+                state_dir: &dir.path().join("state"),
+                cancel: None,
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(output.final_text, "ok");
+        let args = fs::read_to_string(args_path).unwrap();
+        assert!(args.contains("# AGENTS.md"));
+        assert!(args.contains("runtime-memory-marker"));
+        assert!(!args.contains("# HEARTBEAT.md"));
+    }
+
+    #[test]
+    fn run_codex_stream_fails_before_starting_codex_when_context_missing() {
+        let dir = tempdir().unwrap();
+        let started_path = dir.path().join("codex-started");
+        let fake_codex = executable(
+            dir.path().join("codex-should-not-start"),
+            &format!(
+                "#!/bin/sh\nprintf started > \"{}\"\ncat >/dev/null\n",
+                started_path.display(),
+            ),
+        );
+        let cfg = CodexConfig {
+            bin: fake_codex,
+            workdir: dir.path().to_path_buf(),
+            default_model: "gpt-default".to_string(),
+            xdg_config_home: dir.path().join("missing-config"),
+        };
+
+        let err = run_codex_stream(
+            &cfg,
+            CodexRun {
+                prompt: "prompt",
+                session_id: None,
+                provider: Provider::Codex,
+                model: "",
+                image_paths: &[],
+                timeout: Duration::from_secs(5),
+                state_dir: &dir.path().join("state"),
+                cancel: None,
+            },
+            |_| {},
+        )
+        .unwrap_err();
+
+        assert!(err.contains("read gateway context file"));
+        assert!(err.contains("AGENTS.md"));
+        assert!(!started_path.exists());
     }
 
     #[test]
@@ -874,10 +996,13 @@ sleep 5
     }
 
     fn codex_config(bin: &Path, root: &Path) -> CodexConfig {
+        let xdg_config_home = root.join("config");
+        crate::context::ensure_gateway_context_files(&xdg_config_home).unwrap();
         CodexConfig {
             bin: bin.to_path_buf(),
             workdir: root.to_path_buf(),
             default_model: "gpt-default".to_string(),
+            xdg_config_home,
         }
     }
 

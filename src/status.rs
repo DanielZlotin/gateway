@@ -1159,12 +1159,13 @@ mod tests {
             .unwrap()
             .success());
         fs::write(repo.path().join("note.txt"), "dirty\n").unwrap();
+        let cfg = test_config(dir.path());
         let codex = CodexConfig {
             bin: PathBuf::from("/bin/false"),
             workdir: dir.path().to_path_buf(),
             default_model: "gpt-test".to_string(),
+            xdg_config_home: cfg.xdg_config_home.clone(),
         };
-        let cfg = test_config(dir.path());
 
         let got = git_status_short_summary(&codex, &cfg, "gateway", repo.path());
 
@@ -1226,6 +1227,7 @@ mod tests {
 
         let args_path = dir.path().join("codex.args");
         let prompt_path = dir.path().join("codex.prompt");
+        let cfg = test_config(dir.path());
         let codex = CodexConfig {
             bin: executable(
                 dir.path().join("codex-summary"),
@@ -1237,8 +1239,8 @@ mod tests {
             ),
             workdir: dir.path().to_path_buf(),
             default_model: "gpt-test".to_string(),
+            xdg_config_home: cfg.xdg_config_home.clone(),
         };
-        let cfg = test_config(dir.path());
 
         let got = git_status_short_summary(&codex, &cfg, "gateway", repo.path());
 
@@ -1597,6 +1599,8 @@ exit 2
     }
 
     fn test_config(root: &Path) -> Config {
+        let xdg_config_home = root.join("config");
+        crate::context::ensure_gateway_context_files(&xdg_config_home).unwrap();
         Config {
             bot_token: "token".to_string(),
             telegram_chat_ids: vec![42],
@@ -1606,7 +1610,7 @@ exit 2
                 chat_ids: vec![42],
                 offset_file: root.join("state/gateway/telegram.offset"),
             }],
-            xdg_config_home: root.join("config"),
+            xdg_config_home,
             xdg_cache_home: root.join("cache"),
             xdg_data_home: root.join("data"),
             xdg_state_home: root.join("state"),
