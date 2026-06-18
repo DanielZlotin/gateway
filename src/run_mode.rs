@@ -33,18 +33,7 @@ fn should_send_telegram_result(text: &str) -> bool {
 }
 
 fn target_chat_id(args: &RunArgs, cfg: &Config) -> Result<i64, String> {
-    let Some(chat_id) = args.chat else {
-        return cfg
-            .telegram_chat_ids
-            .first()
-            .copied()
-            .ok_or_else(|| "GATEWAY_TELEGRAM_CHAT_ID must include at least one id".to_string());
-    };
-    if cfg.bot_token_for_chat(chat_id).is_some() {
-        Ok(chat_id)
-    } else {
-        Err(format!("chat {chat_id} is not in GATEWAY_TELEGRAM_CHAT_ID"))
-    }
+    cfg.resolve_chat_id(args.chat)
 }
 
 pub fn run(args: RunArgs, cfg: Config) -> Result<String, String> {
@@ -427,6 +416,7 @@ printf 'done\n' > "$out"
         Config {
             bot_token: "token".to_string(),
             telegram_chat_ids: vec![42],
+            default_telegram_chat_id: 42,
             telegram_bots: vec![crate::config::TelegramBotConfig {
                 bot_token: "token".to_string(),
                 chat_ids: vec![42],

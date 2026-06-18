@@ -20,6 +20,7 @@ pub const DEFAULT_HEARTBEAT: &str = "1d";
 pub struct Config {
     pub bot_token: String,
     pub telegram_chat_ids: Vec<i64>,
+    pub default_telegram_chat_id: i64,
     pub telegram_bots: Vec<TelegramBotConfig>,
     pub xdg_config_home: PathBuf,
     pub xdg_cache_home: PathBuf,
@@ -119,12 +120,14 @@ pub fn load_from_env(env: &BTreeMap<String, String>) -> Result<Config, String> {
     let chat_state_dir = state_dir.join("chats");
     let launchd_target = launchd::target()?;
     let telegram_chat_ids_ordered = telegram_chat_ids(env)?;
+    let default_telegram_chat_id = telegram_chat_ids_ordered[0];
     let telegram_chat_ids = sorted_unique_ids(&telegram_chat_ids_ordered);
     let telegram_bots = telegram_bots(&bot_tokens, &telegram_chat_ids_ordered, &state_dir)?;
 
     Ok(Config {
         bot_token: bot_tokens[0].clone(),
         telegram_chat_ids,
+        default_telegram_chat_id,
         telegram_bots,
         xdg_config_home: xdg_config_home.clone(),
         xdg_cache_home,
@@ -394,6 +397,17 @@ fn heartbeat_interval(value: &str) -> Result<Duration, String> {
 }
 
 impl Config {
+    pub fn resolve_chat_id(&self, chat_id: Option<i64>) -> Result<i64, String> {
+        let chat_id = chat_id.unwrap_or(self.default_telegram_chat_id);
+        if self.bot_token_for_chat(chat_id).is_some() {
+            Ok(chat_id)
+        } else {
+            Err(format!(
+                "chat {chat_id} is not in {GATEWAY_TELEGRAM_CHAT_ID_ENV}"
+            ))
+        }
+    }
+
     pub fn bot_token_for_chat(&self, chat_id: i64) -> Option<&str> {
         self.telegram_bots
             .iter()
@@ -567,6 +581,7 @@ mod tests {
 
         assert_eq!(cfg.bot_token, "token");
         assert_eq!(cfg.telegram_chat_ids, vec![42]);
+        assert_eq!(cfg.default_telegram_chat_id, 42);
         assert!(cfg.xdg_config_home.ends_with("config"));
         assert!(cfg.xdg_cache_home.ends_with("cache"));
         assert!(cfg.xdg_data_home.ends_with("data"));
@@ -717,6 +732,7 @@ mod tests {
         let cfg = load_from_env(&env).unwrap();
 
         assert_eq!(cfg.telegram_chat_ids, vec![7, 8]);
+        assert_eq!(cfg.default_telegram_chat_id, 7);
         assert_eq!(
             cfg.default_provider_model(),
             &ProviderModel {
@@ -751,6 +767,7 @@ mod tests {
 
         assert_eq!(cfg.bot_token, "token-a");
         assert_eq!(cfg.telegram_chat_ids, vec![42, 77]);
+        assert_eq!(cfg.default_telegram_chat_id, 77);
         assert_eq!(
             cfg.telegram_bots,
             vec![
@@ -768,6 +785,23 @@ mod tests {
         );
         assert_eq!(cfg.bot_token_for_chat(77), Some("token-a"));
         assert_eq!(cfg.bot_token_for_chat(42), Some("token-b"));
+    }
+
+    #[test]
+    fn resolves_default_or_requested_configured_chat_id() {
+        let (_dir, mut env) = env_with_token();
+        env.insert(
+            GATEWAY_TELEGRAM_CHAT_ID_ENV.to_string(),
+            "77,42".to_string(),
+        );
+        let cfg = load_from_env(&env).unwrap();
+
+        assert_eq!(cfg.resolve_chat_id(None).unwrap(), 77);
+        assert_eq!(cfg.resolve_chat_id(Some(77)).unwrap(), 77);
+        assert_eq!(
+            cfg.resolve_chat_id(Some(99)).unwrap_err(),
+            "chat 99 is not in GATEWAY_TELEGRAM_CHAT_ID"
+        );
     }
 
     #[test]

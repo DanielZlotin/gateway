@@ -8,7 +8,10 @@ const CLI_AFTER_HELP: &str = r#"Examples:
   gateway
   gateway bot
   gateway heartbeat
+  gateway list
   gateway logs [lines]
+  gateway status
+  gateway update
   gateway uninstall
   gateway version
   gateway run --prompt "Summarize status"
@@ -33,10 +36,18 @@ pub enum CliAction {
 pub enum Mode {
     Bot,
     Heartbeat,
+    List(ChatArgs),
     Logs(usize),
     Run(RunArgs),
+    Status(ChatArgs),
+    Update,
     Uninstall,
     Version,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ChatArgs {
+    pub chat: Option<i64>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -64,6 +75,15 @@ enum Command {
     Bot,
     #[command(about = "Run scheduled heartbeat work when due.")]
     Heartbeat,
+    #[command(about = "List saved sessions for a configured chat.")]
+    List {
+        #[arg(
+            long,
+            value_name = "CHAT",
+            help = "Read sessions for this configured chat ID."
+        )]
+        chat: Option<i64>,
+    },
     #[command(about = "Print recent gateway logs.")]
     Logs(LogsCli),
     #[command(
@@ -71,6 +91,17 @@ enum Command {
         after_help = RUN_AFTER_HELP
     )]
     Run(RunCli),
+    #[command(about = "Print Codex, gateway, and system status for a configured chat.")]
+    Status {
+        #[arg(
+            long,
+            value_name = "CHAT",
+            help = "Read status for this configured chat ID."
+        )]
+        chat: Option<i64>,
+    },
+    #[command(about = "Pull latest gateway code, update dependencies, and run setup.")]
+    Update,
     #[command(about = "Stop the LaunchAgent and remove its plist.")]
     Uninstall,
     #[command(about = "Print the running binary version.")]
@@ -149,6 +180,7 @@ fn mode_from_cli(cli: Cli) -> Mode {
     match cli.command {
         None | Some(Command::Bot) => Mode::Bot,
         Some(Command::Heartbeat) => Mode::Heartbeat,
+        Some(Command::List { chat }) => Mode::List(ChatArgs { chat }),
         Some(Command::Logs(args)) => Mode::Logs(normalize_log_line_count(args.lines)),
         Some(Command::Run(args)) => Mode::Run(RunArgs {
             prompt: args.prompt,
@@ -156,6 +188,8 @@ fn mode_from_cli(cli: Cli) -> Mode {
             model: args.model,
             chat: args.chat,
         }),
+        Some(Command::Status { chat }) => Mode::Status(ChatArgs { chat }),
+        Some(Command::Update) => Mode::Update,
         Some(Command::Uninstall) => Mode::Uninstall,
         Some(Command::Version) => Mode::Version,
     }
@@ -234,6 +268,26 @@ mod tests {
     }
 
     #[test]
+    fn parses_list_mode_with_optional_chat() {
+        let mode = parse_args_from(["gateway", "list", "--chat", "77"]).unwrap();
+
+        assert_eq!(mode, Mode::List(ChatArgs { chat: Some(77) }));
+    }
+
+    #[test]
+    fn parses_status_mode_with_optional_chat() {
+        let mode = parse_args_from(["gateway", "status"]).unwrap();
+
+        assert_eq!(mode, Mode::Status(ChatArgs { chat: None }));
+    }
+
+    #[test]
+    fn parses_update_mode() {
+        let mode = parse_args_from(["gateway", "update"]).unwrap();
+        assert_eq!(mode, Mode::Update);
+    }
+
+    #[test]
     fn parses_heartbeat_mode() {
         let mode = parse_args_from(["gateway", "heartbeat"]).unwrap();
         assert_eq!(mode, Mode::Heartbeat);
@@ -252,16 +306,25 @@ mod tests {
                 "Run the Telegram bot for allowed chats.",
                 "heartbeat",
                 "Run scheduled heartbeat work when due.",
+                "list",
+                "List saved sessions for a configured chat.",
                 "logs",
                 "Print recent gateway logs.",
                 "run",
                 "Execute one fresh Codex prompt from automation.",
+                "status",
+                "Print Codex, gateway, and system status for a configured chat.",
+                "update",
+                "Pull latest gateway code, update dependencies, and run setup.",
                 "uninstall",
                 "Stop the LaunchAgent and remove its plist.",
                 "version",
                 "Print the running binary version.",
+                "gateway list",
                 "gateway run --prompt \"Summarize status\"",
+                "gateway status",
                 "gateway heartbeat",
+                "gateway update",
                 "gateway run --chat 123456789 --prompt \"Summarize status\"",
                 "gateway run --prompt-file ./prompt.txt",
                 "printf '%s\\n' \"Summarize status\" | gateway run",
@@ -275,8 +338,11 @@ mod tests {
         for args in [
             &["gateway", "help"][..],
             &["gateway", "bot", "-h"],
+            &["gateway", "list", "-h"],
             &["gateway", "logs", "-h"],
             &["gateway", "run", "-h"],
+            &["gateway", "status", "-h"],
+            &["gateway", "update", "-h"],
             &["gateway", "uninstall", "-h"],
             &["gateway", "version", "-h"],
         ] {
@@ -355,6 +421,34 @@ mod tests {
                 "Send Telegram output to this configured chat ID.",
                 "Final text is always printed to stdout.",
                 "Non-empty, non-OK final text is sent to one Telegram chat.",
+            ],
+        );
+    }
+
+    #[test]
+    fn list_help_documents_chat_targeting() {
+        let help = help_from(&["gateway", "list", "-h"]);
+
+        assert_contains_all(
+            &help,
+            &[
+                "List saved sessions for a configured chat.",
+                "--chat <CHAT>",
+                "Read sessions for this configured chat ID.",
+            ],
+        );
+    }
+
+    #[test]
+    fn status_help_documents_chat_targeting() {
+        let help = help_from(&["gateway", "status", "-h"]);
+
+        assert_contains_all(
+            &help,
+            &[
+                "Print Codex, gateway, and system status for a configured chat.",
+                "--chat <CHAT>",
+                "Read status for this configured chat ID.",
             ],
         );
     }

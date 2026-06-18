@@ -100,7 +100,10 @@ non-empty strings; `tts.speed` is optional and must be positive.
 gateway
 gateway bot
 gateway heartbeat
+gateway list
 gateway logs [lines]
+gateway status
+gateway update
 gateway uninstall
 gateway version
 gateway run --prompt "Summarize status"
@@ -121,6 +124,13 @@ printf '%s\n' "Summarize status" | gateway run
 
 🧭 `gateway logs [lines]` defaults to `10` lines and caps at `200`.
 It tails the canonical event log, including bot, heartbeat, and update events.
+
+📚 `gateway list [--chat ID]` prints saved sessions for a configured chat.
+
+📊 `gateway status [--chat ID]` prints Codex, gateway, and system status for a
+configured chat.
+
+📦 `gateway update` runs the gateway update flow inline.
 
 ## 🤖 Telegram Bot
 

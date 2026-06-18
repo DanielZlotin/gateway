@@ -5530,6 +5530,7 @@ exit 2
         Config {
             bot_token: "token".to_string(),
             telegram_chat_ids: vec![42],
+            default_telegram_chat_id: 42,
             telegram_bots: vec![crate::config::TelegramBotConfig {
                 bot_token: "token".to_string(),
                 chat_ids: vec![42],

@@ -1,6 +1,7 @@
 pub mod anthropic_proxy;
 pub mod bot;
 pub mod cli;
+pub mod cli_commands;
 pub mod codex;
 pub mod commands;
 pub mod config;

@@ -17,28 +17,26 @@ fn run() -> Result<(), String> {
     };
     match mode {
         Mode::Bot => gateway::bot::run(gateway::config::load()?),
-        Mode::Heartbeat => {
-            let output = gateway::heartbeat::run(gateway::config::load()?)?;
-            println!("{output}");
-            Ok(())
+        Mode::Heartbeat => print_output(gateway::heartbeat::run(gateway::config::load()?)),
+        Mode::List(args) => {
+            print_output(gateway::cli_commands::list(args, gateway::config::load()?))
         }
-        Mode::Logs(lines) => {
-            let output = gateway::logs::read_gateway_logs(&gateway::config::current_env(), lines)?;
-            println!("{output}");
-            Ok(())
-        }
-        Mode::Run(args) => {
-            let output = gateway::run_mode::run(args, gateway::config::load()?)?;
-            println!("{output}");
-            Ok(())
-        }
-        Mode::Uninstall => {
-            println!("{}", gateway::launchd::uninstall()?);
-            Ok(())
-        }
-        Mode::Version => {
-            println!("gateway {}", env!("CARGO_PKG_VERSION"));
-            Ok(())
-        }
+        Mode::Logs(lines) => print_output(gateway::logs::read_gateway_logs(
+            &gateway::config::current_env(),
+            lines,
+        )),
+        Mode::Run(args) => print_output(gateway::run_mode::run(args, gateway::config::load()?)),
+        Mode::Status(args) => print_output(gateway::cli_commands::status(
+            args,
+            gateway::config::load()?,
+        )),
+        Mode::Update => print_output(gateway::cli_commands::update(gateway::config::load()?)),
+        Mode::Uninstall => print_output(gateway::launchd::uninstall()),
+        Mode::Version => print_output(Ok(format!("gateway {}", env!("CARGO_PKG_VERSION")))),
     }
+}
+
+fn print_output(output: Result<String, String>) -> Result<(), String> {
+    println!("{}", output?);
+    Ok(())
 }
