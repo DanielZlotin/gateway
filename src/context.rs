@@ -176,6 +176,18 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn system_template_is_loaded_from_context_module() {
+        assert!(SYSTEM_PROMPT.contains("Gateway Runtime Instructions"));
+    }
+
+    #[test]
+    fn system_template_blocks_private_data_in_telegram() {
+        assert!(SYSTEM_PROMPT.contains("Telegram"));
+        assert!(SYSTEM_PROMPT.contains("environment variables"));
+        assert!(SYSTEM_PROMPT.contains("private keys"));
+    }
+
+    #[test]
     fn ensure_gateway_context_files_creates_core_and_heartbeat_files() {
         let dir = tempdir().unwrap();
         let xdg_config_home = dir.path().join("config");

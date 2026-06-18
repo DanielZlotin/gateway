@@ -50,8 +50,6 @@ pub struct CodexRun<'a> {
     pub cancel: Option<Arc<AtomicBool>>,
 }
 
-const GATEWAY_DEVELOPER_INSTRUCTIONS: &str = include_str!("../prompts/SYSTEM.md");
-
 #[allow(clippy::too_many_arguments)]
 pub fn codex_args(
     out_path: &Path,
@@ -396,6 +394,9 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
 
+    const TEST_DEVELOPER_INSTRUCTIONS: &str =
+        "# Test Developer Instructions\n\nUse local test context.";
+
     #[test]
     fn codex_args_use_yolo_flag_for_new_session() {
         let args = codex_args(
@@ -407,7 +408,7 @@ mod tests {
             Path::new("/work"),
             None,
             &[],
-            GATEWAY_DEVELOPER_INSTRUCTIONS,
+            TEST_DEVELOPER_INSTRUCTIONS,
         )
         .unwrap();
         let joined = args.join(" ");
@@ -418,7 +419,7 @@ mod tests {
         assert!(joined.contains("--color never"));
         assert!(joined.contains("--cd /work"));
         assert!(!joined.contains("model_instructions_file"));
-        assert!(joined.contains("-c developer_instructions=\"# 🌉 Gateway Runtime Instructions"));
+        assert!(joined.contains("-c developer_instructions=\"# Test Developer Instructions"));
         assert!(!joined.contains("--ask-for-approval"));
         assert!(!joined.contains("--sandbox"));
     }
@@ -457,7 +458,7 @@ mod tests {
             Path::new("/work"),
             None,
             &[],
-            GATEWAY_DEVELOPER_INSTRUCTIONS,
+            TEST_DEVELOPER_INSTRUCTIONS,
         )
         .unwrap();
         let joined = args.join(" ");
@@ -467,7 +468,7 @@ mod tests {
         assert_eq!(args[2], "resume");
         assert_eq!(args[3], "--ephemeral");
         assert!(joined.starts_with("--search exec resume --ephemeral -c developer_instructions=\""));
-        assert!(joined.contains("# 🌉 Gateway Runtime Instructions"));
+        assert!(joined.contains("# Test Developer Instructions"));
         assert!(joined.contains("--skip-git-repo-check"));
         assert!(joined.contains("--dangerously-bypass-approvals-and-sandbox"));
         assert!(joined.contains("-m gpt-test"));
@@ -485,7 +486,7 @@ mod tests {
             Path::new("/work"),
             None,
             &[],
-            GATEWAY_DEVELOPER_INSTRUCTIONS,
+            TEST_DEVELOPER_INSTRUCTIONS,
         )
         .unwrap();
         let joined = args.join(" ");
@@ -512,7 +513,7 @@ mod tests {
             Path::new("/work"),
             None,
             &image_paths,
-            GATEWAY_DEVELOPER_INSTRUCTIONS,
+            TEST_DEVELOPER_INSTRUCTIONS,
         )
         .unwrap();
         let resume_args = codex_args(
@@ -524,7 +525,7 @@ mod tests {
             Path::new("/work"),
             None,
             &image_paths,
-            GATEWAY_DEVELOPER_INSTRUCTIONS,
+            TEST_DEVELOPER_INSTRUCTIONS,
         )
         .unwrap();
 
@@ -553,7 +554,7 @@ mod tests {
             Path::new("/work"),
             Some("http://127.0.0.1:12345/v1"),
             &[],
-            GATEWAY_DEVELOPER_INSTRUCTIONS,
+            TEST_DEVELOPER_INSTRUCTIONS,
         )
         .unwrap();
         let joined = args.join(" ");
@@ -580,18 +581,11 @@ mod tests {
             Path::new("/work"),
             None,
             &[],
-            GATEWAY_DEVELOPER_INSTRUCTIONS,
+            TEST_DEVELOPER_INSTRUCTIONS,
         )
         .unwrap_err();
 
         assert!(err.contains("Claude provider requires an Anthropic proxy"));
-    }
-
-    #[test]
-    fn developer_instructions_block_private_data_in_telegram() {
-        assert!(GATEWAY_DEVELOPER_INSTRUCTIONS.contains("Telegram"));
-        assert!(GATEWAY_DEVELOPER_INSTRUCTIONS.contains("environment variables"));
-        assert!(GATEWAY_DEVELOPER_INSTRUCTIONS.contains("private keys"));
     }
 
     #[test]
