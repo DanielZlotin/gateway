@@ -15,34 +15,47 @@ const HEARTBEAT_TEMPLATE: &str = include_str!("prompts/HEARTBEAT.md");
 struct ContextFile {
     name: &'static str,
     template: &'static str,
+    initial_content: InitialContent,
+}
+
+#[derive(Clone, Copy)]
+enum InitialContent {
+    HeaderOnly,
+    FullTemplate,
 }
 
 const CORE_CONTEXT_FILES: &[ContextFile] = &[
     ContextFile {
         name: "AGENTS.md",
         template: AGENTS_TEMPLATE,
+        initial_content: InitialContent::HeaderOnly,
     },
     ContextFile {
         name: "IDENTITY.md",
         template: IDENTITY_TEMPLATE,
+        initial_content: InitialContent::HeaderOnly,
     },
     ContextFile {
         name: "USER.md",
         template: USER_TEMPLATE,
+        initial_content: InitialContent::HeaderOnly,
     },
     ContextFile {
         name: "TOOLS.md",
         template: TOOLS_TEMPLATE,
+        initial_content: InitialContent::HeaderOnly,
     },
     ContextFile {
         name: "MEMORY.md",
         template: MEMORY_TEMPLATE,
+        initial_content: InitialContent::HeaderOnly,
     },
 ];
 
 const HEARTBEAT_CONTEXT_FILE: ContextFile = ContextFile {
     name: "HEARTBEAT.md",
     template: HEARTBEAT_TEMPLATE,
+    initial_content: InitialContent::FullTemplate,
 };
 
 pub fn ensure_gateway_context_files(xdg_config_home: &Path) -> Result<(), String> {
@@ -102,7 +115,7 @@ fn ensure_context_file(xdg_config_home: &Path, file: &ContextFile) -> Result<Pat
             ))
         }
     };
-    let next = refreshed_context_text(file.template, existing.as_deref())?;
+    let next = refreshed_context_text(file, existing.as_deref())?;
     if existing.as_deref() != Some(next.as_str()) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
@@ -124,12 +137,20 @@ fn context_file_path(xdg_config_home: &Path, name: &str) -> PathBuf {
     xdg_config_home.join("gateway").join(name)
 }
 
-fn refreshed_context_text(template: &str, existing: Option<&str>) -> Result<String, String> {
-    let header = template_header(template)?;
+fn refreshed_context_text(file: &ContextFile, existing: Option<&str>) -> Result<String, String> {
+    let header = template_header(file.template)?;
     let Some(existing) = existing else {
-        return Ok(header);
+        return match file.initial_content {
+            InitialContent::HeaderOnly => Ok(header),
+            InitialContent::FullTemplate => template_text(file.template),
+        };
     };
     Ok(format!("{}{}", header, body_after_line_two(existing)))
+}
+
+fn template_text(template: &str) -> Result<String, String> {
+    template_header(template)?;
+    Ok(format!("{}\n", template.trim_end()))
 }
 
 fn template_header(template: &str) -> Result<String, String> {
@@ -194,10 +215,7 @@ mod tests {
 
         ensure_gateway_context_files(&xdg_config_home).unwrap();
 
-        for file in CORE_CONTEXT_FILES
-            .iter()
-            .chain(std::iter::once(&HEARTBEAT_CONTEXT_FILE))
-        {
+        for file in CORE_CONTEXT_FILES {
             let path = xdg_config_home.join("gateway").join(file.name);
             assert!(path.exists(), "missing {}", file.name);
             assert_eq!(
@@ -205,6 +223,10 @@ mod tests {
                 valid_template_header(file.template)
             );
         }
+        assert_eq!(
+            fs::read_to_string(xdg_config_home.join("gateway/HEARTBEAT.md")).unwrap(),
+            valid_template_text(HEARTBEAT_TEMPLATE)
+        );
     }
 
     #[test]
@@ -337,10 +359,9 @@ mod tests {
         let path = ensure_heartbeat_prompt_file(&xdg_config_home).unwrap();
 
         assert_eq!(path, xdg_config_home.join("gateway/HEARTBEAT.md"));
-        assert_eq!(
-            fs::read_to_string(path).unwrap(),
-            valid_template_header(HEARTBEAT_TEMPLATE)
-        );
+        let text = fs::read_to_string(path).unwrap();
+        assert_eq!(text, valid_template_text(HEARTBEAT_TEMPLATE));
+        assert!(text.contains("Return exactly `OK`"));
     }
 
     #[test]
@@ -356,6 +377,10 @@ mod tests {
 
     fn valid_template_header(template: &str) -> String {
         template_header(template).unwrap()
+    }
+
+    fn valid_template_text(template: &str) -> String {
+        template_text(template).unwrap()
     }
 
     fn assert_in_order(text: &str, needles: &[&str]) {

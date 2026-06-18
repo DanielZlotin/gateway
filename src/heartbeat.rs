@@ -246,6 +246,7 @@ mod tests {
 
     const HEARTBEAT_PROMPT_HEADER: &str =
         "# HEARTBEAT.md\n> **Scope:** scheduled heartbeat protocol only.\n";
+    const HEARTBEAT_PROMPT_TEMPLATE: &str = "# HEARTBEAT.md\n> **Scope:** scheduled heartbeat protocol only.\n\nCheck that the gateway is healthy after its scheduled update.\n\nReturn exactly `OK` if no action is needed. Otherwise, return one concise status\nmessage describing the issue.\n";
 
     #[test]
     fn heartbeat_schedule_is_anchored_to_midnight() {
@@ -339,7 +340,7 @@ mod tests {
     }
 
     #[test]
-    fn heartbeat_creates_custom_prompt_file_from_context_header_when_missing() {
+    fn heartbeat_creates_custom_prompt_file_from_context_template_when_missing() {
         let dir = tempdir().unwrap();
         let cfg = test_config(dir.path());
         fs::create_dir_all(&cfg.state_dir).unwrap();
@@ -357,7 +358,7 @@ mod tests {
                 );
                 assert!(heartbeat_file.exists());
                 let prompt = fs::read_to_string(&heartbeat_file).unwrap();
-                assert_eq!(prompt, HEARTBEAT_PROMPT_HEADER);
+                assert_eq!(prompt, HEARTBEAT_PROMPT_TEMPLATE);
                 Ok("heartbeat body ran".to_string())
             },
         )

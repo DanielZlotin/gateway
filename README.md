@@ -62,8 +62,11 @@ positions.
    1. `HEARTBEAT.md`: used only as the `gateway heartbeat` prompt file.
 3. 🔄 Creation and refresh:
    1. `gateway run`, `gateway bot`, `gateway heartbeat`, and `gateway status`
-      create missing files and refresh only title/scope lines.
-   2. User content below those lines is preserved.
+      create missing files.
+   2. Missing core files start with title/scope skeletons; missing
+      `HEARTBEAT.md` starts with the default heartbeat prompt.
+   3. Existing files refresh only title/scope lines, and user content below
+      those lines is preserved.
 4. 🧠 Loading:
    1. Every Gateway-spawned Codex conversation loads the five core files
       through Codex developer instructions.

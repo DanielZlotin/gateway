@@ -328,8 +328,13 @@ fn summarize_git_status_with_codex(
         &cfg.state_dir,
     ) {
         Ok(output) => concise_git_summary(&output.final_text).unwrap_or(fallback),
+        Err(err) if is_gateway_context_error(&err) => format!("error: {err}"),
         Err(_) => fallback,
     }
+}
+
+fn is_gateway_context_error(err: &str) -> bool {
+    err.contains("read gateway context file") || err.contains("gateway core context is too large")
 }
 
 fn git_summary_input(path: &Path, lines: &[String]) -> Result<String, String> {
@@ -1170,6 +1175,43 @@ mod tests {
         let got = git_status_short_summary(&codex, &cfg, "gateway", repo.path());
 
         assert_eq!(got, "1 changed: 1 untracked");
+    }
+
+    #[test]
+    fn dirty_git_status_reports_context_errors_without_local_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        assert!(Command::new("git")
+            .arg("init")
+            .arg(repo.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success());
+        fs::write(repo.path().join("note.txt"), "dirty\n").unwrap();
+        let cfg = test_config(dir.path());
+        fs::remove_file(cfg.xdg_config_home.join("gateway/AGENTS.md")).unwrap();
+        let started_path = dir.path().join("codex-started");
+        let codex = CodexConfig {
+            bin: executable(
+                dir.path().join("codex-should-not-start"),
+                &format!(
+                    "#!/bin/sh\nprintf started > \"{}\"\ncat >/dev/null\n",
+                    started_path.display()
+                ),
+            ),
+            workdir: dir.path().to_path_buf(),
+            default_model: "gpt-test".to_string(),
+            xdg_config_home: cfg.xdg_config_home.clone(),
+        };
+
+        let got = git_status_short_summary(&codex, &cfg, "gateway", repo.path());
+
+        assert!(got.starts_with("error: read gateway context file"), "{got}");
+        assert!(got.contains("AGENTS.md"), "{got}");
+        assert!(!got.contains("1 changed: 1 untracked"), "{got}");
+        assert!(!started_path.exists());
     }
 
     #[test]
