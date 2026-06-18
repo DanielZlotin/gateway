@@ -49,6 +49,31 @@ positions.
 4. 🫀 Heartbeat state: `$XDG_STATE_HOME/gateway/heartbeat.json`
 5. 🚀 LaunchAgent: `$HOME/Library/LaunchAgents/ai.gateway.plist`
 
+📚 Runtime context files live under `$XDG_CONFIG_HOME/gateway/`:
+
+1. 🧭 Always-loaded for Gateway-spawned Codex conversations, in order:
+   1. `AGENTS.md`: gateway operating rules, context-loading policy, safety,
+      and ownership.
+   2. `IDENTITY.md`: assistant identity.
+   3. `USER.md`: user preferences and shorthands.
+   4. `TOOLS.md`: local environment and tool facts.
+   5. `MEMORY.md`: durable facts that do not belong elsewhere.
+2. 🫀 Heartbeat-only:
+   1. `HEARTBEAT.md`: used only as the `gateway heartbeat` prompt file.
+3. 🔄 Creation and refresh:
+   1. `gateway run`, `gateway bot`, `gateway heartbeat`, and `gateway status`
+      create missing files and refresh only title/scope lines.
+   2. User content below those lines is preserved.
+4. 🧠 Loading:
+   1. Every Gateway-spawned Codex conversation loads the five core files
+      through Codex developer instructions.
+   2. `HEARTBEAT.md` is not part of the always-loaded core context.
+   3. Manual Codex sessions outside Gateway do not use these Gateway files
+      automatically.
+   4. Gateway `AGENTS.md` here means runtime context at
+      `$XDG_CONFIG_HOME/gateway/AGENTS.md`, not project-local/manual Codex
+      `AGENTS.md` auto-discovery.
+
 ## ⚙️ Config
 
 Gateway reads `$XDG_CONFIG_HOME/gateway/config.json`; if missing, it creates:
