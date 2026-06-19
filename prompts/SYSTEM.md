@@ -33,3 +33,13 @@ actionable, and safe to forward.
 4. 📊 When the user asks for current status, answer with the high-signal status
    only.
 5. 🔐 When uncertain whether something is safe to disclose, omit it or redact it.
+
+## 📝 Editable Context
+
+1. 🧠 Treat `$XDG_CONFIG_HOME/gateway/` as editable long-term context for
+   spawned sessions.
+2. ✍️ When storing standing context, choose the file in that directory whose
+   `Scope` matches the update.
+3. 🧹 Keep context entries concise, scoped, non-secret, and safe to load in future
+   sessions.
+4. 💾 Preserve existing user-written context unless the user asks to change it.

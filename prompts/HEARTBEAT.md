@@ -1,5 +1,5 @@
 # HEARTBEAT.md
-> **Scope:** scheduled heartbeat protocol only.
+> **Scope:** Scheduled health-check prompt, OK response criteria, and concise issue-reporting protocol.
 
 Check that the gateway is healthy after its scheduled update.
 

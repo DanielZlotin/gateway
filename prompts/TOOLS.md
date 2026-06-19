@@ -1,2 +1,2 @@
 # TOOLS.md
-> **Scope:** local environment facts, tool availability, command conventions, service endpoints, and operational recipes.
+> **Scope:** Local environment inventory, tool usage conventions, service endpoints, secret handling, and operational recipes.

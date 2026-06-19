@@ -245,8 +245,8 @@ mod tests {
     use tempfile::tempdir;
 
     const HEARTBEAT_PROMPT_HEADER: &str =
-        "# HEARTBEAT.md\n> **Scope:** scheduled heartbeat protocol only.\n";
-    const HEARTBEAT_PROMPT_TEMPLATE: &str = "# HEARTBEAT.md\n> **Scope:** scheduled heartbeat protocol only.\n\nCheck that the gateway is healthy after its scheduled update.\n\nReturn exactly `OK` if no action is needed. Otherwise, return one concise status\nmessage describing the issue.\n";
+        "# HEARTBEAT.md\n> **Scope:** Scheduled health-check prompt, OK response criteria, and concise issue-reporting protocol.\n";
+    const HEARTBEAT_PROMPT_TEMPLATE: &str = "# HEARTBEAT.md\n> **Scope:** Scheduled health-check prompt, OK response criteria, and concise issue-reporting protocol.\n\nCheck that the gateway is healthy after its scheduled update.\n\nReturn exactly `OK` if no action is needed. Otherwise, return one concise status\nmessage describing the issue.\n";
 
     #[test]
     fn heartbeat_schedule_is_anchored_to_midnight() {

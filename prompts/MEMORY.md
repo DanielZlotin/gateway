@@ -1,2 +1,2 @@
 # MEMORY.md
-> **Scope:** durable learned facts and standing instructions that do not belong in a more specific file.
+> **Scope:** Durable cross-session facts and standing instructions outside identity, user, tool, runtime-policy, and heartbeat responsibilities.

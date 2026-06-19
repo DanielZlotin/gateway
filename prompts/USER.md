@@ -1,2 +1,2 @@
 # USER.md
-> **Scope:** user identity, preferences, language, communication style, and shorthands.
+> **Scope:** User profile, communication preferences, language choices, and shorthand commands.

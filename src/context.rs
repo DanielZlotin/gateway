@@ -145,7 +145,8 @@ fn refreshed_context_text(file: &ContextFile, existing: Option<&str>) -> Result<
             InitialContent::FullTemplate => template_text(file.template),
         };
     };
-    Ok(format!("{}{}", header, body_after_line_two(existing)))
+    let body = body_after_metadata_header(existing);
+    Ok(format!("{header}{body}"))
 }
 
 fn template_text(template: &str) -> Result<String, String> {
@@ -177,17 +178,24 @@ fn template_header(template: &str) -> Result<String, String> {
     Ok(format!("{first}\n{second}\n"))
 }
 
-fn body_after_line_two(text: &str) -> &str {
-    let mut line_count = 0;
-    for (index, ch) in text.char_indices() {
-        if ch == '\n' {
-            line_count += 1;
-            if line_count == 2 {
-                return &text[index + 1..];
-            }
+fn body_after_metadata_header(text: &str) -> &str {
+    let mut offset = 0;
+    let mut lines = text.split_inclusive('\n');
+
+    let Some(first) = lines.next() else {
+        return "";
+    };
+    offset += first.len();
+
+    for line in lines {
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if !trimmed.starts_with('>') {
+            break;
         }
+        offset += line.len();
     }
-    ""
+
+    &text[offset..]
 }
 
 #[cfg(test)]
@@ -209,6 +217,13 @@ mod tests {
     }
 
     #[test]
+    fn system_template_explains_editable_context_files() {
+        assert!(SYSTEM_PROMPT.contains("$XDG_CONFIG_HOME/gateway/"));
+        assert!(SYSTEM_PROMPT.contains("Scope"));
+        assert!(!SYSTEM_PROMPT.contains("Path"));
+    }
+
+    #[test]
     fn ensure_gateway_context_files_creates_core_and_heartbeat_files() {
         let dir = tempdir().unwrap();
         let xdg_config_home = dir.path().join("config");
@@ -218,10 +233,9 @@ mod tests {
         for file in CORE_CONTEXT_FILES {
             let path = xdg_config_home.join("gateway").join(file.name);
             assert!(path.exists(), "missing {}", file.name);
-            assert_eq!(
-                fs::read_to_string(path).unwrap(),
-                valid_template_header(file.template)
-            );
+            let text = fs::read_to_string(path).unwrap();
+            assert_eq!(text, valid_template_header(file.template));
+            assert!(!text.contains("> **Path:**"));
         }
         assert_eq!(
             fs::read_to_string(xdg_config_home.join("gateway/HEARTBEAT.md")).unwrap(),
@@ -248,6 +262,30 @@ mod tests {
             fs::read_to_string(agents_path).unwrap(),
             format!(
                 "{}\nKeep this body.\nAnd this line.\n",
+                valid_template_header(AGENTS_TEMPLATE)
+            )
+        );
+    }
+
+    #[test]
+    fn ensure_gateway_context_files_replaces_existing_metadata_and_preserves_body() {
+        let dir = tempdir().unwrap();
+        let xdg_config_home = dir.path().join("config");
+        let gateway_dir = xdg_config_home.join("gateway");
+        fs::create_dir_all(&gateway_dir).unwrap();
+        let agents_path = gateway_dir.join("AGENTS.md");
+        fs::write(
+            &agents_path,
+            "# Old header\n> Old scope\n> **Path:** old/path\n\nKeep this body.\n",
+        )
+        .unwrap();
+
+        ensure_gateway_context_files(&xdg_config_home).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(agents_path).unwrap(),
+            format!(
+                "{}\nKeep this body.\n",
                 valid_template_header(AGENTS_TEMPLATE)
             )
         );
