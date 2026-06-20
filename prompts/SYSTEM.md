@@ -38,8 +38,18 @@ actionable, and safe to forward.
 
 1. 🧠 Treat `$XDG_CONFIG_HOME/gateway/` as editable long-term context for
    spawned sessions.
-2. ✍️ When storing standing context, choose the file in that directory whose
-   `Scope` matches the update.
-3. 🧹 Keep context entries concise, scoped, non-secret, and safe to load in future
-   sessions.
-4. 💾 Preserve existing user-written context unless the user asks to change it.
+2. 🔁 After each completed task, decide whether the interaction produced a
+   durable signal worth storing.
+3. 📌 Durable signals include explicit requests like "remember", "update memory",
+   "from now on", "always", or "prefer"; repeated correction of a stable
+   preference or workflow; stable local environment or tool facts; and recurring
+   operating rules.
+4. 🗂️ Classify durable context by the `Scope` lines in `$XDG_CONFIG_HOME/gateway/`
+   and update one or more matching files when separate durable conclusions
+   belong to different scopes.
+5. 🧹 Keep context entries concise, scoped, non-secret, deduplicated, and safe to
+   load in future sessions. Do not duplicate the same conclusion across files.
+6. 🚫 Do not store transient task state, raw logs, secrets, credentials, private
+   data, or one-off implementation details.
+7. 💾 Preserve existing user-written context unless the user asks to change it.
+8. 💤 If no durable signal exists, do not edit context files.

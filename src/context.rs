@@ -218,9 +218,24 @@ mod tests {
 
     #[test]
     fn system_template_explains_editable_context_files() {
-        assert!(SYSTEM_PROMPT.contains("$XDG_CONFIG_HOME/gateway/"));
-        assert!(SYSTEM_PROMPT.contains("Scope"));
-        assert!(!SYSTEM_PROMPT.contains("Path"));
+        for expected in [
+            "$XDG_CONFIG_HOME/gateway/",
+            "Scope",
+            "After each completed task",
+            "durable signal",
+            "remember",
+            "from now on",
+            "repeated correction",
+            "one or more matching files",
+            "different scopes",
+            "transient task state",
+        ] {
+            assert!(SYSTEM_PROMPT.contains(expected), "missing {expected}");
+        }
+
+        for forbidden in ["exactly one matching file", "Path"] {
+            assert!(!SYSTEM_PROMPT.contains(forbidden), "found {forbidden}");
+        }
     }
 
     #[test]
