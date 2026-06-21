@@ -63,13 +63,13 @@ pub const DIRECTIVE_SPECS: &[DirectiveSpec] = &[
         directive: Directive::Voice,
         icon: "🔊",
         usage: " [on|off]",
-        summary: "toggle spoken audio replies for the current session",
+        summary: "toggle spoken audio replies",
     },
     DirectiveSpec {
         directive: Directive::Update,
         icon: "📦",
         usage: "",
-        summary: "pull latest gateway code, update Brew/Foundry, and run setup",
+        summary: "update gateway, tools, and setup",
     },
     DirectiveSpec {
         directive: Directive::New,
@@ -123,7 +123,7 @@ pub const DIRECTIVE_SPECS: &[DirectiveSpec] = &[
         directive: Directive::Stop,
         icon: "🛑",
         usage: "",
-        summary: "cancel active and queued Codex work for this chat",
+        summary: "cancel this chat's Codex work",
     },
 ];
 
@@ -209,6 +209,19 @@ mod tests {
         let message = unknown_directive_message();
         assert!(message.contains("❓ Unknown directive."));
         assert!(message.contains(&directive_list()));
+    }
+
+    #[test]
+    fn command_summaries_are_six_words_or_less() {
+        for spec in DIRECTIVE_SPECS {
+            let word_count = spec.summary.split_whitespace().count();
+            assert!(
+                word_count <= 6,
+                "/{} summary has {word_count} words: {}",
+                spec.command(),
+                spec.summary
+            );
+        }
     }
 
     #[test]

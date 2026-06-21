@@ -172,8 +172,8 @@ messages as Codex prompts.
 Sessions are kept separately per chat, and commands are case-insensitive.
 
 ```text
-🔊 /voice [on|off] - toggle spoken audio replies for the current session
-📦 /update - pull latest gateway code, update Brew/Foundry, and run setup
+🔊 /voice [on|off] - toggle spoken audio replies
+📦 /update - update gateway, tools, and setup
 ✨ /new - start a fresh Codex session
 📚 /list - list saved sessions
 ↩️ /resume [SESSION_OR_NAME|index] - list or resume a saved session
@@ -182,7 +182,7 @@ Sessions are kept separately per chat, and commands are case-insensitive.
 📊 /status - show Codex, gateway, and system status
 📜 /log [lines] - send recent gateway logs
 🔁 /restart - restart the gateway service
-🛑 /stop - cancel active and queued Codex work for this chat
+🛑 /stop - cancel this chat's Codex work
 ```
 
 📋 Notes:
