@@ -3,6 +3,12 @@ name = "gateway"
 version = "0.1.54"
 edition = "2021"
 license = "MIT"
+description = "Lean Rust Telegram-to-Codex gateway"
+readme = "README.md"
+repository = "https://github.com/DanielZlotin/gateway"
+homepage = "https://github.com/DanielZlotin/gateway"
+keywords = ["telegram", "codex", "gateway", "cli"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 chrono = "0.4.38"
