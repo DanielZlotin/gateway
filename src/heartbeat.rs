@@ -466,7 +466,7 @@ mod tests {
             chat_state_dir: state_dir.join("chats"),
             offset_file: state_dir.join("telegram.offset"),
             gateway_log_file: state_dir.join("logs/gateway.log"),
-            launchd_target: "gui/<uid>/ai.gateway".to_string(),
+            launchd_target: "gui/123/ai.gateway".to_string(),
             poll_timeout_sec: 50,
             queue_depth: 8,
             codex_timeout: Duration::from_secs(30),

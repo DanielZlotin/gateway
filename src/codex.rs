@@ -630,7 +630,7 @@ mod tests {
             chat_state_dir: PathBuf::from("/state/gateway/chats"),
             offset_file: PathBuf::from("/state/gateway/telegram.offset"),
             gateway_log_file: PathBuf::from("/state/gateway/logs/gateway.log"),
-            launchd_target: "gui/<uid>/ai.gateway".to_string(),
+            launchd_target: "gui/123/ai.gateway".to_string(),
             poll_timeout_sec: 50,
             queue_depth: 8,
             codex_timeout: Duration::from_secs(60),
