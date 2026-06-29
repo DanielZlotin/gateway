@@ -1,6 +1,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Directive {
     Status,
+    Heartbeat,
     Log,
     New,
     Restart,
@@ -17,6 +18,7 @@ impl Directive {
     pub fn command(self) -> &'static str {
         match self {
             Directive::Status => "status",
+            Directive::Heartbeat => "heartbeat",
             Directive::Log => "log",
             Directive::New => "new",
             Directive::Restart => "restart",
@@ -108,6 +110,12 @@ pub const DIRECTIVE_SPECS: &[DirectiveSpec] = &[
         summary: "show Codex, gateway, and system status",
     },
     DirectiveSpec {
+        directive: Directive::Heartbeat,
+        icon: "🫀",
+        usage: "",
+        summary: "run heartbeat and print result",
+    },
+    DirectiveSpec {
         directive: Directive::Log,
         icon: "📜",
         usage: " [lines]",
@@ -180,6 +188,7 @@ mod tests {
         let list = directive_list();
 
         assert!(list.contains("/status"));
+        assert!(list.contains("/heartbeat"));
         assert!(list.contains("/update"));
         assert!(list.contains("/stop"));
         assert!(list.contains("/voice"));

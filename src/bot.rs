@@ -1209,6 +1209,7 @@ fn handle_command_with_codex(
         }
         Some(Directive::Voice) => handle_voice_command(cfg, tg, store, msg, text, &key),
         Some(Directive::Stop) => handle_stop_command(tg, cancellations, msg, &key),
+        Some(Directive::Heartbeat) => handle_heartbeat_command(cfg, tg, msg),
         Some(Directive::Status) => {
             handle_status_command(cfg, codex, tg, store, selections, msg, &key);
             Ok(())
@@ -1285,6 +1286,16 @@ fn handle_log_command(
         .map(|log_text| tail_log_text(&log_text, lines))
         .unwrap_or_else(|_| "📭 No gateway log available.".to_string());
     send_long_message(tg, msg.chat.id, &body, msg.message_id)
+}
+
+fn handle_heartbeat_command(
+    cfg: &Config,
+    tg: &impl TelegramApi,
+    msg: &Message,
+) -> Result<(), String> {
+    let text = crate::heartbeat::run(cfg.clone())
+        .unwrap_or_else(|err| format!("⚠️ Heartbeat failed: {err}"));
+    send_long_message(tg, msg.chat.id, &text, msg.message_id)
 }
 
 fn handle_new_command(
@@ -3486,6 +3497,38 @@ printf 'session id: session-12345678\n' >&2
                 .any(|text| text.as_str()
                     == "⏳ Gateway update already running. Details are in /log.")
         );
+    }
+
+    #[test]
+    fn heartbeat_command_prints_heartbeat_result() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        fs::create_dir_all(&cfg.state_dir).unwrap();
+        fs::write(
+            cfg.state_dir.join("heartbeat.last"),
+            format!("{}\n", i64::MAX),
+        )
+        .unwrap();
+        let tg = FakeTelegram::new();
+        let store = SessionStore::new(
+            cfg.chat_state_dir.clone(),
+            cfg.default_provider_model().model.clone(),
+        );
+        let selections = RuntimeSelections::default();
+        let msg = message(42, 10, "/heartbeat");
+
+        handle_command(
+            &cfg,
+            &tg,
+            &store,
+            &selections,
+            &msg,
+            "/heartbeat",
+            "/heartbeat",
+        )
+        .unwrap();
+
+        assert_eq!(tg.sent_text(), vec!["heartbeat not due".to_string()]);
     }
 
     #[test]

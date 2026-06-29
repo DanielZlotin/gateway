@@ -180,6 +180,7 @@ Sessions are kept separately per chat, and commands are case-insensitive.
 🏷️ /rename [NAME] - rename the current session
 🧠 /model [index] - choose a configured provider/model
 📊 /status - show Codex, gateway, and system status
+🫀 /heartbeat - run heartbeat and print result
 📜 /log [lines] - send recent gateway logs
 🔁 /restart - restart the gateway service
 🛑 /stop - cancel this chat's Codex work
