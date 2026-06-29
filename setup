@@ -104,11 +104,11 @@ gateway_install_missing_commands() {
   fi
   if (( ${#gateway_formulae[@]} )); then
     print -- "installing missing Homebrew formulae: ${gateway_formulae[*]}"
-    HOMEBREW_NO_ASK=1 brew install --yes "${gateway_formulae[@]}"
+    HOMEBREW_NO_ASK=1 brew install "${gateway_formulae[@]}"
   fi
   if (( ${#gateway_casks[@]} )); then
     print -- "installing missing Homebrew casks: ${gateway_casks[*]}"
-    HOMEBREW_NO_ASK=1 brew install --yes --cask "${gateway_casks[@]}"
+    HOMEBREW_NO_ASK=1 brew install --cask "${gateway_casks[@]}"
   fi
 }
 

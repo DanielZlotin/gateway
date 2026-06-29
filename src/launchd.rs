@@ -437,9 +437,9 @@ mod tests {
         );
         let brew_log = fs::read_to_string(brew_log).unwrap();
         assert!(brew_log.contains(
-            "install --yes rust fastfetch ffmpeg fzf gh git go jq node parallel ripgrep openai-whisper"
+            "install rust fastfetch ffmpeg fzf gh git go jq node parallel ripgrep openai-whisper"
         ));
-        assert!(brew_log.contains("install --yes --cask codex"));
+        assert!(brew_log.contains("install --cask codex"));
         assert!(root
             .join("data/gateway/voicebox/Voicebox.app/Contents/MacOS/Voicebox")
             .exists());
@@ -547,9 +547,15 @@ mod tests {
     fn fake_brew_installer() -> &'static str {
         "#!/bin/zsh\n\
          print -r -- \"$*\" >> \"$GATEWAY_TEST_BREW_LOG\"\n\
+         for gateway_arg in \"$@\"; do\n\
+         \tif [[ \"$gateway_arg\" == --yes ]]; then\n\
+         \t\tprint -u2 -- \"invalid option --yes\"\n\
+         \t\texit 1\n\
+         \tfi\n\
+         done\n\
          if [[ \"${1:-}\" == install ]]; then\n\
          \tshift\n\
-         \twhile [[ \"${1:-}\" == --yes || \"${1:-}\" == --cask ]]; do shift; done\n\
+         \twhile [[ \"${1:-}\" == --cask ]]; do shift; done\n\
          \tfor gateway_formula in \"$@\"; do\n\
          \t\tcase \"$gateway_formula\" in\n\
          \t\t\trust) print -r -- '#!/bin/zsh\nexit 0' > \"$GATEWAY_TEST_STUB_DIR/cargo\"; /bin/chmod +x \"$GATEWAY_TEST_STUB_DIR/cargo\"; gateway_command=rustc ;;\n\
