@@ -1293,7 +1293,7 @@ fn handle_heartbeat_command(
     tg: &impl TelegramApi,
     msg: &Message,
 ) -> Result<(), String> {
-    let text = crate::heartbeat::run(cfg.clone())
+    let text = crate::heartbeat::run_now(cfg.clone())
         .unwrap_or_else(|err| format!("⚠️ Heartbeat failed: {err}"));
     send_long_message(tg, msg.chat.id, &text, msg.message_id)
 }
@@ -3509,6 +3509,11 @@ printf 'session id: session-12345678\n' >&2
             format!("{}\n", i64::MAX),
         )
         .unwrap();
+        fs::write(
+            crate::update::gateway_update_lock_file(&cfg),
+            format!("pid {}\n", std::process::id()),
+        )
+        .unwrap();
         let tg = FakeTelegram::new();
         let store = SessionStore::new(
             cfg.chat_state_dir.clone(),
@@ -3528,7 +3533,10 @@ printf 'session id: session-12345678\n' >&2
         )
         .unwrap();
 
-        assert_eq!(tg.sent_text(), vec!["heartbeat not due".to_string()]);
+        assert_eq!(
+            tg.sent_text(),
+            vec!["gateway update already running".to_string()]
+        );
     }
 
     #[test]

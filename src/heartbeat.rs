@@ -27,18 +27,34 @@ pub struct HeartbeatRunState {
 }
 
 pub fn run(cfg: Config) -> Result<String, String> {
+    run_with_schedule(cfg, HeartbeatSchedule::WhenDue)
+}
+
+pub fn run_now(cfg: Config) -> Result<String, String> {
+    run_with_schedule(cfg, HeartbeatSchedule::Now)
+}
+
+fn run_with_schedule(cfg: Config, schedule: HeartbeatSchedule) -> Result<String, String> {
     std::env::set_var(HEARTBEAT_ACTIVE_ENV, "1");
     run_due_heartbeat(
         cfg,
         current_total_minutes(),
+        schedule,
         run_gateway_update_inline,
         run_mode::run,
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeartbeatSchedule {
+    WhenDue,
+    Now,
+}
+
 fn run_due_heartbeat(
     cfg: Config,
     now_minutes: i64,
+    schedule: HeartbeatSchedule,
     run_update: impl FnOnce(&Config) -> Result<GatewayUpdateRun, String>,
     run_prompt: impl FnOnce(RunArgs, Config) -> Result<String, String>,
 ) -> Result<String, String> {
@@ -54,27 +70,34 @@ fn run_due_heartbeat(
     let last_boundary = read_heartbeat_boundary(&state_file)?;
     let at_boundary = now_minutes == boundary;
 
-    match heartbeat_decision(last_boundary, boundary, at_boundary) {
-        HeartbeatDecision::Skip => {
-            if run_state_missing {
-                write_heartbeat_run_state(
-                    &cfg,
-                    HeartbeatRunState::finished("initialized", "initialized"),
-                )?;
-                append_heartbeat_log(&cfg, "INFO", "🫀 hb init")?;
+    match schedule {
+        HeartbeatSchedule::WhenDue => {
+            match heartbeat_decision(last_boundary, boundary, at_boundary) {
+                HeartbeatDecision::Skip => {
+                    if run_state_missing {
+                        write_heartbeat_run_state(
+                            &cfg,
+                            HeartbeatRunState::finished("initialized", "initialized"),
+                        )?;
+                        append_heartbeat_log(&cfg, "INFO", "🫀 hb init")?;
+                    }
+                    return Ok("heartbeat not due".to_string());
+                }
+                HeartbeatDecision::MarkOnly(boundary) => {
+                    write_heartbeat_boundary(&state_file, boundary)?;
+                    write_heartbeat_run_state(
+                        &cfg,
+                        HeartbeatRunState::finished("initialized", "initialized"),
+                    )?;
+                    append_heartbeat_log(&cfg, "INFO", "🫀 hb init")?;
+                    return Ok("heartbeat initialized".to_string());
+                }
+                HeartbeatDecision::Run(boundary) => {
+                    write_heartbeat_boundary(&state_file, boundary)?;
+                }
             }
-            return Ok("heartbeat not due".to_string());
         }
-        HeartbeatDecision::MarkOnly(boundary) => {
-            write_heartbeat_boundary(&state_file, boundary)?;
-            write_heartbeat_run_state(
-                &cfg,
-                HeartbeatRunState::finished("initialized", "initialized"),
-            )?;
-            append_heartbeat_log(&cfg, "INFO", "🫀 hb init")?;
-            return Ok("heartbeat initialized".to_string());
-        }
-        HeartbeatDecision::Run(boundary) => {
+        HeartbeatSchedule::Now => {
             write_heartbeat_boundary(&state_file, boundary)?;
         }
     }
@@ -314,6 +337,7 @@ mod tests {
         let output = run_due_heartbeat(
             cfg.clone(),
             60,
+            HeartbeatSchedule::WhenDue,
             |_| {
                 update_ran.set(true);
                 Ok(GatewayUpdateRun::Completed)
@@ -350,6 +374,7 @@ mod tests {
         let output = run_due_heartbeat(
             cfg.clone(),
             60,
+            HeartbeatSchedule::WhenDue,
             |_| Ok(GatewayUpdateRun::Completed),
             |args, cfg| {
                 assert_eq!(
@@ -377,6 +402,7 @@ mod tests {
         let output = run_due_heartbeat(
             cfg.clone(),
             60,
+            HeartbeatSchedule::WhenDue,
             |_| panic!("heartbeat update should not run"),
             |_, _| panic!("heartbeat prompt should not run"),
         )
@@ -389,6 +415,35 @@ mod tests {
     }
 
     #[test]
+    fn heartbeat_run_now_skips_not_due_gate() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        fs::create_dir_all(&cfg.state_dir).unwrap();
+        fs::write(cfg.state_dir.join("heartbeat.last"), "60\n").unwrap();
+        let update_ran = Cell::new(false);
+        let prompt_ran = Cell::new(false);
+
+        let output = run_due_heartbeat(
+            cfg.clone(),
+            60,
+            HeartbeatSchedule::Now,
+            |_| {
+                update_ran.set(true);
+                Ok(GatewayUpdateRun::Completed)
+            },
+            |_, _| {
+                prompt_ran.set(true);
+                Ok("heartbeat body ran".to_string())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(output, "heartbeat body ran");
+        assert!(update_ran.get());
+        assert!(prompt_ran.get());
+    }
+
+    #[test]
     fn heartbeat_writes_canonical_gateway_log_and_state() {
         let dir = tempdir().unwrap();
         let cfg = test_config(dir.path());
@@ -398,6 +453,7 @@ mod tests {
         let output = run_due_heartbeat(
             cfg.clone(),
             60,
+            HeartbeatSchedule::WhenDue,
             |_| Ok(GatewayUpdateRun::Completed),
             |_, _| Ok("heartbeat body ran".to_string()),
         )
@@ -427,6 +483,7 @@ mod tests {
         let err = run_due_heartbeat(
             cfg.clone(),
             60,
+            HeartbeatSchedule::WhenDue,
             |_| Ok(GatewayUpdateRun::Completed),
             |_, _| Err("prompt failed".to_string()),
         )
