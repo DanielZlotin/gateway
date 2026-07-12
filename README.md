@@ -89,8 +89,8 @@ Gateway reads `$XDG_CONFIG_HOME/gateway/config.json`; if missing, it creates:
 ```json
 {
   "models": [
-    { "provider": "codex", "model": "gpt-5.5" },
-    { "provider": "codex", "model": "gpt-5.4-mini", "role": "light" },
+    { "provider": "codex", "model": "gpt-5.6-sol" },
+    { "provider": "codex", "model": "gpt-5.6-luna", "role": "light" },
     { "provider": "claude", "model": "claude-opus-4-8" },
     { "provider": "openrouter", "model": "openai/gpt-5.5" }
   ],

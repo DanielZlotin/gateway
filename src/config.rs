@@ -9,8 +9,8 @@ use std::time::Duration;
 
 pub const GATEWAY_TELEGRAM_TOKEN_ENV: &str = "GATEWAY_TELEGRAM_TOKEN";
 pub const GATEWAY_TELEGRAM_CHAT_ID_ENV: &str = "GATEWAY_TELEGRAM_CHAT_ID";
-pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.5";
-pub const DEFAULT_LIGHT_CODEX_MODEL: &str = "gpt-5.4-mini";
+pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
+pub const DEFAULT_LIGHT_CODEX_MODEL: &str = "gpt-5.6-luna";
 pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-4-8";
 pub const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-5.5";
 pub const DEFAULT_CODEX_TIMEOUT_MINS: u64 = 30;

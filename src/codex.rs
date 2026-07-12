@@ -77,6 +77,7 @@ pub fn codex_args(
     if let Some(session_id) = session_id.filter(|value| !value.trim().is_empty()) {
         let mut args = strings(["--search", "exec", "resume", "--ephemeral"]);
         append_model_provider_config(&mut args, provider, claude_proxy_base_url)?;
+        append_model_reasoning_config(&mut args, provider, model);
         append_image_args(&mut args, image_paths);
         args.extend(strings([
             "-c",
@@ -95,6 +96,7 @@ pub fn codex_args(
 
     let mut args = strings(["--search", "exec", "--color", "never"]);
     append_model_provider_config(&mut args, provider, claude_proxy_base_url)?;
+    append_model_reasoning_config(&mut args, provider, model);
     append_image_args(&mut args, image_paths);
     args.extend(strings([
         "-c",
@@ -369,6 +371,12 @@ fn append_model_provider_config(
     Ok(())
 }
 
+fn append_model_reasoning_config(args: &mut Vec<String>, provider: Provider, model: &str) {
+    if provider == Provider::Codex && model == crate::config::DEFAULT_LIGHT_CODEX_MODEL {
+        args.extend(strings(["-c", "model_reasoning_effort=\"low\""]));
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct CodexEvent {
     #[serde(rename = "type")]
@@ -445,6 +453,41 @@ mod tests {
             joined.contains("developer_instructions=\"# system\\n\\n# AGENTS.md\\nagent rules\"")
         );
         assert!(!joined.contains("model_instructions_file"));
+    }
+
+    #[test]
+    fn codex_args_use_low_reasoning_for_luna_only() {
+        for session_id in [None, Some("session-123")] {
+            let luna = codex_args(
+                Path::new("/tmp/out"),
+                session_id,
+                crate::provider::Provider::Codex,
+                crate::config::DEFAULT_LIGHT_CODEX_MODEL,
+                "gpt-5.6-sol",
+                Path::new("/work"),
+                None,
+                &[],
+                TEST_DEVELOPER_INSTRUCTIONS,
+            )
+            .unwrap();
+            assert!(luna
+                .windows(2)
+                .any(|pair| pair == ["-c", "model_reasoning_effort=\"low\""]));
+
+            let sol = codex_args(
+                Path::new("/tmp/out"),
+                session_id,
+                crate::provider::Provider::Codex,
+                "gpt-5.6-sol",
+                "gpt-5.6-sol",
+                Path::new("/work"),
+                None,
+                &[],
+                TEST_DEVELOPER_INSTRUCTIONS,
+            )
+            .unwrap();
+            assert!(!sol.iter().any(|arg| arg.contains("model_reasoning_effort")));
+        }
     }
 
     #[test]
