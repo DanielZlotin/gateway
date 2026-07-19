@@ -3,7 +3,7 @@
 ⚡ Lean Rust Telegram-to-Codex gateway.
 
 1. 🤖 `gateway` or `gateway bot`: run the Telegram bot for allowed chats.
-2. 🕰️ `gateway run`: execute one fresh Codex prompt from automation.
+2. 🕰️  `gateway run`: execute one fresh Codex prompt from automation.
 
 ## 🚀 Setup
 
