@@ -732,7 +732,6 @@ mod tests {
                 "model",
                 "heartbeat",
                 "log",
-                "restart",
                 "stop",
             ]
         );

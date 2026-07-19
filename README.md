@@ -182,13 +182,13 @@ Sessions are kept separately per chat, and commands are case-insensitive.
 🧠 /model [index] - choose a configured provider/model
 🫀 /heartbeat - run heartbeat and print result
 📜 /log [lines] - send recent gateway logs
-🔁 /restart - restart the gateway service
 🛑 /stop - cancel this chat's Codex work
 ```
 
 📋 Notes:
 
-1. 🧠 `/model` lists buttons; `/model 0`, `/model 1`, etc. select by index.
+1. 🧠 `/model` (or `/models`) shows the active model, reasoning effort, timeout,
+   and selection buttons; `/model 0`, `/model 1`, etc. select by index.
 2. ↩️ `/resume` and `/resume 0` list sessions; `/resume 1` steps back one
    saved session; names, full session IDs, and first 8 characters also match.
 3. 🏷️ `/rename` without a name asks Codex to create one.
@@ -196,5 +196,5 @@ Sessions are kept separately per chat, and commands are case-insensitive.
 5. 📎 Photos and image documents are attached; other documents become file paths.
 6. 🎙️ Voice messages are transcribed locally with Whisper `large`.
 7. 🔊 `/voice` toggles spoken replies for the current session. `/new`, `/resume`,
-   `/restart`, and model changes disable voice mode.
+   and model changes disable voice mode.
    Voice replies try `tts`, then local Voicebox.

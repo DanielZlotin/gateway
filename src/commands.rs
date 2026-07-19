@@ -4,7 +4,6 @@ pub enum Directive {
     Heartbeat,
     Log,
     New,
-    Restart,
     Update,
     Model,
     Resume,
@@ -21,7 +20,6 @@ impl Directive {
             Directive::Heartbeat => "heartbeat",
             Directive::Log => "log",
             Directive::New => "new",
-            Directive::Restart => "restart",
             Directive::Update => "update",
             Directive::Model => "model",
             Directive::Resume => "resume",
@@ -122,12 +120,6 @@ pub const DIRECTIVE_SPECS: &[DirectiveSpec] = &[
         summary: "send recent gateway logs",
     },
     DirectiveSpec {
-        directive: Directive::Restart,
-        icon: "🔁",
-        usage: "",
-        summary: "restart the gateway service",
-    },
-    DirectiveSpec {
         directive: Directive::Stop,
         icon: "🛑",
         usage: "",
@@ -144,6 +136,9 @@ pub fn readme_command_lines() -> Vec<String> {
 
 pub fn directive_from_command(command: &str) -> Option<Directive> {
     let command = command.strip_prefix('/').unwrap_or(command);
+    if command == "models" {
+        return Some(Directive::Model);
+    }
     DIRECTIVE_SPECS
         .iter()
         .find(|spec| spec.command() == command)
@@ -211,6 +206,7 @@ mod tests {
         assert_eq!(directive_from_command("/config"), None);
         assert_eq!(directive_from_command("/help"), None);
         assert_eq!(directive_from_command("/commands"), None);
+        assert_eq!(directive_from_command("/models"), Some(Directive::Model));
     }
 
     #[test]

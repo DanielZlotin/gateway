@@ -377,6 +377,25 @@ fn append_model_reasoning_config(args: &mut Vec<String>, provider: Provider, mod
     }
 }
 
+pub fn model_reasoning_effort(xdg_config_home: &Path, provider: Provider, model: &str) -> String {
+    if provider == Provider::Codex && model == crate::config::DEFAULT_LIGHT_CODEX_MODEL {
+        return "low".to_string();
+    }
+    let path = xdg_config_home.join("codex/config.toml");
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| {
+            contents.lines().find_map(|line| {
+                let line = line.split('#').next().unwrap_or("");
+                let (key, value) = line.split_once('=')?;
+                (key.trim() == "model_reasoning_effort")
+                    .then(|| value.trim().trim_matches(['\'', '"']).trim().to_string())
+            })
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "default".to_string())
+}
+
 #[derive(Debug, Deserialize)]
 struct CodexEvent {
     #[serde(rename = "type")]
@@ -488,6 +507,31 @@ mod tests {
             .unwrap();
             assert!(!sol.iter().any(|arg| arg.contains("model_reasoning_effort")));
         }
+    }
+
+    #[test]
+    fn model_reasoning_effort_reads_config_and_applies_light_override() {
+        let dir = tempdir().unwrap();
+        let codex_dir = dir.path().join("codex");
+        fs::create_dir(&codex_dir).unwrap();
+        fs::write(
+            codex_dir.join("config.toml"),
+            "model_reasoning_effort = \"high\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            model_reasoning_effort(dir.path(), crate::provider::Provider::Codex, "gpt-test"),
+            "high"
+        );
+        assert_eq!(
+            model_reasoning_effort(
+                dir.path(),
+                crate::provider::Provider::Codex,
+                crate::config::DEFAULT_LIGHT_CODEX_MODEL,
+            ),
+            "low"
+        );
     }
 
     #[test]

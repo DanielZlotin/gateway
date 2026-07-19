@@ -1,4 +1,4 @@
-use crate::codex::{run_codex, run_codex_stream, CodexConfig, CodexRun};
+use crate::codex::{model_reasoning_effort, run_codex, run_codex_stream, CodexConfig, CodexRun};
 use crate::commands::{directive_from_command, is_allowed, unknown_directive_message, Directive};
 use crate::config::{Config, ProviderModel};
 use crate::logs;
@@ -1190,16 +1190,6 @@ fn handle_command_with_codex(
     match directive_from_command(command) {
         Some(Directive::Log) => handle_log_command(cfg, tg, msg, text),
         Some(Directive::New) => handle_new_command(cfg, codex, tg, store, selections, msg, &key),
-        Some(Directive::Restart) => {
-            logs::info(format_args!(
-                "gateway restart requested chat={} message={} target={}",
-                msg.chat.id, msg.message_id, cfg.launchd_target
-            ));
-            store.set_voice_enabled(&key, false)?;
-            tg.send_message(msg.chat.id, "🔄 Restarting gateway.", msg.message_id)?;
-            restart_gateway(&cfg.launchd_target);
-            Ok(())
-        }
         Some(Directive::Update) => handle_update_command(cfg, tg, msg),
         Some(Directive::Model) => handle_model_command(cfg, tg, store, selections, msg, text, &key),
         Some(Directive::Resume) => handle_resume_command(tg, store, selections, msg, text, &key),
@@ -1356,9 +1346,16 @@ fn handle_model_command(
 ) -> Result<(), String> {
     let arg = command_arg(text);
     if arg.is_empty() {
+        let active = selected_provider_model(cfg, selections, key);
+        let reasoning =
+            model_reasoning_effort(&cfg.xdg_config_home, active.provider, &active.model);
         return tg.send_message_with_inline_keyboard(
             msg.chat.id,
-            "🤖 Select model:",
+            &format!(
+                "🤖 Active: {}\n🧠 Reasoning: {reasoning}\n⏱️ Timeout: {}\n\nSelect model:",
+                provider_model_label(&active),
+                format_timeout(cfg.codex_timeout)
+            ),
             msg.message_id,
             &model_buttons(cfg),
         );
@@ -1385,6 +1382,15 @@ fn handle_model_command(
         },
         index,
     )
+}
+
+fn format_timeout(timeout: Duration) -> String {
+    let seconds = timeout.as_secs();
+    if seconds >= 60 && seconds % 60 == 0 {
+        format!("{} min", seconds / 60)
+    } else {
+        format!("{seconds} sec")
+    }
 }
 
 struct ModelSelectionContext<'a> {
@@ -2405,22 +2411,6 @@ fn wait_for_update_lock_to_clear(lock_file: &Path) {
     }
 }
 
-fn restart_gateway(launchd_target: &str) {
-    match Command::new("/bin/launchctl")
-        .args(["kickstart", "-k", launchd_target])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(_) => logs::info(format_args!(
-            "gateway restart command spawned target={launchd_target}"
-        )),
-        Err(err) => logs::warn(format_args!(
-            "gateway restart command failed target={launchd_target} error={err}"
-        )),
-    }
-}
-
 pub const fn typing_refresh_interval() -> Duration {
     TYPING_REFRESH_INTERVAL
 }
@@ -3410,9 +3400,6 @@ printf 'session id: session-12345678\n' >&2
             "/status",
         )
         .unwrap();
-        assert!(store.set_voice_enabled(&key, true).unwrap().voice_enabled);
-        handle_command(&cfg, &tg, &store, &selections, &msg, "/restart", "/restart").unwrap();
-        assert!(!store.load(&key).voice_enabled);
         handle_command(&cfg, &tg, &store, &selections, &msg, "/wat", "/wat").unwrap();
 
         assert_sent_text_eventually(&tg, |text| text.contains("🧠 Codex:"));
@@ -3465,7 +3452,6 @@ printf 'session id: session-12345678\n' >&2
             4
         );
         assert!(sent.iter().any(|text| text.contains("🧠 Codex:")));
-        assert!(sent.iter().any(|text| text == "🔄 Restarting gateway."));
         assert!(sent
             .iter()
             .any(|text| text.contains("❓ Unknown directive")));
@@ -4270,15 +4256,15 @@ printf 'session id: aaaaaaaa-current\n' >&2
         );
         let tg = FakeTelegram::new();
         let selections = RuntimeSelections::default();
-        let msg = message(42, 10, "/model");
+        let msg = message(42, 10, "/models");
 
-        handle_command(&cfg, &tg, &store, &selections, &msg, "/model", "/model").unwrap();
+        handle_command(&cfg, &tg, &store, &selections, &msg, "/models", "/models").unwrap();
 
         assert!(tg.calls().iter().any(|call| {
             matches!(
                 call,
                 Call::SendKeyboard { text, buttons, .. }
-                    if text == "🤖 Select model:"
+                    if text == "🤖 Active: Codex: gpt-test (default)\n🧠 Reasoning: default\n⏱️ Timeout: 5 sec\n\nSelect model:"
                         && buttons.iter().map(|button| button.text.as_str()).collect::<Vec<_>>()
                             == vec![
                                 "Codex: gpt-test (default)",
