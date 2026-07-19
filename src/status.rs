@@ -18,7 +18,6 @@ const FASTFETCH_TIMEOUT: Duration = Duration::from_secs(5);
 const GIT_STATUS_TIMEOUT: Duration = Duration::from_secs(2);
 const GIT_SUMMARY_TIMEOUT: Duration = Duration::from_secs(5);
 const HEARTBEAT_STATUS_LABEL: &str = "🫀 Heartbeat";
-const MAX_GIT_SUMMARY_INPUT_CHARS: usize = 12_000;
 const HEARTBEAT_TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 const FASTFETCH_CONFIG: &str = r#"{
   "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
@@ -301,7 +300,7 @@ fn git_toplevel(path: &Path) -> Result<PathBuf, String> {
 
 fn git_status_short_summary(codex: &CodexConfig, cfg: &Config, label: &str, path: &Path) -> String {
     match run_git_status_short(path) {
-        Ok(lines) if lines.is_empty() => "clean".to_string(),
+        Ok(lines) if lines.is_empty() => "✅ Clean".to_string(),
         Ok(lines) => summarize_git_status_with_codex(codex, cfg, label, path, &lines),
         Err(err) => format!("error: {err}"),
     }
@@ -314,27 +313,40 @@ fn summarize_git_status_with_codex(
     path: &Path,
     lines: &[String],
 ) -> String {
-    let fallback = summarize_git_status_lines(lines);
-    let input = git_summary_input(path, lines).unwrap_or_else(|_| lines.join("\n"));
+    let input = match git_summary_input(path, lines) {
+        Ok(input) => input,
+        Err(err) => return unavailable_git_summary(&err),
+    };
     let prompt = git_summary_prompt(label, &input);
     let light_model = cfg.light_provider_model();
-    match run_codex(
-        codex,
-        &prompt,
-        None,
-        light_model.provider,
-        &light_model.model,
-        GIT_SUMMARY_TIMEOUT.min(cfg.codex_timeout),
-        &cfg.state_dir,
-    ) {
-        Ok(output) => concise_git_summary(&output.final_text).unwrap_or(fallback),
-        Err(err) if is_gateway_context_error(&err) => format!("error: {err}"),
-        Err(_) => fallback,
+    let mut last_error = String::new();
+    for _ in 0..2 {
+        match run_codex(
+            codex,
+            &prompt,
+            None,
+            light_model.provider,
+            &light_model.model,
+            GIT_SUMMARY_TIMEOUT.min(cfg.codex_timeout),
+            &cfg.state_dir,
+        ) {
+            Ok(output) => match concise_git_summary(&output.final_text) {
+                Some(summary) => return summary,
+                None => last_error = "empty summary".to_string(),
+            },
+            Err(err) => last_error = err,
+        }
     }
+    unavailable_git_summary(&last_error)
 }
 
-fn is_gateway_context_error(err: &str) -> bool {
-    err.contains("read gateway context file") || err.contains("gateway core context is too large")
+fn unavailable_git_summary(error: &str) -> String {
+    let detail = error
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("unknown error");
+    format!("⚠️ Summary unavailable: {detail}")
 }
 
 fn git_summary_input(path: &Path, lines: &[String]) -> Result<String, String> {
@@ -348,9 +360,34 @@ fn git_summary_input(path: &Path, lines: &[String]) -> Result<String, String> {
     push_git_output_section(path, &mut sections, "unstaged stat", &["diff", "--stat"])?;
     push_git_output_section(path, &mut sections, "staged patch", &["diff", "--cached"])?;
     push_git_output_section(path, &mut sections, "unstaged patch", &["diff"])?;
-    Ok(limit_git_summary_input(&redact_private_data(
-        &sections.join("\n\n"),
-    )))
+    push_untracked_file_sections(path, &mut sections)?;
+    Ok(redact_private_data(&sections.join("\n\n")))
+}
+
+fn push_untracked_file_sections(path: &Path, sections: &mut Vec<String>) -> Result<(), String> {
+    let files = run_git_text(path, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    for relative in files.split('\0').filter(|relative| !relative.is_empty()) {
+        let file = path.join(relative);
+        let metadata = fs::symlink_metadata(&file).map_err(|err| err.to_string())?;
+        if metadata.file_type().is_symlink() {
+            let target = fs::read_link(file).map_err(|err| err.to_string())?;
+            sections.push(format!(
+                "untracked symlink {relative} -> {}",
+                target.display()
+            ));
+            continue;
+        }
+        if !metadata.is_file() {
+            sections.push(format!("untracked special file {relative}"));
+            continue;
+        }
+        let content = fs::read(file).map_err(|err| err.to_string())?;
+        sections.push(format!(
+            "untracked file {relative}:\n{}",
+            String::from_utf8_lossy(&content)
+        ));
+    }
+    Ok(())
 }
 
 fn push_git_output_section(
@@ -391,34 +428,30 @@ fn run_git_text(path: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-fn limit_git_summary_input(text: &str) -> String {
-    let mut limited: String = text.chars().take(MAX_GIT_SUMMARY_INPUT_CHARS).collect();
-    if text.chars().count() > MAX_GIT_SUMMARY_INPUT_CHARS {
-        limited.push_str("\n\n[diff truncated]");
-    }
-    limited
-}
-
 fn git_summary_prompt(label: &str, input: &str) -> String {
     format!(
         "Summarize the actual content changes in this git diff bundle for the {label} repo in one concise fragment.\n\
-Return only the summary, with no prefix, quotes, markdown, or explanation.\n\
+Start with one relevant emoji icon. Return only the summary, with no quotes, markdown, or explanation.\n\
 Focus on what changed behaviorally or structurally, not file names or dirty-status codes.\n\
-If there is only untracked metadata and no patch content, say that concisely.\n\n{input}"
+Summarize new untracked file contents instead of describing them as untracked.\n\n{input}"
     )
 }
 
 fn concise_git_summary(text: &str) -> Option<String> {
     let summary = text
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())?
+        .trim()
         .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '*'))
         .trim();
     if summary.is_empty() {
         None
+    } else if summary
+        .chars()
+        .next()
+        .is_some_and(|ch| matches!(ch as u32, 0x1F000..=0x1FAFF | 0x2600..=0x27BF))
+    {
+        Some(summary.to_string())
     } else {
-        Some(summary.chars().take(180).collect())
+        Some(format!("📝 {summary}"))
     }
 }
 
@@ -449,73 +482,6 @@ fn run_git_status_short(path: &Path) -> Result<Vec<String>, String> {
         .filter(|line| !line.trim().is_empty())
         .map(ToOwned::to_owned)
         .collect())
-}
-
-fn summarize_git_status_lines(lines: &[String]) -> String {
-    let counts = git_status_counts(lines);
-    let mut parts = Vec::new();
-    push_count(&mut parts, counts.modified, "modified");
-    push_count(&mut parts, counts.added, "added");
-    push_count(&mut parts, counts.deleted, "deleted");
-    push_count(&mut parts, counts.renamed, "renamed");
-    push_count(&mut parts, counts.copied, "copied");
-    push_count(&mut parts, counts.untracked, "untracked");
-    push_count(&mut parts, counts.conflicted, "conflicted");
-    push_count(&mut parts, counts.other, "other");
-    format!("{} changed: {}", lines.len(), parts.join(", "))
-}
-
-#[derive(Default)]
-struct GitStatusCounts {
-    modified: usize,
-    added: usize,
-    deleted: usize,
-    renamed: usize,
-    copied: usize,
-    untracked: usize,
-    conflicted: usize,
-    other: usize,
-}
-
-fn git_status_counts(lines: &[String]) -> GitStatusCounts {
-    let mut counts = GitStatusCounts::default();
-    for line in lines {
-        let code = line.get(..2).unwrap_or(line.as_str());
-        if code == "??" {
-            counts.untracked += 1;
-            continue;
-        }
-        if is_conflicted_status(code) {
-            counts.conflicted += 1;
-            continue;
-        }
-        let mut counted = false;
-        for status in code.chars().filter(|ch| *ch != ' ') {
-            counted = true;
-            match status {
-                'M' => counts.modified += 1,
-                'A' => counts.added += 1,
-                'D' => counts.deleted += 1,
-                'R' => counts.renamed += 1,
-                'C' => counts.copied += 1,
-                _ => counts.other += 1,
-            }
-        }
-        if !counted {
-            counts.other += 1;
-        }
-    }
-    counts
-}
-
-fn is_conflicted_status(code: &str) -> bool {
-    matches!(code, "DD" | "AU" | "UD" | "UA" | "DU" | "AA" | "UU")
-}
-
-fn push_count(parts: &mut Vec<String>, count: usize, label: &str) {
-    if count > 0 {
-        parts.push(format!("{count} {label}"));
-    }
 }
 
 fn fastfetch_status_with_bin(bin: &Path) -> String {
@@ -935,7 +901,6 @@ mod tests {
     use std::io::{BufRead, BufReader, Write as IoWrite};
     use std::net::TcpListener;
     use std::os::unix::fs::PermissionsExt;
-    use std::path::PathBuf;
     use std::sync::{mpsc, Arc, Condvar, Mutex};
     use std::thread;
 
@@ -1033,11 +998,11 @@ mod tests {
 
     #[test]
     fn git_status_section_formats_labels_with_icons_and_title_case() {
-        let got = format_git_status_section("clean", "2 changed");
+        let got = format_git_status_section("✅ Clean", "📝 Config summary");
 
         assert_eq!(
             got,
-            "🧾 Git\n• 🌉 Gateway: clean\n• 🛠️ XDG Config: 2 changed"
+            "🧾 Git\n• 🌉 Gateway: ✅ Clean\n• 🛠️ XDG Config: 📝 Config summary"
         );
     }
 
@@ -1128,31 +1093,7 @@ mod tests {
     }
 
     #[test]
-    fn git_status_summary_counts_change_types() {
-        let lines = vec![
-            " M Cargo.toml".to_string(),
-            " M src/status.rs".to_string(),
-            "?? tmp".to_string(),
-            "A  new-file".to_string(),
-            "D  old-file".to_string(),
-            "R  old -> new".to_string(),
-            "UU conflicted".to_string(),
-        ];
-
-        let got = summarize_git_status_lines(&lines);
-
-        assert!(got.starts_with("7 changed"));
-        assert!(got.contains("2 modified"));
-        assert!(got.contains("1 untracked"));
-        assert!(got.contains("1 added"));
-        assert!(got.contains("1 deleted"));
-        assert!(got.contains("1 renamed"));
-        assert!(got.contains("1 conflicted"));
-        assert!(!got.contains("Cargo.toml"));
-    }
-
-    #[test]
-    fn dirty_git_status_falls_back_to_local_summary_when_codex_fails() {
+    fn clean_git_status_skips_summary_generation() {
         let dir = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
         assert!(Command::new("git")
@@ -1163,10 +1104,16 @@ mod tests {
             .status()
             .unwrap()
             .success());
-        fs::write(repo.path().join("note.txt"), "dirty\n").unwrap();
         let cfg = test_config(dir.path());
+        let started_path = dir.path().join("codex-started");
         let codex = CodexConfig {
-            bin: PathBuf::from("/bin/false"),
+            bin: executable(
+                dir.path().join("codex-should-not-start"),
+                &format!(
+                    "#!/bin/sh\nprintf started > \"{}\"\n",
+                    started_path.display()
+                ),
+            ),
             workdir: dir.path().to_path_buf(),
             default_model: "gpt-test".to_string(),
             xdg_config_home: cfg.xdg_config_home.clone(),
@@ -1174,22 +1121,97 @@ mod tests {
 
         let got = git_status_short_summary(&codex, &cfg, "gateway", repo.path());
 
-        assert_eq!(got, "1 changed: 1 untracked");
+        assert_eq!(got, "✅ Clean");
+        assert!(!started_path.exists());
+    }
+
+    #[test]
+    fn dirty_git_status_retries_once_then_returns_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dirty_untracked_repo("semantic change\n");
+        let cfg = test_config(dir.path());
+        let attempts_path = dir.path().join("attempts");
+        let codex = CodexConfig {
+            bin: executable(
+                dir.path().join("codex-summary"),
+                &format!(
+                    "#!/bin/sh\nattempt=0\nif [ -f \"{}\" ]; then attempt=$(tr -d '\\n' < \"{}\"); fi\nattempt=$((attempt + 1))\nprintf '%s' \"$attempt\" > \"{}\"\nif [ \"$attempt\" -eq 1 ]; then exit 1; fi\noutput_path=''\nprevious=''\nfor argument in \"$@\"; do\n  if [ \"$previous\" = '--output-last-message' ]; then output_path=\"$argument\"; fi\n  previous=\"$argument\"\ndone\nprintf '✨ Semantic summary\\n' > \"$output_path\"\n",
+                    attempts_path.display(),
+                    attempts_path.display(),
+                    attempts_path.display()
+                ),
+            ),
+            workdir: dir.path().to_path_buf(),
+            default_model: "gpt-test".to_string(),
+            xdg_config_home: cfg.xdg_config_home.clone(),
+        };
+
+        let got = git_status_short_summary(&codex, &cfg, "gateway", repo.path());
+
+        assert_eq!(got, "✨ Semantic summary");
+        assert_eq!(fs::read_to_string(attempts_path).unwrap(), "2");
+    }
+
+    #[test]
+    fn dirty_git_status_retries_an_empty_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dirty_untracked_repo("semantic change\n");
+        let cfg = test_config(dir.path());
+        let attempts_path = dir.path().join("attempts");
+        let codex = CodexConfig {
+            bin: executable(
+                dir.path().join("codex-summary"),
+                &format!(
+                    "#!/bin/sh\nattempt=0\nif [ -f \"{}\" ]; then attempt=$(tr -d '\\n' < \"{}\"); fi\nattempt=$((attempt + 1))\nprintf '%s' \"$attempt\" > \"{}\"\noutput_path=''\nprevious=''\nfor argument in \"$@\"; do\n  if [ \"$previous\" = '--output-last-message' ]; then output_path=\"$argument\"; fi\n  previous=\"$argument\"\ndone\nif [ \"$attempt\" -eq 2 ]; then printf '🔧 Retried summary\\n' > \"$output_path\"; fi\n",
+                    attempts_path.display(),
+                    attempts_path.display(),
+                    attempts_path.display()
+                ),
+            ),
+            workdir: dir.path().to_path_buf(),
+            default_model: "gpt-test".to_string(),
+            xdg_config_home: cfg.xdg_config_home.clone(),
+        };
+
+        let got = git_status_short_summary(&codex, &cfg, "gateway", repo.path());
+
+        assert_eq!(got, "🔧 Retried summary");
+        assert_eq!(fs::read_to_string(attempts_path).unwrap(), "2");
+    }
+
+    #[test]
+    fn dirty_git_status_reports_error_after_two_failed_summaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dirty_untracked_repo("semantic change\n");
+        let cfg = test_config(dir.path());
+        let attempts_path = dir.path().join("attempts");
+        let codex = CodexConfig {
+            bin: executable(
+                dir.path().join("codex-summary"),
+                &format!(
+                    "#!/bin/sh\nattempt=0\nif [ -f \"{}\" ]; then attempt=$(tr -d '\\n' < \"{}\"); fi\nattempt=$((attempt + 1))\nprintf '%s' \"$attempt\" > \"{}\"\nexit 1\n",
+                    attempts_path.display(),
+                    attempts_path.display(),
+                    attempts_path.display()
+                ),
+            ),
+            workdir: dir.path().to_path_buf(),
+            default_model: "gpt-test".to_string(),
+            xdg_config_home: cfg.xdg_config_home.clone(),
+        };
+
+        let got = git_status_short_summary(&codex, &cfg, "gateway", repo.path());
+
+        assert!(got.starts_with("⚠️ Summary unavailable:"), "{got}");
+        assert!(!got.contains("changed"), "{got}");
+        assert!(!got.contains("untracked"), "{got}");
+        assert_eq!(fs::read_to_string(attempts_path).unwrap(), "2");
     }
 
     #[test]
     fn dirty_git_status_reports_context_errors_without_local_fallback() {
         let dir = tempfile::tempdir().unwrap();
-        let repo = tempfile::tempdir().unwrap();
-        assert!(Command::new("git")
-            .arg("init")
-            .arg(repo.path())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .unwrap()
-            .success());
-        fs::write(repo.path().join("note.txt"), "dirty\n").unwrap();
+        let repo = dirty_untracked_repo("semantic change\n");
         let cfg = test_config(dir.path());
         fs::remove_file(cfg.xdg_config_home.join("gateway/AGENTS.md")).unwrap();
         let started_path = dir.path().join("codex-started");
@@ -1208,9 +1230,13 @@ mod tests {
 
         let got = git_status_short_summary(&codex, &cfg, "gateway", repo.path());
 
-        assert!(got.starts_with("error: read gateway context file"), "{got}");
+        assert!(
+            got.starts_with("⚠️ Summary unavailable: read gateway context file"),
+            "{got}"
+        );
         assert!(got.contains("AGENTS.md"), "{got}");
-        assert!(!got.contains("1 changed: 1 untracked"), "{got}");
+        assert!(!got.contains("changed"), "{got}");
+        assert!(!got.contains("untracked"), "{got}");
         assert!(!started_path.exists());
     }
 
@@ -1222,25 +1248,80 @@ mod tests {
 
         assert!(got.contains("actual content changes"));
         assert!(got.contains("one concise fragment"));
+        assert!(got.contains("one relevant emoji icon"));
         assert!(got.contains("not file names or dirty-status codes"));
+        assert!(got.contains("untracked file contents"));
         assert!(got.contains("unstaged patch:\n+new behavior"));
     }
 
     #[test]
-    fn limit_git_summary_input_marks_truncated_text() {
-        let text = "a".repeat(MAX_GIT_SUMMARY_INPUT_CHARS + 1);
+    fn git_summary_input_keeps_the_complete_diff() {
+        let repo = tempfile::tempdir().unwrap();
+        assert!(Command::new("git")
+            .arg("init")
+            .arg(repo.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success());
+        fs::write(repo.path().join("large.txt"), "before\n").unwrap();
+        assert!(Command::new("git")
+            .args(["-C"])
+            .arg(repo.path())
+            .args(["add", "large.txt"])
+            .status()
+            .unwrap()
+            .success());
+        let content = "a".repeat(12_001);
+        fs::write(repo.path().join("large.txt"), &content).unwrap();
 
-        let got = limit_git_summary_input(&text);
+        let got = git_summary_input(repo.path(), &["AM large.txt".to_string()]).unwrap();
 
-        assert!(got.ends_with("[diff truncated]"));
-        assert!(got.len() > MAX_GIT_SUMMARY_INPUT_CHARS);
+        assert!(got.contains(&content));
+        assert!(!got.contains("[diff truncated]"));
     }
 
     #[test]
-    fn concise_git_summary_uses_first_non_empty_clean_line() {
+    fn git_summary_input_includes_untracked_file_contents() {
+        let repo = dirty_untracked_repo("semantic change\n");
+
+        let got = git_summary_input(repo.path(), &["?? note.txt".to_string()]).unwrap();
+
+        assert!(got.contains("untracked file note.txt:\nsemantic change"));
+    }
+
+    #[test]
+    fn git_summary_input_does_not_follow_untracked_symlinks() {
+        let repo = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = "outside-repository-secret";
+        let target = outside.path().join("secret.txt");
+        fs::write(&target, secret).unwrap();
+        std::os::unix::fs::symlink(&target, repo.path().join("link")).unwrap();
+        assert!(Command::new("git")
+            .arg("init")
+            .arg(repo.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success());
+
+        let got = git_summary_input(repo.path(), &["?? link".to_string()]).unwrap();
+
+        assert!(!got.contains(secret));
+        assert!(got.contains("untracked symlink link"));
+    }
+
+    #[test]
+    fn concise_git_summary_keeps_complete_output_and_ensures_an_icon() {
+        let summary = "x".repeat(181);
+
+        assert_eq!(concise_git_summary(&summary), Some(format!("📝 {summary}")));
         assert_eq!(
-            concise_git_summary("\n  `status summary`  \nextra"),
-            Some("status summary".to_string())
+            concise_git_summary("✨ Full semantic summary"),
+            Some("✨ Full semantic summary".to_string())
         );
         assert_eq!(concise_git_summary(" \n\t"), None);
     }
@@ -1286,7 +1367,7 @@ mod tests {
 
         let got = git_status_short_summary(&codex, &cfg, "gateway", repo.path());
 
-        assert_eq!(got, "codex-powered summary");
+        assert_eq!(got, "📝 codex-powered summary");
         let args = fs::read_to_string(args_path).unwrap();
         assert!(args
             .lines()
@@ -1295,6 +1376,8 @@ mod tests {
             .any(|pair| pair == ["-m", "gpt-light"]));
         let prompt = fs::read_to_string(prompt_path).unwrap();
         assert!(prompt.contains("actual content changes"));
+        assert!(prompt.contains("before"));
+        assert!(prompt.contains("after"));
     }
 
     #[test]
@@ -1638,6 +1721,20 @@ exit 2
         let (lock, cvar) = &**gate;
         *lock.lock().unwrap() = true;
         cvar.notify_all();
+    }
+
+    fn dirty_untracked_repo(content: &str) -> tempfile::TempDir {
+        let repo = tempfile::tempdir().unwrap();
+        assert!(Command::new("git")
+            .arg("init")
+            .arg(repo.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success());
+        fs::write(repo.path().join("note.txt"), content).unwrap();
+        repo
     }
 
     fn test_config(root: &Path) -> Config {
