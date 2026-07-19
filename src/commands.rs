@@ -80,6 +80,12 @@ pub const DIRECTIVE_SPECS: &[DirectiveSpec] = &[
         summary: "start a fresh Codex session",
     },
     DirectiveSpec {
+        directive: Directive::Status,
+        icon: "📊",
+        usage: "",
+        summary: "show Codex, gateway, and system status",
+    },
+    DirectiveSpec {
         directive: Directive::List,
         icon: "📚",
         usage: "",
@@ -102,12 +108,6 @@ pub const DIRECTIVE_SPECS: &[DirectiveSpec] = &[
         icon: "🧠",
         usage: " [index]",
         summary: "choose a configured provider/model",
-    },
-    DirectiveSpec {
-        directive: Directive::Status,
-        icon: "📊",
-        usage: "",
-        summary: "show Codex, gateway, and system status",
     },
     DirectiveSpec {
         directive: Directive::Heartbeat,

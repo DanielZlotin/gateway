@@ -175,11 +175,11 @@ Sessions are kept separately per chat, and commands are case-insensitive.
 🔊 /voice [on|off] - toggle spoken audio replies
 📦 /update - update gateway, tools, and setup
 ✨ /new - start a fresh Codex session
+📊 /status - show Codex, gateway, and system status
 📚 /list - list saved sessions
 ↩️ /resume [SESSION_OR_NAME|index] - list or resume a saved session
 🏷️ /rename [NAME] - rename the current session
 🧠 /model [index] - choose a configured provider/model
-📊 /status - show Codex, gateway, and system status
 🫀 /heartbeat - run heartbeat and print result
 📜 /log [lines] - send recent gateway logs
 🔁 /restart - restart the gateway service
