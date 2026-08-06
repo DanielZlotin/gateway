@@ -3679,9 +3679,9 @@ printf 'session id: session-12345678\n' >&2
         assert!(!script.contains("brew upgrade --yes"));
         assert!(script.contains("brew cleanup"));
         assert!(script.contains("curl -sSfL \"$gateway_foundry_installer_url\" | bash"));
-        assert!(script.contains("git pull"));
+        assert!(script.contains("git pull --rebase"));
         assert!(script.contains("./setup"));
-        assert!(script.contains("gateway_step git git pull"));
+        assert!(script.contains("gateway_step git git pull --rebase"));
         assert!(script.contains("gateway_step brew-update brew update"));
         assert!(script.contains("gateway_step brew-upgrade brew upgrade"));
         assert!(!script.contains("brew upgrade --yes"));
@@ -3692,7 +3692,7 @@ printf 'session id: session-12345678\n' >&2
         assert!(script.contains("gateway_update_version=\"$5\""));
         assert!(script.contains("gateway_update_log=\"${gateway_update_lock:h}/logs/gateway.log\""));
         assert!(!script.contains("logs/update.log"));
-        let git_pull = script.find("git pull").unwrap();
+        let git_pull = script.find("git pull --rebase").unwrap();
         let brew_update = script.find("brew update").unwrap();
         let brew_upgrade = script.find("brew upgrade").unwrap();
         let brew_cleanup = script.find("brew cleanup").unwrap();

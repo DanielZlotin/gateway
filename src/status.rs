@@ -351,13 +351,6 @@ fn unavailable_git_summary(error: &str) -> String {
 
 fn git_summary_input(path: &Path, lines: &[String]) -> Result<String, String> {
     let mut sections = vec![format!("status:\n{}", lines.join("\n"))];
-    push_git_output_section(
-        path,
-        &mut sections,
-        "staged stat",
-        &["diff", "--cached", "--stat"],
-    )?;
-    push_git_output_section(path, &mut sections, "unstaged stat", &["diff", "--stat"])?;
     push_git_output_section(path, &mut sections, "staged patch", &["diff", "--cached"])?;
     push_git_output_section(path, &mut sections, "unstaged patch", &["diff"])?;
     push_untracked_file_sections(path, &mut sections)?;
@@ -1278,6 +1271,10 @@ mod tests {
 
         let got = git_summary_input(repo.path(), &["AM large.txt".to_string()]).unwrap();
 
+        assert!(got.contains("staged patch:"));
+        assert!(got.contains("unstaged patch:"));
+        assert!(!got.contains("staged stat:"));
+        assert!(!got.contains("unstaged stat:"));
         assert!(got.contains(&content));
         assert!(!got.contains("[diff truncated]"));
     }

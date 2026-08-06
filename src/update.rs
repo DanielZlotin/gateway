@@ -32,7 +32,7 @@ gateway_step() {
 gateway_log "ℹ️" "📦 update start"
 cd "$gateway_update_root" &&
   export HOMEBREW_NO_ASK=1 &&
-  gateway_step git git pull &&
+  gateway_step git git pull --rebase &&
   { [[ "$(git -C "$XDG_CONFIG_HOME" rev-parse --is-inside-work-tree 2>/dev/null)" != true ]] || gateway_step xdg-git git -C "$XDG_CONFIG_HOME" pull --rebase; } &&
   gateway_step brew-update brew update &&
   gateway_step brew-upgrade brew upgrade &&
@@ -328,6 +328,7 @@ mod tests {
         assert!(script.contains("gateway_update_root=\"$3\""));
         assert!(script.contains("print -r -- \"pid $$\" > \"$gateway_update_lock\""));
         assert!(script.contains("export HOMEBREW_NO_ASK=1"));
+        assert!(script.contains("gateway_step git git pull --rebase"));
         assert!(script.contains(
             "[[ \"$(git -C \"$XDG_CONFIG_HOME\" rev-parse --is-inside-work-tree 2>/dev/null)\" != true ]]"
         ));
@@ -354,7 +355,7 @@ mod tests {
         assert!(args
             .iter()
             .any(|arg| *arg == OsStr::new(FOUNDRY_INSTALLER_URL)));
-        let gateway_pull = script.find("gateway_step git git pull").unwrap();
+        let gateway_pull = script.find("gateway_step git git pull --rebase").unwrap();
         let xdg_pull = script
             .find("gateway_step xdg-git git -C \"$XDG_CONFIG_HOME\" pull --rebase")
             .unwrap();
