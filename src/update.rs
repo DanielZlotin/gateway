@@ -33,6 +33,7 @@ gateway_log "ℹ️" "📦 update start"
 cd "$gateway_update_root" &&
   export HOMEBREW_NO_ASK=1 &&
   gateway_step git git pull &&
+  { [[ "$(git -C "$XDG_CONFIG_HOME" rev-parse --is-inside-work-tree 2>/dev/null)" != true ]] || gateway_step xdg-git git -C "$XDG_CONFIG_HOME" pull --rebase; } &&
   gateway_step brew-update brew update &&
   gateway_step brew-upgrade brew upgrade &&
   gateway_step brew-cleanup brew cleanup &&
@@ -327,6 +328,10 @@ mod tests {
         assert!(script.contains("gateway_update_root=\"$3\""));
         assert!(script.contains("print -r -- \"pid $$\" > \"$gateway_update_lock\""));
         assert!(script.contains("export HOMEBREW_NO_ASK=1"));
+        assert!(script.contains(
+            "[[ \"$(git -C \"$XDG_CONFIG_HOME\" rev-parse --is-inside-work-tree 2>/dev/null)\" != true ]]"
+        ));
+        assert!(script.contains("gateway_step xdg-git git -C \"$XDG_CONFIG_HOME\" pull --rebase"));
         assert!(script.contains("gateway_step brew-upgrade brew upgrade"));
         assert!(!script.contains("brew upgrade --yes"));
         assert!(script.contains("gateway_brewfile=\"$XDG_CONFIG_HOME/homebrew/Brewfile\""));
@@ -349,11 +354,18 @@ mod tests {
         assert!(args
             .iter()
             .any(|arg| *arg == OsStr::new(FOUNDRY_INSTALLER_URL)));
+        let gateway_pull = script.find("gateway_step git git pull").unwrap();
+        let xdg_pull = script
+            .find("gateway_step xdg-git git -C \"$XDG_CONFIG_HOME\" pull --rebase")
+            .unwrap();
+        let brew_update = script.find("brew update").unwrap();
         let brew_cleanup = script.find("brew cleanup").unwrap();
         let brewsave = script
             .find("brew bundle dump --global --force --describe")
             .unwrap();
         let foundry_update = script.find("📦 update foundry").unwrap();
+        assert!(gateway_pull < xdg_pull);
+        assert!(xdg_pull < brew_update);
         assert!(brew_cleanup < brewsave);
         assert!(brewsave < foundry_update);
     }
