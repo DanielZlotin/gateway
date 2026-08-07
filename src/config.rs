@@ -13,7 +13,7 @@ pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
 pub const DEFAULT_LIGHT_CODEX_MODEL: &str = "gpt-5.3-codex-spark";
 pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-4-8";
 pub const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-5.5";
-pub const DEFAULT_CODEX_TIMEOUT_MINS: u64 = 30;
+pub const DEFAULT_CODEX_TIMEOUT_MINS: u64 = 60;
 pub const DEFAULT_HEARTBEAT: &str = "1d";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -622,7 +622,7 @@ mod tests {
             ]
         );
         assert_eq!(cfg.queue_depth, 8);
-        assert_eq!(cfg.codex_timeout, Duration::from_secs(30 * 60));
+        assert_eq!(cfg.codex_timeout, Duration::from_secs(60 * 60));
 
         let text = fs::read_to_string(&cfg.gateway_config_file).unwrap();
         assert!(text.contains(r#""models""#));
@@ -903,9 +903,10 @@ mod tests {
 
         let cfg = load_gateway_config(&path).unwrap();
 
+        assert_eq!(DEFAULT_CODEX_TIMEOUT_MINS, 60);
         assert_eq!(cfg.timeout_mins, DEFAULT_CODEX_TIMEOUT_MINS);
         let text = fs::read_to_string(&path).unwrap();
-        assert!(text.contains("\"timeout_mins\": 30"));
+        assert!(text.contains("\"timeout_mins\": 60"));
     }
 
     #[test]

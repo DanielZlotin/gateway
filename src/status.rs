@@ -12,11 +12,11 @@ use std::process::{Child, Command, Output, Stdio};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-const CODEX_USAGE_TIMEOUT: Duration = Duration::from_secs(5);
+const CODEX_USAGE_TIMEOUT: Duration = Duration::from_secs(60);
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const FASTFETCH_TIMEOUT: Duration = Duration::from_secs(5);
 const GIT_STATUS_TIMEOUT: Duration = Duration::from_secs(2);
-const GIT_SUMMARY_TIMEOUT: Duration = Duration::from_secs(5);
+const GIT_SUMMARY_TIMEOUT: Duration = Duration::from_secs(60);
 const HEARTBEAT_STATUS_LABEL: &str = "🫀 Heartbeat";
 const HEARTBEAT_TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 const FASTFETCH_CONFIG: &str = r#"{
@@ -1378,8 +1378,9 @@ mod tests {
     }
 
     #[test]
-    fn git_summary_timeout_keeps_status_responsive() {
-        assert!(GIT_SUMMARY_TIMEOUT <= Duration::from_secs(5));
+    fn status_codex_timeouts_are_sixty_seconds() {
+        assert_eq!(CODEX_USAGE_TIMEOUT, Duration::from_secs(60));
+        assert_eq!(GIT_SUMMARY_TIMEOUT, Duration::from_secs(60));
     }
 
     #[test]
