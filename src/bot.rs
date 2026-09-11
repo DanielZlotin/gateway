@@ -2422,7 +2422,6 @@ mod tests {
     use crate::provider::Provider;
     use crate::telegram::{Chat, Document, PhotoSize, User, Voice};
     use std::collections::VecDeque;
-    use std::ffi::OsStr;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::os::unix::fs::PermissionsExt;
@@ -3640,80 +3639,6 @@ printf 'session id: session-12345678\n' >&2
                     if text.contains("📦 Gateway version:")
             )
         }));
-    }
-
-    #[test]
-    fn gateway_update_command_submits_stable_launchd_job_with_lock_cleanup() {
-        let lock_file = Path::new("/tmp/gateway-state/update.lock");
-        let command = crate::update::gateway_update_command(lock_file);
-        let args = command.get_args().collect::<Vec<_>>();
-        let foundry_installer =
-            "https://raw.githubusercontent.com/foundry-rs/foundry/refs/heads/master/foundryup/foundryup";
-
-        assert_eq!(command.get_program(), OsStr::new("/bin/launchctl"));
-        assert_eq!(
-            &args[..8],
-            vec![
-                OsStr::new("submit"),
-                OsStr::new("-l"),
-                OsStr::new("ai.gateway.update"),
-                OsStr::new("-o"),
-                OsStr::new("/dev/null"),
-                OsStr::new("-e"),
-                OsStr::new("/dev/null"),
-                OsStr::new("--"),
-            ]
-        );
-        assert_eq!(args[8], OsStr::new("/bin/zsh"));
-        assert_eq!(args[9], OsStr::new("-lc"));
-        let script = args[10].to_string_lossy();
-        assert!(script.contains("gateway_update_label=\"$1\""));
-        assert!(script.contains("gateway_update_lock=\"$2\""));
-        assert!(script.contains("gateway_update_root=\"$3\""));
-        assert!(script.contains("gateway_foundry_installer_url=\"$4\""));
-        assert!(script.contains("print -r -- \"pid $$\" > \"$gateway_update_lock\""));
-        assert!(script.contains("set -o pipefail"));
-        assert!(script.contains("export HOMEBREW_NO_ASK=1"));
-        assert!(script.contains("brew update"));
-        assert!(script.contains("gateway_step brew-upgrade brew upgrade"));
-        assert!(!script.contains("brew upgrade --yes"));
-        assert!(script.contains("brew cleanup"));
-        assert!(script.contains("curl -sSfL \"$gateway_foundry_installer_url\" | bash"));
-        assert!(script.contains("git pull --rebase"));
-        assert!(script.contains("./setup"));
-        assert!(script.contains("gateway_step git git pull --rebase"));
-        assert!(script.contains("gateway_step brew-update brew update"));
-        assert!(script.contains("gateway_step brew-upgrade brew upgrade"));
-        assert!(!script.contains("brew upgrade --yes"));
-        assert!(script.contains("gateway_step brew-cleanup brew cleanup"));
-        assert!(script.contains("📦 update foundry"));
-        assert!(script.contains("gateway_step setup ./setup"));
-        assert!(script.contains("gateway_update_code=$?"));
-        assert!(script.contains("gateway_update_version=\"$5\""));
-        assert!(script.contains("gateway_update_log=\"${gateway_update_lock:h}/logs/gateway.log\""));
-        assert!(!script.contains("logs/update.log"));
-        let git_pull = script.find("git pull --rebase").unwrap();
-        let brew_update = script.find("brew update").unwrap();
-        let brew_upgrade = script.find("brew upgrade").unwrap();
-        let brew_cleanup = script.find("brew cleanup").unwrap();
-        let foundry_update = script.find("📦 update foundry").unwrap();
-        let setup = script.find("./setup").unwrap();
-        assert!(git_pull < brew_update);
-        assert!(brew_update < brew_upgrade);
-        assert!(brew_upgrade < brew_cleanup);
-        assert!(brew_cleanup < foundry_update);
-        assert!(foundry_update < setup);
-        let lock_cleanup = script.find("rm -f \"$gateway_update_lock\"").unwrap();
-        let label_cleanup = script
-            .find("/bin/launchctl remove \"$gateway_update_label\"")
-            .unwrap();
-        assert!(lock_cleanup < label_cleanup);
-        assert_eq!(args[11], OsStr::new("gateway-update"));
-        assert_eq!(args[12], OsStr::new("ai.gateway.update"));
-        assert_eq!(args[13], OsStr::new("/tmp/gateway-state/update.lock"));
-        assert_eq!(args[14], OsStr::new(env!("CARGO_MANIFEST_DIR")));
-        assert_eq!(args[15], OsStr::new(foundry_installer));
-        assert_eq!(args[16], OsStr::new(env!("CARGO_PKG_VERSION")));
     }
 
     #[test]

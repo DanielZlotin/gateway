@@ -8,14 +8,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const GATEWAY_UPDATE_JOB_LABEL: &str = "ai.gateway.update";
 const GATEWAY_UPDATE_PENDING_LOCK_TTL_SECS: u64 = 300;
-const FOUNDRY_INSTALLER_URL: &str =
-    "https://raw.githubusercontent.com/foundry-rs/foundry/refs/heads/master/foundryup/foundryup";
-
 const GATEWAY_UPDATE_SCRIPT: &str = r#"gateway_update_label="$1"
 gateway_update_lock="$2"
 gateway_update_root="$3"
-gateway_foundry_installer_url="$4"
-gateway_update_version="$5"
+gateway_update_version="$4"
 gateway_update_log="${gateway_update_lock:h}/logs/gateway.log"
 set -o pipefail
 mkdir -p "${gateway_update_log:h}"
@@ -42,8 +38,7 @@ cd "$gateway_update_root" &&
   gateway_brewfile="$XDG_CONFIG_HOME/homebrew/Brewfile" &&
   mkdir -p "${gateway_brewfile:h}" &&
   HOMEBREW_BUNDLE_FILE_GLOBAL="$gateway_brewfile" brew bundle dump --global --force --describe >/dev/null 2>&1 &&
-  gateway_log "ℹ️" "📦 update foundry" &&
-  (curl -sSfL "$gateway_foundry_installer_url" | bash) >/dev/null 2>&1 &&
+  { command -v cast >/dev/null && command -v forge >/dev/null || gateway_step foundry brew install foundry; } &&
   gateway_step setup ./setup
 gateway_update_code=$?
 if [[ "$gateway_update_code" -eq 0 ]]; then
@@ -252,7 +247,6 @@ pub(crate) fn gateway_update_command(lock_file: &Path) -> Command {
         ])
         .arg(lock_file)
         .arg(gateway_root())
-        .arg(FOUNDRY_INSTALLER_URL)
         .arg(env!("CARGO_PKG_VERSION"));
     command
 }
@@ -294,7 +288,6 @@ fn gateway_update_script_command(lock_file: &Path, label: Option<&str>) -> Comma
         ])
         .arg(lock_file)
         .arg(gateway_root())
-        .arg(FOUNDRY_INSTALLER_URL)
         .arg(env!("CARGO_PKG_VERSION"));
     command
 }
@@ -340,21 +333,21 @@ mod tests {
         assert!(script.contains(
             "HOMEBREW_BUNDLE_FILE_GLOBAL=\"$gateway_brewfile\" brew bundle dump --global --force --describe"
         ));
-        assert!(script.contains("gateway_foundry_installer_url=\"$4\""));
-        assert!(script.contains("📦 update foundry"));
-        assert!(script.contains("curl -sSfL \"$gateway_foundry_installer_url\" | bash"));
+        assert!(script.contains("command -v cast >/dev/null"));
+        assert!(script.contains("command -v forge >/dev/null"));
+        assert!(script.contains("gateway_step foundry brew install foundry"));
+        assert!(!script.contains("curl"));
         assert!(script.contains("./setup"));
         assert!(script.contains("rm -f \"$gateway_update_lock\""));
         assert!(script.contains(
             "[[ -z \"$gateway_update_label\" ]] || /bin/launchctl remove \"$gateway_update_label\""
         ));
         assert!(script.contains("exit \"$gateway_update_code\""));
-        assert!(script.contains("gateway_update_version=\"$5\""));
+        assert!(script.contains("gateway_update_version=\"$4\""));
         assert!(script.contains("gateway_update_log=\"${gateway_update_lock:h}/logs/gateway.log\""));
         assert!(!script.contains("logs/update.log"));
-        assert!(args
-            .iter()
-            .any(|arg| *arg == OsStr::new(FOUNDRY_INSTALLER_URL)));
+        assert_eq!(args.len(), 16);
+        assert_eq!(args[15], OsStr::new(env!("CARGO_PKG_VERSION")));
         let gateway_pull = script.find("gateway_step git git pull --rebase").unwrap();
         let xdg_pull = script
             .find("gateway_step xdg-git git -C \"$XDG_CONFIG_HOME\" pull --rebase")
@@ -364,7 +357,9 @@ mod tests {
         let brewsave = script
             .find("brew bundle dump --global --force --describe")
             .unwrap();
-        let foundry_update = script.find("📦 update foundry").unwrap();
+        let foundry_update = script
+            .find("gateway_step foundry brew install foundry")
+            .unwrap();
         assert!(gateway_pull < xdg_pull);
         assert!(xdg_pull < brew_update);
         assert!(brew_cleanup < brewsave);
