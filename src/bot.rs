@@ -28,7 +28,7 @@ const POLL_REQUEST_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const SESSION_WORKER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const TELEGRAM_GET_UPDATES_CONFLICT_MARKER: &str = "terminated by other getUpdates request";
 const VOICE_TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(120);
-const VOICE_TRANSCRIPTION_MODEL: &str = "gateway/whisper/ggml-large-v3.bin";
+const VOICE_TRANSCRIPTION_MODEL: &str = "gateway/whisper/ggml-large-v3-turbo.bin";
 const VOICE_TRANSCRIPTION_LANGUAGE: &str = "en";
 const VOICE_STATUS_MESSAGE: &str = "🎙️ Transcribing…";
 const THINKING_MESSAGE: &str = "🫧 Thinking…";
@@ -3194,7 +3194,7 @@ printf ' transcribed text\n' > "$out.txt"
     }
 
     #[test]
-    #[ignore = "requires whisper-cli, ffmpeg, large-v3 model, and GATEWAY_TEST_AUDIO"]
+    #[ignore = "requires whisper-cli, ffmpeg, large-v3-turbo model, and GATEWAY_TEST_AUDIO"]
     fn transcribe_real_audio() {
         let audio = PathBuf::from(std::env::var("GATEWAY_TEST_AUDIO").unwrap());
         let dir = tempdir().unwrap();

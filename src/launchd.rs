@@ -441,7 +441,7 @@ mod tests {
         ));
         assert!(brew_log.contains("install --cask codex"));
         assert!(root
-            .join("data/gateway/whisper/ggml-large-v3.bin")
+            .join("data/gateway/whisper/ggml-large-v3-turbo.bin")
             .is_file());
         assert!(root
             .join("data/gateway/voicebox/Voicebox.app/Contents/MacOS/Voicebox")

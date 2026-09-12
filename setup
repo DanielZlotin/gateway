@@ -184,15 +184,15 @@ gateway_install_voicebox_app() {
 
 gateway_install_voicebox_app
 
-gateway_whisper_model="$gateway_xdg_data_home/gateway/whisper/ggml-large-v3.bin"
+gateway_whisper_model="$gateway_xdg_data_home/gateway/whisper/ggml-large-v3-turbo.bin"
 if [[ ! -s "$gateway_whisper_model" ]]; then
   mkdir -p "$gateway_xdg_data_home/gateway/whisper"
   gateway_whisper_download="$gateway_whisper_model.$$"
-  if curl -L --fail -o "$gateway_whisper_download" "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin" && [[ -s "$gateway_whisper_download" ]]; then
+  if curl -L --fail -o "$gateway_whisper_download" "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin" && [[ -s "$gateway_whisper_download" ]]; then
     mv "$gateway_whisper_download" "$gateway_whisper_model"
   else
     rm -f "$gateway_whisper_download"
-    print -u2 "setup could not download Whisper large-v3 model"
+    print -u2 "setup could not download Whisper large-v3-turbo model"
     exit 69
   fi
 fi
