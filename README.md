@@ -194,7 +194,11 @@ Sessions are kept separately per chat, and commands are case-insensitive.
 3. 🏷️ `/rename` without a name asks Codex to create one.
 4. 🫧 Bot prompts stream progress and split long final answers.
 5. 📎 Photos and image documents are attached; other documents become file paths.
-6. 🎙️ Voice messages are transcribed locally with Whisper `large`.
+6. 🎙️ Voice messages are transcribed locally with `whisper-cli` (Homebrew `whisper-cpp`)
+   using unquantized `large-v3` and English (`en`). Setup downloads the model
+   (~3 GB) to `$XDG_DATA_HOME/gateway/whisper/ggml-large-v3.bin` once. FFmpeg
+   converts Telegram audio to 16 kHz mono PCM WAV; conversion and transcription
+   share a 120-second timeout. Temporary conversion files are removed afterward.
 7. 🔊 `/voice` toggles spoken replies for the current session. `/new`, `/resume`,
    and model changes disable voice mode.
    Voice replies try `tts`, then local Voicebox.

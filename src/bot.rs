@@ -28,14 +28,14 @@ const POLL_REQUEST_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const SESSION_WORKER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const TELEGRAM_GET_UPDATES_CONFLICT_MARKER: &str = "terminated by other getUpdates request";
 const VOICE_TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(120);
-const VOICE_TRANSCRIPTION_MODEL: &str = "large";
+const VOICE_TRANSCRIPTION_MODEL: &str = "gateway/whisper/ggml-large-v3.bin";
 const VOICE_TRANSCRIPTION_LANGUAGE: &str = "en";
 const VOICE_STATUS_MESSAGE: &str = "🎙️ Transcribing…";
 const THINKING_MESSAGE: &str = "🫧 Thinking…";
 const SPEAKING_MESSAGE: &str = "🔊 Speaking…";
 const UPDATE_TYPING_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const UPDATE_TYPING_MAX_DURATION: Duration = Duration::from_secs(60 * 60);
-const WHISPER_BIN: &str = "whisper";
+const WHISPER_BIN: &str = "whisper-cli";
 
 trait TelegramApi: Clone + Send + 'static {
     fn get_updates(&self, offset: i64, timeout_sec: u64) -> Result<Vec<Update>, String>;
@@ -884,7 +884,7 @@ fn download_attachments_and_queue_job<T: TelegramApi>(
         attachment_specs,
         stream_message_id,
         delivery,
-        transcribe_voice_attachment,
+        |path| transcribe_voice_attachment(cfg, path),
     )
 }
 
@@ -984,12 +984,14 @@ fn prompt_text_with_voice_transcripts(
     )
 }
 
-fn transcribe_voice_attachment(path: &Path) -> Result<String, String> {
+fn transcribe_voice_attachment(cfg: &Config, path: &Path) -> Result<String, String> {
     let output_dir = path
         .parent()
         .ok_or_else(|| "voice attachment has no parent directory".to_string())?;
     transcribe_voice_with_whisper(
         Path::new(WHISPER_BIN),
+        Path::new("ffmpeg"),
+        &cfg.xdg_data_home.join(VOICE_TRANSCRIPTION_MODEL),
         path,
         output_dir,
         VOICE_TRANSCRIPTION_TIMEOUT,
@@ -998,47 +1000,44 @@ fn transcribe_voice_attachment(path: &Path) -> Result<String, String> {
 
 fn transcribe_voice_with_whisper(
     whisper: &Path,
+    ffmpeg: &Path,
+    model: &Path,
     audio_path: &Path,
     output_dir: &Path,
     timeout: Duration,
 ) -> Result<String, String> {
     fs::create_dir_all(output_dir).map_err(|err| format!("create whisper output dir: {err}"))?;
-    let stem = audio_path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "voice attachment has no file stem".to_string())?;
-    let transcript_path = output_dir.join(format!("{stem}.txt"));
-    let child = Command::new(whisper)
-        .args([
-            "--model",
-            VOICE_TRANSCRIPTION_MODEL,
-            "--language",
-            VOICE_TRANSCRIPTION_LANGUAGE,
-            "--output_format",
-            "txt",
-            "--output_dir",
-        ])
-        .arg(output_dir)
-        .arg(audio_path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| format!("start whisper: {err}"))?;
-    let (output, timed_out) = wait_for_command_with_timeout(child, timeout)?;
-    if timed_out {
-        return Err(format!("whisper timed out after {}s", timeout.as_secs()));
-    }
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let detail = if stderr.is_empty() {
-            output.status.to_string()
-        } else {
-            format!("{}: {stderr}", output.status)
-        };
-        return Err(format!("whisper exited with {detail}"));
-    }
-    let transcript = fs::read_to_string(&transcript_path)
+    let scratch = tempfile::tempdir_in(output_dir)
+        .map_err(|err| format!("create transcription dir: {err}"))?;
+    let wav = scratch.path().join("audio.wav");
+    let output_base = scratch.path().join("transcript");
+    let start = Instant::now();
+    run_transcription_command(
+        Command::new(ffmpeg)
+            .args(["-nostdin", "-y", "-loglevel", "error", "-i"])
+            .arg(audio_path)
+            .args(["-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le"])
+            .arg(&wav),
+        "ffmpeg",
+        timeout,
+    )?;
+    run_transcription_command(
+        Command::new(whisper)
+            .arg("--model")
+            .arg(model)
+            .args([
+                "--language",
+                VOICE_TRANSCRIPTION_LANGUAGE,
+                "--output-txt",
+                "--output-file",
+            ])
+            .arg(&output_base)
+            .arg("--file")
+            .arg(&wav),
+        "whisper-cli",
+        timeout.saturating_sub(start.elapsed()),
+    )?;
+    let transcript = fs::read_to_string(output_base.with_extension("txt"))
         .map_err(|err| format!("read whisper transcript: {err}"))?
         .trim()
         .to_string();
@@ -1046,6 +1045,34 @@ fn transcribe_voice_with_whisper(
         return Err("whisper produced no transcript".to_string());
     }
     Ok(transcript)
+}
+
+fn run_transcription_command(
+    command: &mut Command,
+    name: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    // File-backed stderr cannot fill a pipe while waiting for the process.
+    let stderr =
+        tempfile::NamedTempFile::new().map_err(|err| format!("create {name} stderr: {err}"))?;
+    let child = command
+        .stdout(Stdio::null())
+        .stderr(stderr.reopen().map_err(|err| err.to_string())?)
+        .spawn()
+        .map_err(|err| format!("start {name}: {err}"))?;
+    let (output, timed_out) = wait_for_command_with_timeout(child, timeout)?;
+    if timed_out {
+        return Err(format!("{name} timed out after {}s", timeout.as_secs()));
+    }
+    if !output.status.success() {
+        let detail = fs::read_to_string(stderr.path()).unwrap_or_default();
+        return Err(format!(
+            "{name} exited with {}: {}",
+            output.status,
+            detail.trim()
+        ));
+    }
+    Ok(())
 }
 
 fn wait_for_command_with_timeout(
@@ -3127,45 +3154,95 @@ mod tests {
     #[test]
     fn transcribe_voice_with_whisper_reads_txt_output() {
         let dir = tempdir().unwrap();
-        let audio = dir.path().join("voice-message.ogg");
-        let output_dir = dir.path().join("whisper");
+        let audio = dir.path().join("voice message.ogg");
         fs::write(&audio, b"voice bytes").unwrap();
-        let whisper = executable(
-            dir.path().join("whisper-bin"),
+        let ffmpeg = executable(
+            dir.path().join("ffmpeg"),
             r#"#!/bin/sh
-outdir=""
-prev=""
-audio=""
-for arg in "$@"; do
-  if [ "$prev" = "--output_dir" ]; then outdir="$arg"; fi
-  prev="$arg"
-  audio="$arg"
-done
-base=$(basename "$audio")
-stem=${base%.*}
-mkdir -p "$outdir"
-printf '%s\n' "$@" > "$outdir/args.txt"
-printf 'transcribed text\n' > "$outdir/$stem.txt"
+while [ "$#" -gt 1 ]; do shift; done
+printf 'converted audio' > "$1"
 "#,
         );
+        let whisper = executable(
+            dir.path().join("whisper"),
+            r#"#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --model) [ "$2" = "model.bin" ] || exit 2; shift 2 ;;
+    --language) [ "$2" = "en" ] || exit 3; shift 2 ;;
+    --output-txt) shift ;;
+    --output-file) out="$2"; shift 2 ;;
+    --file) [ "$(cat "$2")" = 'converted audio' ] || exit 4; shift 2 ;;
+    *) exit 5 ;;
+  esac
+done
+printf ' transcribed text\n' > "$out.txt"
+"#,
+        );
+        assert_eq!(
+            transcribe_voice_with_whisper(
+                &whisper,
+                &ffmpeg,
+                Path::new("model.bin"),
+                &audio,
+                dir.path(),
+                Duration::from_secs(10)
+            )
+            .unwrap(),
+            "transcribed text"
+        );
+    }
 
-        let text =
-            transcribe_voice_with_whisper(&whisper, &audio, &output_dir, Duration::from_secs(10))
-                .unwrap();
+    #[test]
+    #[ignore = "requires whisper-cli, ffmpeg, large-v3 model, and GATEWAY_TEST_AUDIO"]
+    fn transcribe_real_audio() {
+        let audio = PathBuf::from(std::env::var("GATEWAY_TEST_AUDIO").unwrap());
+        let dir = tempdir().unwrap();
+        let model =
+            PathBuf::from(std::env::var("XDG_DATA_HOME").unwrap()).join(VOICE_TRANSCRIPTION_MODEL);
+        let started = Instant::now();
+        let text = transcribe_voice_with_whisper(
+            Path::new(WHISPER_BIN),
+            Path::new("ffmpeg"),
+            &model,
+            &audio,
+            dir.path(),
+            VOICE_TRANSCRIPTION_TIMEOUT,
+        )
+        .unwrap();
+        assert!(!text.is_empty());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+        println!("transcription ({:?}): {text}", started.elapsed());
+    }
 
-        assert_eq!(text, "transcribed text");
-        let args = fs::read_to_string(output_dir.join("args.txt")).unwrap();
-        let args = args.lines().collect::<Vec<_>>();
-        assert!(args.windows(2).any(|pair| pair == ["--model", "large"]));
-        assert!(args.windows(2).any(|pair| pair == ["--language", "en"]));
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["--output_format", "txt"]));
-        assert!(!args.contains(&"--task"));
-        assert!(args
-            .windows(2)
-            .any(|pair| pair == ["--output_dir", output_dir.to_str().unwrap()]));
-        assert_eq!(args.last().copied(), Some(audio.to_str().unwrap()));
+    #[test]
+    fn transcription_reports_process_and_output_failures() {
+        let dir = tempdir().unwrap();
+        let audio = dir.path().join("voice.ogg");
+        let success = executable(dir.path().join("success"), "#!/bin/sh\nexit 0\n");
+        let failure = executable(
+            dir.path().join("failure"),
+            "#!/bin/sh\necho broken >&2\nexit 2\n",
+        );
+        let slow = executable(dir.path().join("slow"), "#!/bin/sh\nexec sleep 10\n");
+        for (whisper, ffmpeg, expected) in [
+            (&success, &failure, "ffmpeg exited with"),
+            (&failure, &success, "whisper-cli exited with"),
+            (&success, &slow, "ffmpeg timed out"),
+            (&slow, &success, "whisper-cli timed out"),
+            (&success, &success, "read whisper transcript"),
+        ] {
+            let err = transcribe_voice_with_whisper(
+                whisper,
+                ffmpeg,
+                Path::new("model.bin"),
+                &audio,
+                dir.path(),
+                Duration::from_secs(2),
+            )
+            .unwrap_err();
+            assert!(err.contains(expected), "{err}");
+        }
     }
 
     #[test]

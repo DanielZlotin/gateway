@@ -122,7 +122,7 @@ mod tests {
         "parallel",
         "rg",
         "rustc",
-        "whisper",
+        "whisper-cli",
     ];
     const SETUP_HOMEBREW_CASK_TOOLS: &[&str] = &["codex"];
     const SETUP_SYSTEM_TOOLS: &[&str] = &[
@@ -387,7 +387,7 @@ mod tests {
         assert!(setup.contains("cargo|rustc) print -r -- rust ;;"));
         assert!(setup.contains("ffmpeg) print -r -- ffmpeg ;;"));
         assert!(setup.contains("rg) print -r -- ripgrep ;;"));
-        assert!(setup.contains("whisper) print -r -- openai-whisper ;;"));
+        assert!(setup.contains("whisper-cli) print -r -- whisper-cpp ;;"));
         assert!(setup.contains("codex) print -r -- codex ;;"));
         let cask_probe = ["brew", " info ", "--cask"].concat();
         assert!(!setup.contains(&cask_probe));
@@ -437,9 +437,12 @@ mod tests {
         );
         let brew_log = fs::read_to_string(brew_log).unwrap();
         assert!(brew_log.contains(
-            "install rust fastfetch ffmpeg fzf gh git go jq node parallel ripgrep openai-whisper"
+            "install rust fastfetch ffmpeg fzf gh git go jq node parallel ripgrep whisper-cpp"
         ));
         assert!(brew_log.contains("install --cask codex"));
+        assert!(root
+            .join("data/gateway/whisper/ggml-large-v3.bin")
+            .is_file());
         assert!(root
             .join("data/gateway/voicebox/Voicebox.app/Contents/MacOS/Voicebox")
             .exists());
@@ -560,7 +563,7 @@ mod tests {
          \t\tcase \"$gateway_formula\" in\n\
          \t\t\trust) print -r -- '#!/bin/zsh\nexit 0' > \"$GATEWAY_TEST_STUB_DIR/cargo\"; /bin/chmod +x \"$GATEWAY_TEST_STUB_DIR/cargo\"; gateway_command=rustc ;;\n\
          \t\t\tripgrep) gateway_command=rg ;;\n\
-         \t\t\topenai-whisper) gateway_command=whisper ;;\n\
+         \t\t\twhisper-cpp) gateway_command=whisper-cli ;;\n\
          \t\t\t*) gateway_command=\"$gateway_formula\" ;;\n\
          \t\tesac\n\
          \t\tprint -r -- '#!/bin/zsh\nexit 0' > \"$GATEWAY_TEST_STUB_DIR/$gateway_command\"\n\

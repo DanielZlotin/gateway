@@ -35,7 +35,7 @@ gateway_required_commands=(
   sed
   sleep
   tar
-  whisper
+  whisper-cli
   xargs
 )
 gateway_missing_commands=()
@@ -64,7 +64,7 @@ gateway_brew_formula_for_command() {
     node) print -r -- node ;;
     parallel) print -r -- parallel ;;
     rg) print -r -- ripgrep ;;
-    whisper) print -r -- openai-whisper ;;
+    whisper-cli) print -r -- whisper-cpp ;;
   esac
 }
 
@@ -183,6 +183,19 @@ gateway_install_voicebox_app() {
 }
 
 gateway_install_voicebox_app
+
+gateway_whisper_model="$gateway_xdg_data_home/gateway/whisper/ggml-large-v3.bin"
+if [[ ! -s "$gateway_whisper_model" ]]; then
+  mkdir -p "$gateway_xdg_data_home/gateway/whisper"
+  gateway_whisper_download="$gateway_whisper_model.$$"
+  if curl -L --fail -o "$gateway_whisper_download" "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin" && [[ -s "$gateway_whisper_download" ]]; then
+    mv "$gateway_whisper_download" "$gateway_whisper_model"
+  else
+    rm -f "$gateway_whisper_download"
+    print -u2 "setup could not download Whisper large-v3 model"
+    exit 69
+  fi
+fi
 
 gateway_label="ai.gateway"
 gateway_heartbeat_label="ai.gateway.heartbeat"
