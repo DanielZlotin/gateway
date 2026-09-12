@@ -17,9 +17,12 @@ installs the LaunchAgent, and restarts the bot.
 For local checks:
 
 ```zsh
-cargo test
 cargo build --release
+cargo test
 ```
+
+The test suite uses `whisper-cli`, `ffmpeg`, and the large-v3-turbo model installed
+by setup. The real transcription test uses bundled audio in `tests/fixtures/speech.ogg`.
 
 ## 🌱 Environment
 

@@ -3194,12 +3194,12 @@ printf ' transcribed text\n' > "$out.txt"
     }
 
     #[test]
-    #[ignore = "requires whisper-cli, ffmpeg, large-v3-turbo model, and GATEWAY_TEST_AUDIO"]
     fn transcribe_real_audio() {
-        let audio = PathBuf::from(std::env::var("GATEWAY_TEST_AUDIO").unwrap());
+        let audio = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/speech.ogg");
         let dir = tempdir().unwrap();
-        let model =
-            PathBuf::from(std::env::var("XDG_DATA_HOME").unwrap()).join(VOICE_TRANSCRIPTION_MODEL);
+        let model = crate::config::resolve_xdg_data_home(&crate::config::current_env())
+            .unwrap()
+            .join(VOICE_TRANSCRIPTION_MODEL);
         let started = Instant::now();
         let text = transcribe_voice_with_whisper(
             Path::new(WHISPER_BIN),
@@ -3210,7 +3210,10 @@ printf ' transcribed text\n' > "$out.txt"
             VOICE_TRANSCRIPTION_TIMEOUT,
         )
         .unwrap();
-        assert!(!text.is_empty());
+        assert_eq!(
+            text.trim_end_matches('.'),
+            "The quick brown fox jumps over the lazy dog"
+        );
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
         println!("transcription ({:?}): {text}", started.elapsed());
     }
