@@ -3,16 +3,26 @@
 ⚡ Lean Rust Telegram-to-Codex gateway.
 
 1. 🤖 `gateway` or `gateway bot`: run the Telegram bot for allowed chats.
-2. 🕰️  `gateway run`: execute one fresh Codex prompt from automation.
+2. 🕰️ `gateway run`: execute one fresh Codex prompt from automation.
 
 ## 🚀 Setup
+
+Requires macOS with a logged-in desktop session. Install Homebrew if required
+tools are missing, and configure the environment below before running setup
+from this checkout:
 
 ```zsh
 ./setup
 ```
 
-`setup` installs local tools, refreshes Voicebox, builds the release binary,
-installs the LaunchAgent, and restarts the bot.
+`setup` installs missing tools through Homebrew, refreshes Voicebox, downloads
+the Whisper model if missing, and builds `target/release/gateway`. It registers
+the bot and heartbeat LaunchAgents and starts the bot. Keep this checkout in
+place: both agents run from it.
+
+Use `./target/release/gateway` directly, or add this checkout's `target/release`
+directory to `PATH` to use the `gateway` commands below. Setup does not install
+a separate CLI executable into `PATH`.
 
 For local checks:
 
@@ -33,16 +43,23 @@ export GATEWAY_TELEGRAM_TOKEN=...
 export GATEWAY_TELEGRAM_CHAT_ID=123456789
 ```
 
-For multiple bots, use comma-separated token and chat ID values in matching
-positions.
+Replace the example values with a real bot token and positive numeric private
+chat ID; usernames and group IDs are rejected. One token can serve multiple
+comma-separated chat IDs. For multiple bots, use equal numbers of comma-separated
+tokens and chat IDs in matching positions.
+
+The LaunchAgents start a login zsh shell. Export these values and the required
+tool paths from your login-shell configuration; exports made only in the setup
+terminal are not saved in the agent plists.
 
 ⚙️ Optional:
 
-1. 📁 `GATEWAY_CODEX_WORKDIR`: Codex working directory.
+1. 📁 `GATEWAY_CODEX_WORKDIR`: Codex working directory; defaults to `$XDG_CONFIG_HOME`.
 2. 🟣 `ANTHROPIC_API_KEY`: required for `claude` model slots.
 3. 🌐 `OPENROUTER_API_KEY`: required for `openrouter` model slots.
 4. 🔊 `ELEVENLABS_API_KEY`: required when `tts.provider` is `elevenlabs`.
 5. 🗂️ `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`: override XDG paths.
+   Export `XDG_CONFIG_HOME` explicitly for update and heartbeat runs.
 
 📁 Paths:
 
@@ -50,7 +67,8 @@ positions.
 2. 💾 State: `$XDG_STATE_HOME/gateway`
 3. 📜 Events: `$XDG_STATE_HOME/gateway/logs/gateway.log`
 4. 🫀 Heartbeat state: `$XDG_STATE_HOME/gateway/heartbeat.json`
-5. 🚀 LaunchAgent: `$HOME/Library/LaunchAgents/ai.gateway.plist`
+5. 🚀 Bot LaunchAgent: `$HOME/Library/LaunchAgents/ai.gateway.plist`
+6. 🫀 Heartbeat LaunchAgent: `$HOME/Library/LaunchAgents/ai.gateway.heartbeat.plist`
 
 📚 Runtime context files live under `$XDG_CONFIG_HOME/gateway/`:
 
@@ -110,7 +128,8 @@ Gateway reads `$XDG_CONFIG_HOME/gateway/config.json`; if missing, it creates:
 5. ⏱️ `timeout_mins` is the Codex/job timeout in minutes; it defaults to `60` and must be greater than zero.
 6. 🫀 `heartbeat` defaults to `1d`; use positive `m`, `h`, or `d` durations like `15m`, `3h`, or `1d`.
 7. 🕰️ Heartbeat scheduling is anchored to local wall-clock boundaries. For example, `3h` runs at `00:00`, `03:00`, `06:00`, `09:00`, `12:00`, `15:00`, `18:00`, and `21:00`.
-8. 🔊 Optional `tts` tries ElevenLabs before local Voicebox:
+8. 🔊 Optional `tts` tries ElevenLabs before local Voicebox. Add this field to
+   your existing config alongside `models`:
 
 ```json
 {
@@ -151,7 +170,7 @@ printf '%s\n' "Summarize status" | gateway run
 
 1. 💬 Prompt input comes from `--prompt`, then `--prompt-file`, then stdin.
 2. 🆕 Each invocation starts a fresh Codex session.
-3. 🤖 `--model NAME` overrides the default model.
+3. 🤖 `--model NAME` overrides the model name using the first configured model's provider.
 4. 📤 Final text is printed to stdout; non-empty, non-`OK` text also goes to
    Telegram.
 5. 🎯 Without `--chat`, Telegram output goes to the first configured private
@@ -165,7 +184,19 @@ It tails the canonical event log, including bot, heartbeat, and update events.
 📊 `gateway status [--chat ID]` prints Codex, gateway, and system status for a
 configured chat.
 
-📦 `gateway update` runs the gateway update flow inline.
+🫀 `gateway heartbeat` checks whether scheduled work is due; the heartbeat
+LaunchAgent invokes it every 60 seconds. When due, it runs the update flow below,
+then executes `$XDG_CONFIG_HOME/gateway/HEARTBEAT.md` in a fresh session. An update
+failure or an already-running update skips the prompt. Telegram `/heartbeat`
+forces a run immediately, including the update step.
+
+📦 `gateway update` runs inline: it pulls this repository and `$XDG_CONFIG_HOME`
+(when it is a Git checkout), updates and upgrades Homebrew packages, runs Homebrew
+cleanup, writes `$XDG_CONFIG_HOME/homebrew/Brewfile`, then runs `./setup`.
+Telegram `/update` starts the same flow in a background job.
+
+🧹 `gateway uninstall` stops both LaunchAgents and removes their plists;
+the checkout, configuration, and state remain on disk.
 
 ## 🤖 Telegram Bot
 
