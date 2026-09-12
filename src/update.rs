@@ -38,7 +38,6 @@ cd "$gateway_update_root" &&
   gateway_brewfile="$XDG_CONFIG_HOME/homebrew/Brewfile" &&
   mkdir -p "${gateway_brewfile:h}" &&
   HOMEBREW_BUNDLE_FILE_GLOBAL="$gateway_brewfile" brew bundle dump --global --force --describe >/dev/null 2>&1 &&
-  { command -v cast >/dev/null && command -v forge >/dev/null || gateway_step foundry brew install foundry; } &&
   gateway_step setup ./setup
 gateway_update_code=$?
 if [[ "$gateway_update_code" -eq 0 ]]; then
@@ -333,9 +332,9 @@ mod tests {
         assert!(script.contains(
             "HOMEBREW_BUNDLE_FILE_GLOBAL=\"$gateway_brewfile\" brew bundle dump --global --force --describe"
         ));
-        assert!(script.contains("command -v cast >/dev/null"));
-        assert!(script.contains("command -v forge >/dev/null"));
-        assert!(script.contains("gateway_step foundry brew install foundry"));
+        assert!(!script.contains("command -v cast"));
+        assert!(!script.contains("command -v forge"));
+        assert!(!script.contains("foundry"));
         assert!(!script.contains("curl"));
         assert!(script.contains("./setup"));
         assert!(script.contains("rm -f \"$gateway_update_lock\""));
@@ -357,13 +356,11 @@ mod tests {
         let brewsave = script
             .find("brew bundle dump --global --force --describe")
             .unwrap();
-        let foundry_update = script
-            .find("gateway_step foundry brew install foundry")
-            .unwrap();
+        let setup = script.find("gateway_step setup ./setup").unwrap();
         assert!(gateway_pull < xdg_pull);
         assert!(xdg_pull < brew_update);
         assert!(brew_cleanup < brewsave);
-        assert!(brewsave < foundry_update);
+        assert!(brewsave < setup);
     }
 
     #[test]
