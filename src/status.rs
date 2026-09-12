@@ -67,7 +67,7 @@ pub fn status_header(state: &ChatSession) -> String {
         "📦 Gateway version: {}\n🔌 Provider: {}\n🤖 Model: {}\n🧵 Session: {}",
         env!("CARGO_PKG_VERSION"),
         state.provider.label(),
-        state.model,
+        state.provider.model_label(&state.model),
         current_session_label(state)
     )
 }
@@ -898,6 +898,11 @@ mod tests {
     use std::thread;
 
     #[test]
+    fn inherited_model_status_is_clear() {
+        assert!(status_header(&ChatSession::default()).contains("Codex default (inherited)"));
+    }
+
+    #[test]
     fn status_header_prints_gateway_version_first() {
         let state = ChatSession::default();
         let got = status_header(&state);
@@ -1108,7 +1113,6 @@ mod tests {
                 ),
             ),
             workdir: dir.path().to_path_buf(),
-            default_model: "gpt-test".to_string(),
             xdg_config_home: cfg.xdg_config_home.clone(),
         };
 
@@ -1135,7 +1139,6 @@ mod tests {
                 ),
             ),
             workdir: dir.path().to_path_buf(),
-            default_model: "gpt-test".to_string(),
             xdg_config_home: cfg.xdg_config_home.clone(),
         };
 
@@ -1162,7 +1165,6 @@ mod tests {
                 ),
             ),
             workdir: dir.path().to_path_buf(),
-            default_model: "gpt-test".to_string(),
             xdg_config_home: cfg.xdg_config_home.clone(),
         };
 
@@ -1189,7 +1191,6 @@ mod tests {
                 ),
             ),
             workdir: dir.path().to_path_buf(),
-            default_model: "gpt-test".to_string(),
             xdg_config_home: cfg.xdg_config_home.clone(),
         };
 
@@ -1217,7 +1218,6 @@ mod tests {
                 ),
             ),
             workdir: dir.path().to_path_buf(),
-            default_model: "gpt-test".to_string(),
             xdg_config_home: cfg.xdg_config_home.clone(),
         };
 
@@ -1325,30 +1325,38 @@ mod tests {
 
     #[test]
     fn dirty_git_status_uses_codex_light_model_summary() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = tempfile::tempdir().unwrap();
-        assert!(Command::new("git")
-            .arg("init")
-            .arg(repo.path())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .unwrap()
-            .success());
-        fs::write(repo.path().join("note.txt"), "before\n").unwrap();
-        assert!(Command::new("git")
-            .args(["-C"])
-            .arg(repo.path())
-            .args(["add", "note.txt"])
-            .status()
-            .unwrap()
-            .success());
-        fs::write(repo.path().join("note.txt"), "after\n").unwrap();
+        for expected_model in [Some("gpt-light"), Some("gpt-default"), None] {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = tempfile::tempdir().unwrap();
+            assert!(Command::new("git")
+                .arg("init")
+                .arg(repo.path())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success());
+            fs::write(repo.path().join("note.txt"), "before\n").unwrap();
+            assert!(Command::new("git")
+                .args(["-C"])
+                .arg(repo.path())
+                .args(["add", "note.txt"])
+                .status()
+                .unwrap()
+                .success());
+            fs::write(repo.path().join("note.txt"), "after\n").unwrap();
 
-        let args_path = dir.path().join("codex.args");
-        let prompt_path = dir.path().join("codex.prompt");
-        let cfg = test_config(dir.path());
-        let codex = CodexConfig {
+            let args_path = dir.path().join("codex.args");
+            let prompt_path = dir.path().join("codex.prompt");
+            let mut cfg = test_config(dir.path());
+            if expected_model != Some("gpt-light") {
+                cfg.models
+                    .retain(|item| item.role != crate::config::ModelRole::Light);
+            }
+            if expected_model.is_none() {
+                cfg.models[0].model.clear();
+            }
+            let codex = CodexConfig {
             bin: executable(
                 dir.path().join("codex-summary"),
                 &format!(
@@ -1358,23 +1366,24 @@ mod tests {
                 ),
             ),
             workdir: dir.path().to_path_buf(),
-            default_model: "gpt-test".to_string(),
             xdg_config_home: cfg.xdg_config_home.clone(),
         };
 
-        let got = git_status_short_summary(&codex, &cfg, "gateway", repo.path());
+            let got = git_status_short_summary(&codex, &cfg, "gateway", repo.path());
 
-        assert_eq!(got, "📝 codex-powered summary");
-        let args = fs::read_to_string(args_path).unwrap();
-        assert!(args
-            .lines()
-            .collect::<Vec<_>>()
-            .windows(2)
-            .any(|pair| pair == ["-m", "gpt-light"]));
-        let prompt = fs::read_to_string(prompt_path).unwrap();
-        assert!(prompt.contains("actual content changes"));
-        assert!(prompt.contains("before"));
-        assert!(prompt.contains("after"));
+            assert_eq!(got, "📝 codex-powered summary");
+            let args = fs::read_to_string(args_path).unwrap();
+            let arguments = args.lines().collect::<Vec<_>>();
+            let actual_model = arguments
+                .windows(2)
+                .find(|pair| pair[0] == "-m")
+                .map(|pair| pair[1]);
+            assert_eq!(actual_model, expected_model);
+            let prompt = fs::read_to_string(prompt_path).unwrap();
+            assert!(prompt.contains("actual content changes"));
+            assert!(prompt.contains("before"));
+            assert!(prompt.contains("after"));
+        }
     }
 
     #[test]

@@ -118,7 +118,6 @@ impl SessionStore {
                     provider: state.provider,
                     updated_at: state.updated_at.clone(),
                 },
-                &self.default_model,
             );
         }
         self.save(key, &state)?;
@@ -177,7 +176,6 @@ impl SessionStore {
                 provider: state.provider,
                 updated_at: state.updated_at.clone(),
             },
-            &self.default_model,
         );
         self.save(key, &state)?;
         Ok(state)
@@ -232,7 +230,6 @@ impl SessionStore {
                 provider,
                 updated_at: state.updated_at.clone(),
             },
-            &self.default_model,
         );
         self.save(key, &state)?;
         Ok(state)
@@ -259,7 +256,6 @@ impl SessionStore {
                 provider: state.provider,
                 updated_at: state.updated_at.clone(),
             },
-            &self.default_model,
         );
         self.save(key, &state)?;
         Ok(true)
@@ -278,16 +274,13 @@ impl SessionStore {
                 "▫️"
             };
             let name = item.name.as_deref().unwrap_or("(unnamed)");
-            let model = if item.model.is_empty() {
-                self.default_model.as_str()
-            } else {
-                item.model.as_str()
-            };
+            let model = item.provider.model_label(&item.model);
             let provider = match item.provider {
                 Provider::Codex => "",
                 _ => item.provider.label(),
             };
-            let show_model = item.provider != self.default_provider || model != self.default_model;
+            let show_model =
+                item.provider != self.default_provider || item.model != self.default_model;
             let provider_model = if show_model && !provider.is_empty() {
                 format!(" {provider} {model}")
             } else if show_model {
@@ -318,18 +311,14 @@ impl SessionStore {
     }
 
     fn load_path(&self, path: &Path) -> ChatSession {
-        let mut state = fs::read_to_string(path)
+        fs::read_to_string(path)
             .ok()
             .and_then(|text| serde_json::from_str::<ChatSession>(&text).ok())
             .unwrap_or_else(|| ChatSession {
                 provider: self.default_provider,
                 model: self.default_model.clone(),
                 ..ChatSession::default()
-            });
-        if state.model.trim().is_empty() {
-            state.model = self.default_model.clone();
-        }
-        state
+            })
     }
 
     fn save(&self, key: &SessionKey, state: &ChatSession) -> Result<(), String> {
@@ -358,18 +347,12 @@ fn saved_session_name<'a>(sessions: &'a [SavedSession], session_id: &str) -> Opt
         .filter(|name| !name.trim().is_empty())
 }
 
-pub fn upsert_session(
-    mut items: Vec<SavedSession>,
-    mut item: SavedSession,
-    default_model: &str,
-) -> Vec<SavedSession> {
+pub fn upsert_session(mut items: Vec<SavedSession>, mut item: SavedSession) -> Vec<SavedSession> {
     item.id = item.id.trim().to_string();
     if item.id.is_empty() {
         return items;
     }
-    if item.model.trim().is_empty() {
-        item.model = default_model.to_string();
-    }
+    item.model = item.model.trim().to_string();
     for existing in &mut items {
         if existing.id == item.id {
             if item.name.is_none() {
@@ -398,9 +381,7 @@ pub fn find_session(items: &[SavedSession], target: &str) -> Option<SavedSession
 
 fn apply_resumed_session(state: &mut ChatSession, found: SavedSession) {
     state.session_id = Some(found.id);
-    if !found.model.is_empty() {
-        state.model = found.model;
-    }
+    state.model = found.model;
     state.provider = found.provider;
     state.voice_enabled = false;
     state.generation += 1;
@@ -420,6 +401,27 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn inherited_selection_survives_save_reload_and_resume() {
+        let dir = tempdir().unwrap();
+        let store = SessionStore::new(dir.path().join("chats"), "pinned-default".into());
+        let key = SessionKey::Chat {
+            chat_id: 7,
+            thread_id: None,
+        };
+        store.set_provider(&key, Provider::Codex, "").unwrap();
+        assert_eq!(store.load(&key).model, "");
+        let generation = store.load(&key).generation;
+        assert!(store
+            .save_current_session(&key, generation, "inherited")
+            .unwrap());
+        store
+            .set_provider(&key, Provider::Codex, "explicit")
+            .unwrap();
+        assert_eq!(store.resume(&key, "inherited").unwrap().model, "");
+        assert_eq!(store.load(&key).model, "");
+    }
+
+    #[test]
     fn upsert_preserves_existing_name_and_finds_by_name_or_short_id() {
         let first = SavedSession {
             id: "019e778b-2c3f-7231-bda6-c40f27bbba21".to_string(),
@@ -436,7 +438,7 @@ mod tests {
             updated_at: "later".to_string(),
         };
 
-        let items = upsert_session(vec![first], second, "gpt-5.5");
+        let items = upsert_session(vec![first], second);
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name.as_deref(), Some("main"));
@@ -617,7 +619,7 @@ mod tests {
 
         assert!(list.contains("💾 Saved sessions:"));
         assert!(list.contains("1. ⭐ session- (unnamed)"));
-        assert!(list.contains("2. ▫️ session- (unnamed)"));
+        assert!(list.contains("2. ▫️ session- Codex default (inherited) (unnamed)"));
         assert!(list.contains("3. ▫️ session- gpt-alt (unnamed)"));
         assert!(list.contains("4. ▫️ session- Claude claude-test (unnamed)"));
         assert!(!list.contains("gpt-default"));
@@ -638,12 +640,12 @@ mod tests {
 
         let state = store.load(&key);
 
-        assert_eq!(state.model, "gpt-default");
+        assert_eq!(state.model, " ");
         assert!(state.sessions.is_empty());
     }
 
     #[test]
-    fn upsert_ignores_empty_ids_and_fills_default_model() {
+    fn upsert_ignores_empty_ids_and_preserves_inheritance() {
         let existing = vec![SavedSession {
             id: "existing".to_string(),
             name: None,
@@ -661,7 +663,6 @@ mod tests {
                 provider: Provider::Codex,
                 updated_at: String::new(),
             },
-            "gpt-default",
         );
         let inserted = upsert_session(
             existing,
@@ -672,12 +673,11 @@ mod tests {
                 provider: Provider::Codex,
                 updated_at: String::new(),
             },
-            "gpt-default",
         );
 
         assert_eq!(unchanged.len(), 1);
         assert_eq!(inserted[0].id, "new");
-        assert_eq!(inserted[0].model, "gpt-default");
+        assert_eq!(inserted[0].model, "");
         assert_eq!(inserted.len(), 2);
     }
 

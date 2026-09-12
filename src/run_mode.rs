@@ -451,7 +451,6 @@ printf 'done\n' > "$out"
         CodexConfig {
             bin,
             workdir: cfg.codex_workdir.clone(),
-            default_model: cfg.default_provider_model().model.clone(),
             xdg_config_home: cfg.xdg_config_home.clone(),
         }
     }

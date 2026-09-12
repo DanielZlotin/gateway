@@ -18,7 +18,6 @@ use std::time::{Duration, Instant};
 pub struct CodexConfig {
     pub bin: PathBuf,
     pub workdir: PathBuf,
-    pub default_model: String,
     pub xdg_config_home: PathBuf,
 }
 
@@ -27,7 +26,6 @@ impl From<&Config> for CodexConfig {
         Self {
             bin: PathBuf::from("codex"),
             workdir: cfg.codex_workdir.clone(),
-            default_model: cfg.default_provider_model().model.clone(),
             xdg_config_home: cfg.xdg_config_home.clone(),
         }
     }
@@ -56,17 +54,15 @@ pub fn codex_args(
     session_id: Option<&str>,
     provider: Provider,
     model: &str,
-    default_model: &str,
     workdir: &Path,
     claude_proxy_base_url: Option<&str>,
     image_paths: &[PathBuf],
     developer_instructions: &str,
 ) -> Result<Vec<String>, String> {
-    let model = if model.trim().is_empty() {
-        default_model
-    } else {
-        model.trim()
-    };
+    let model = model.trim();
+    if provider != Provider::Codex && model.is_empty() {
+        return Err("Claude and OpenRouter require a non-empty model".to_string());
+    }
     let out = out_path.to_string_lossy().to_string();
     let workdir = workdir.to_string_lossy().to_string();
     let developer_instructions_config = format!(
@@ -79,13 +75,14 @@ pub fn codex_args(
         append_model_provider_config(&mut args, provider, claude_proxy_base_url)?;
         append_model_reasoning_config(&mut args, provider, model);
         append_image_args(&mut args, image_paths);
+        if !model.is_empty() {
+            args.extend(strings(["-m", model]));
+        }
         args.extend(strings([
             "-c",
             &developer_instructions_config,
             "--skip-git-repo-check",
             "--dangerously-bypass-approvals-and-sandbox",
-            "-m",
-            model,
             "--output-last-message",
             &out,
             session_id,
@@ -98,6 +95,9 @@ pub fn codex_args(
     append_model_provider_config(&mut args, provider, claude_proxy_base_url)?;
     append_model_reasoning_config(&mut args, provider, model);
     append_image_args(&mut args, image_paths);
+    if !model.is_empty() {
+        args.extend(strings(["-m", model]));
+    }
     args.extend(strings([
         "-c",
         &developer_instructions_config,
@@ -105,8 +105,6 @@ pub fn codex_args(
         &workdir,
         "--skip-git-repo-check",
         "--dangerously-bypass-approvals-and-sandbox",
-        "-m",
-        model,
         "--output-last-message",
         &out,
         "-",
@@ -183,7 +181,6 @@ pub fn run_codex_stream(
         run.session_id,
         run.provider,
         run.model,
-        &cfg.default_model,
         &cfg.workdir,
         claude_proxy.as_ref().map(|proxy| proxy.base_url()),
         run.image_paths,
@@ -421,6 +418,52 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
 
+    #[test]
+    fn codex_args_preserve_inherited_and_explicit_models() {
+        for session in [None, Some("session-123")] {
+            for (provider, model) in [
+                (Provider::Codex, ""),
+                (Provider::Codex, "explicit"),
+                (Provider::Claude, "claude-explicit"),
+                (Provider::Openrouter, "vendor/explicit"),
+            ] {
+                let args = codex_args(
+                    Path::new("/tmp/out"),
+                    session,
+                    provider,
+                    model,
+                    Path::new("/work"),
+                    Some("http://localhost/v1"),
+                    &[],
+                    "instructions",
+                )
+                .unwrap();
+                let selected = args
+                    .windows(2)
+                    .find(|pair| pair[0] == "-m")
+                    .map(|pair| pair[1].as_str());
+                assert_eq!(selected, (!model.is_empty()).then_some(model));
+                assert!(!args
+                    .iter()
+                    .any(|arg| arg.contains("model_reasoning_effort")
+                        || arg.contains("service_tier")));
+            }
+            for provider in [Provider::Claude, Provider::Openrouter] {
+                assert!(codex_args(
+                    Path::new("/tmp/out"),
+                    session,
+                    provider,
+                    "",
+                    Path::new("/work"),
+                    Some("http://localhost/v1"),
+                    &[],
+                    "instructions"
+                )
+                .is_err());
+            }
+        }
+    }
+
     const TEST_DEVELOPER_INSTRUCTIONS: &str =
         "# Test Developer Instructions\n\nUse local test context.";
 
@@ -431,7 +474,6 @@ mod tests {
             None,
             crate::provider::Provider::Codex,
             "",
-            "gpt-5.5",
             Path::new("/work"),
             None,
             &[],
@@ -459,7 +501,6 @@ mod tests {
             None,
             crate::provider::Provider::Codex,
             "gpt-test",
-            "gpt-5.5",
             Path::new("/work"),
             None,
             &[],
@@ -482,7 +523,6 @@ mod tests {
                 session_id,
                 crate::provider::Provider::Codex,
                 crate::config::DEFAULT_LIGHT_CODEX_MODEL,
-                "gpt-5.6-sol",
                 Path::new("/work"),
                 None,
                 &[],
@@ -497,7 +537,6 @@ mod tests {
                 Path::new("/tmp/out"),
                 session_id,
                 crate::provider::Provider::Codex,
-                "gpt-5.6-sol",
                 "gpt-5.6-sol",
                 Path::new("/work"),
                 None,
@@ -541,7 +580,6 @@ mod tests {
             Some("session-123"),
             crate::provider::Provider::Codex,
             "gpt-test",
-            "gpt-5.5",
             Path::new("/work"),
             None,
             &[],
@@ -554,7 +592,7 @@ mod tests {
         assert_eq!(args[1], "exec");
         assert_eq!(args[2], "resume");
         assert_eq!(args[3], "--ephemeral");
-        assert!(joined.starts_with("--search exec resume --ephemeral -c developer_instructions=\""));
+        assert!(joined.contains("-c developer_instructions=\""));
         assert!(joined.contains("# Test Developer Instructions"));
         assert!(joined.contains("--skip-git-repo-check"));
         assert!(joined.contains("--dangerously-bypass-approvals-and-sandbox"));
@@ -569,7 +607,6 @@ mod tests {
             None,
             crate::provider::Provider::Openrouter,
             "openai/gpt-5.5",
-            "gpt-5.5",
             Path::new("/work"),
             None,
             &[],
@@ -596,7 +633,6 @@ mod tests {
             None,
             crate::provider::Provider::Codex,
             "gpt-test",
-            "gpt-5.5",
             Path::new("/work"),
             None,
             &image_paths,
@@ -608,7 +644,6 @@ mod tests {
             Some("session-123"),
             crate::provider::Provider::Codex,
             "gpt-test",
-            "gpt-5.5",
             Path::new("/work"),
             None,
             &image_paths,
@@ -637,7 +672,6 @@ mod tests {
             None,
             crate::provider::Provider::Claude,
             "claude-opus-4-8",
-            "gpt-5.5",
             Path::new("/work"),
             Some("http://127.0.0.1:12345/v1"),
             &[],
@@ -664,7 +698,6 @@ mod tests {
             None,
             crate::provider::Provider::Claude,
             "claude-opus-4-8",
-            "gpt-5.5",
             Path::new("/work"),
             None,
             &[],
@@ -728,7 +761,6 @@ mod tests {
 
         assert_eq!(codex.bin, PathBuf::from("codex"));
         assert_eq!(codex.workdir, PathBuf::from("/work"));
-        assert_eq!(codex.default_model, "gpt-default");
         assert_eq!(codex.xdg_config_home, PathBuf::from("/xdg/config"));
     }
 
@@ -815,7 +847,6 @@ printf 'session id: session-123\n' >&2
         let cfg = CodexConfig {
             bin: fake_codex,
             workdir: dir.path().to_path_buf(),
-            default_model: "gpt-default".to_string(),
             xdg_config_home,
         };
 
@@ -856,7 +887,6 @@ printf 'session id: session-123\n' >&2
         let cfg = CodexConfig {
             bin: fake_codex,
             workdir: dir.path().to_path_buf(),
-            default_model: "gpt-default".to_string(),
             xdg_config_home: dir.path().join("missing-config"),
         };
 
@@ -1082,7 +1112,6 @@ sleep 5
         CodexConfig {
             bin: bin.to_path_buf(),
             workdir: root.to_path_buf(),
-            default_model: "gpt-default".to_string(),
             xdg_config_home,
         }
     }

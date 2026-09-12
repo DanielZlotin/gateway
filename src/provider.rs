@@ -10,6 +10,14 @@ pub enum Provider {
 }
 
 impl Provider {
+    pub fn model_label(self, model: &str) -> &str {
+        if self == Self::Codex && model.trim().is_empty() {
+            "Codex default (inherited)"
+        } else {
+            model
+        }
+    }
+
     pub const fn key(self) -> &'static str {
         match self {
             Self::Codex => "codex",

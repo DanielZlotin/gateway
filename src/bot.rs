@@ -1335,7 +1335,10 @@ fn handle_new_command(
             clear_selection(selections, key);
             tg.send_message(
                 msg.chat.id,
-                &format!("🆕 New session ready. 🤖 Model: {}", state.model),
+                &format!(
+                    "🆕 New session ready. 🤖 Model: {}",
+                    state.provider.model_label(&state.model)
+                ),
                 msg.message_id,
             )
         }
@@ -1471,7 +1474,7 @@ fn provider_model_label(choice: &ProviderModel) -> String {
     format!(
         "{}: {} ({})",
         choice.provider.label(),
-        choice.model,
+        choice.provider.model_label(&choice.model),
         choice.role.label()
     )
 }
@@ -1615,7 +1618,7 @@ fn send_resumed_session(
         &format!(
             "↩️ Resumed session {}\n🤖 Model: {}",
             session_label(state.session_id.as_deref().unwrap_or("")),
-            state.model
+            state.provider.model_label(&state.model)
         ),
         msg.message_id,
     )
@@ -2456,6 +2459,16 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread::{self, JoinHandle};
     use tempfile::tempdir;
+
+    #[test]
+    fn inherited_model_selection_is_clear() {
+        let choice = ProviderModel {
+            provider: Provider::Codex,
+            model: String::new(),
+            role: crate::config::ModelRole::Default,
+        };
+        assert!(provider_model_label(&choice).contains("Codex default (inherited)"));
+    }
 
     #[test]
     fn offset_round_trips() {
@@ -3787,13 +3800,21 @@ printf 'session id: session-12345678\n' >&2
 
     #[test]
     fn rename_without_name_starts_auto_rename_without_waiting_or_sending_text() {
-        let dir = tempdir().unwrap();
-        let cfg = test_config(dir.path());
-        let codex = test_codex_config(
-            &cfg,
-            executable(
-                dir.path().join("codex-title"),
-                r#"#!/bin/sh
+        for expected_model in [Some("gpt-light"), Some("gpt-test"), None] {
+            let dir = tempdir().unwrap();
+            let mut cfg = test_config(dir.path());
+            if expected_model != Some("gpt-light") {
+                cfg.models
+                    .retain(|item| item.role != crate::config::ModelRole::Light);
+            }
+            if expected_model.is_none() {
+                cfg.models[0].model.clear();
+            }
+            let codex = test_codex_config(
+                &cfg,
+                executable(
+                    dir.path().join("codex-title"),
+                    r#"#!/bin/sh
 sleep 0.3
 printf '%s\n' "$@" > codex-title.args
 out=""
@@ -3806,54 +3827,56 @@ cat > codex-title.prompt
 printf '  session-name  \n' > "$out"
 printf 'session id: aaaaaaaa-current\n' >&2
 "#,
-            ),
-        );
-        let store = SessionStore::new(
-            cfg.chat_state_dir.clone(),
-            cfg.default_provider_model().model.clone(),
-        );
-        let key = SessionKey::Chat {
-            chat_id: 42,
-            thread_id: None,
-        };
-        assert!(store
-            .save_current_session(&key, 0, "aaaaaaaa-current")
-            .unwrap());
-        let tg = FakeTelegram::new();
-        let selections = RuntimeSelections::default();
-        let msg = message(42, 10, "/rename");
+                ),
+            );
+            let store = SessionStore::new(
+                cfg.chat_state_dir.clone(),
+                cfg.default_provider_model().model.clone(),
+            );
+            let key = SessionKey::Chat {
+                chat_id: 42,
+                thread_id: None,
+            };
+            assert!(store
+                .save_current_session(&key, 0, "aaaaaaaa-current")
+                .unwrap());
+            let tg = FakeTelegram::new();
+            let selections = RuntimeSelections::default();
+            let msg = message(42, 10, "/rename");
 
-        let started = Instant::now();
-        handle_command_with_codex(
-            &cfg,
-            &codex,
-            &tg,
-            &store,
-            &selections,
-            &msg,
-            "/rename",
-            "/rename",
-        )
-        .unwrap();
+            let started = Instant::now();
+            handle_command_with_codex(
+                &cfg,
+                &codex,
+                &tg,
+                &store,
+                &selections,
+                &msg,
+                "/rename",
+                "/rename",
+            )
+            .unwrap();
 
-        assert!(started.elapsed() < Duration::from_millis(250));
-        assert!(tg.sent_text().is_empty());
-        assert!(!tg.calls().contains(&Call::Reaction {
-            chat_id: 42,
-            message_id: 10,
-            emoji: "👍".to_string(),
-        }));
-        assert_session_name_eventually(&store, &key, "aaaaaaaa-current", "session-name");
-        assert_reaction_eventually(&tg, 42, 10, "👍");
-        let args = fs::read_to_string(dir.path().join("codex-title.args")).unwrap();
-        assert!(args
-            .lines()
-            .collect::<Vec<_>>()
-            .windows(2)
-            .any(|pair| pair == ["-m", "gpt-light"]));
-        let prompt = fs::read_to_string(dir.path().join("codex-title.prompt")).unwrap();
-        assert!(prompt.contains("lowercase single-word"));
-        assert!(prompt.contains("session-name"));
+            assert!(started.elapsed() < Duration::from_millis(250));
+            assert!(tg.sent_text().is_empty());
+            assert!(!tg.calls().contains(&Call::Reaction {
+                chat_id: 42,
+                message_id: 10,
+                emoji: "👍".to_string(),
+            }));
+            assert_session_name_eventually(&store, &key, "aaaaaaaa-current", "session-name");
+            assert_reaction_eventually(&tg, 42, 10, "👍");
+            let args = fs::read_to_string(dir.path().join("codex-title.args")).unwrap();
+            let arguments = args.lines().collect::<Vec<_>>();
+            let actual_model = arguments
+                .windows(2)
+                .find(|pair| pair[0] == "-m")
+                .map(|pair| pair[1]);
+            assert_eq!(actual_model, expected_model);
+            let prompt = fs::read_to_string(dir.path().join("codex-title.prompt")).unwrap();
+            assert!(prompt.contains("lowercase single-word"));
+            assert!(prompt.contains("session-name"));
+        }
     }
 
     #[test]
@@ -5631,7 +5654,6 @@ exit 2
         CodexConfig {
             bin,
             workdir: cfg.codex_workdir.clone(),
-            default_model: cfg.default_provider_model().model.clone(),
             xdg_config_home: cfg.xdg_config_home.clone(),
         }
     }

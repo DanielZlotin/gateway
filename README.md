@@ -92,8 +92,7 @@ Gateway reads `$XDG_CONFIG_HOME/gateway/config.json`; if missing, it creates:
 ```json
 {
   "models": [
-    { "provider": "codex", "model": "gpt-5.6-sol" },
-    { "provider": "codex", "model": "gpt-5.6-luna", "role": "light" },
+    { "provider": "codex" },
     { "provider": "claude", "model": "claude-opus-4-8" },
     { "provider": "openrouter", "model": "openai/gpt-5.5" }
   ],
@@ -105,9 +104,9 @@ Gateway reads `$XDG_CONFIG_HOME/gateway/config.json`; if missing, it creates:
 📋 Notes:
 
 1. 🧱 Unknown config fields are rejected.
-2. 🤖 `models` must include at least one item; empty `model` values are ignored.
+2. 🤖 `models` must include at least one item. Omit `model` (or use an empty string) for Codex to inherit its configured model on new and resumed runs. Explicit Codex models remain overrides; Claude and OpenRouter require non-empty models and run through Codex, not the Claude CLI. Gateway does not copy the resolved model into its config or override inherited reasoning effort or service tier.
 3. 🔌 `models[].provider` must be `codex`, `claude`, or `openrouter`.
-4. 🧠 `models[].role` is optional; missing means `default`, and `light` marks the helper model.
+4. 🧠 `models[].role` is optional; missing means `default`, and `light` marks an optional helper model for session naming and Git status summaries. Without a light entry, helpers use the configured default, including Codex inheritance. Gateway never inserts a light model.
 5. ⏱️ `timeout_mins` is the Codex/job timeout in minutes; it defaults to `60` and must be greater than zero.
 6. 🫀 `heartbeat` defaults to `1d`; use positive `m`, `h`, or `d` durations like `15m`, `3h`, or `1d`.
 7. 🕰️ Heartbeat scheduling is anchored to local wall-clock boundaries. For example, `3h` runs at `00:00`, `03:00`, `06:00`, `09:00`, `12:00`, `15:00`, `18:00`, and `21:00`.
