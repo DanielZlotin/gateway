@@ -3228,8 +3228,6 @@ printf ' transcribed text\n' > "$out.txt"
         for (whisper, ffmpeg, expected) in [
             (&success, &failure, "ffmpeg exited with"),
             (&failure, &success, "whisper-cli exited with"),
-            (&success, &slow, "ffmpeg timed out"),
-            (&slow, &success, "whisper-cli timed out"),
             (&success, &success, "read whisper transcript"),
         ] {
             let err = transcribe_voice_with_whisper(
@@ -3238,10 +3236,19 @@ printf ' transcribed text\n' > "$out.txt"
                 Path::new("model.bin"),
                 &audio,
                 dir.path(),
-                Duration::from_secs(2),
+                Duration::from_secs(10),
             )
             .unwrap_err();
             assert!(err.contains(expected), "{err}");
+        }
+        for name in ["ffmpeg", "whisper-cli"] {
+            let err = run_transcription_command(
+                &mut Command::new(&slow),
+                name,
+                Duration::from_millis(100),
+            )
+            .unwrap_err();
+            assert!(err.contains(&format!("{name} timed out")), "{err}");
         }
     }
 
