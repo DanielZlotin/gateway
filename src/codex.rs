@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub struct CodexConfig {
+    pub low_reasoning: bool,
     pub bin: PathBuf,
     pub workdir: PathBuf,
     pub xdg_config_home: PathBuf,
@@ -24,6 +25,7 @@ pub struct CodexConfig {
 impl From<&Config> for CodexConfig {
     fn from(cfg: &Config) -> Self {
         Self {
+            low_reasoning: false,
             bin: PathBuf::from("codex"),
             workdir: cfg.codex_workdir.clone(),
             xdg_config_home: cfg.xdg_config_home.clone(),
@@ -73,7 +75,6 @@ pub fn codex_args(
     if let Some(session_id) = session_id.filter(|value| !value.trim().is_empty()) {
         let mut args = strings(["--search", "exec", "resume", "--ephemeral"]);
         append_model_provider_config(&mut args, provider, claude_proxy_base_url)?;
-        append_model_reasoning_config(&mut args, provider, model);
         append_image_args(&mut args, image_paths);
         if !model.is_empty() {
             args.extend(strings(["-m", model]));
@@ -93,7 +94,6 @@ pub fn codex_args(
 
     let mut args = strings(["--search", "exec", "--color", "never"]);
     append_model_provider_config(&mut args, provider, claude_proxy_base_url)?;
-    append_model_reasoning_config(&mut args, provider, model);
     append_image_args(&mut args, image_paths);
     if !model.is_empty() {
         args.extend(strings(["-m", model]));
@@ -176,7 +176,7 @@ pub fn run_codex_stream(
     } else {
         None
     };
-    let args = codex_args(
+    let mut args = codex_args(
         &out_path,
         run.session_id,
         run.provider,
@@ -186,6 +186,10 @@ pub fn run_codex_stream(
         run.image_paths,
         &developer_instructions,
     )?;
+
+    if cfg.low_reasoning {
+        args.splice(0..0, strings(["-c", "model_reasoning_effort=\"low\""]));
+    }
 
     let mut child = Command::new(&cfg.bin)
         .args(args)
@@ -368,16 +372,7 @@ fn append_model_provider_config(
     Ok(())
 }
 
-fn append_model_reasoning_config(args: &mut Vec<String>, provider: Provider, model: &str) {
-    if provider == Provider::Codex && model == crate::config::DEFAULT_LIGHT_CODEX_MODEL {
-        args.extend(strings(["-c", "model_reasoning_effort=\"low\""]));
-    }
-}
-
-pub fn model_reasoning_effort(xdg_config_home: &Path, provider: Provider, model: &str) -> String {
-    if provider == Provider::Codex && model == crate::config::DEFAULT_LIGHT_CODEX_MODEL {
-        return "low".to_string();
-    }
+pub fn model_reasoning_effort(xdg_config_home: &Path) -> String {
     let path = xdg_config_home.join("codex/config.toml");
     fs::read_to_string(path)
         .ok()
@@ -424,6 +419,7 @@ mod tests {
             for (provider, model) in [
                 (Provider::Codex, ""),
                 (Provider::Codex, "explicit"),
+                (Provider::Codex, "gpt-5.3-codex-spark"),
                 (Provider::Claude, "claude-explicit"),
                 (Provider::Openrouter, "vendor/explicit"),
             ] {
@@ -516,40 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_args_use_low_reasoning_for_luna_only() {
-        for session_id in [None, Some("session-123")] {
-            let luna = codex_args(
-                Path::new("/tmp/out"),
-                session_id,
-                crate::provider::Provider::Codex,
-                crate::config::DEFAULT_LIGHT_CODEX_MODEL,
-                Path::new("/work"),
-                None,
-                &[],
-                TEST_DEVELOPER_INSTRUCTIONS,
-            )
-            .unwrap();
-            assert!(luna
-                .windows(2)
-                .any(|pair| pair == ["-c", "model_reasoning_effort=\"low\""]));
-
-            let sol = codex_args(
-                Path::new("/tmp/out"),
-                session_id,
-                crate::provider::Provider::Codex,
-                "gpt-5.6-sol",
-                Path::new("/work"),
-                None,
-                &[],
-                TEST_DEVELOPER_INSTRUCTIONS,
-            )
-            .unwrap();
-            assert!(!sol.iter().any(|arg| arg.contains("model_reasoning_effort")));
-        }
-    }
-
-    #[test]
-    fn model_reasoning_effort_reads_config_and_applies_light_override() {
+    fn model_reasoning_effort_reads_config() {
         let dir = tempdir().unwrap();
         let codex_dir = dir.path().join("codex");
         fs::create_dir(&codex_dir).unwrap();
@@ -559,18 +522,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            model_reasoning_effort(dir.path(), crate::provider::Provider::Codex, "gpt-test"),
-            "high"
-        );
-        assert_eq!(
-            model_reasoning_effort(
-                dir.path(),
-                crate::provider::Provider::Codex,
-                crate::config::DEFAULT_LIGHT_CODEX_MODEL,
-            ),
-            "low"
-        );
+        assert_eq!(model_reasoning_effort(dir.path()), "high");
     }
 
     #[test]
@@ -743,7 +695,6 @@ mod tests {
             models: vec![crate::config::ProviderModel {
                 provider: crate::provider::Provider::Codex,
                 model: "gpt-default".to_string(),
-                role: crate::config::ModelRole::Default,
             }],
             tts: None,
             state_dir: PathBuf::from("/state/gateway"),
@@ -845,6 +796,7 @@ printf 'session id: session-123\n' >&2
             ),
         );
         let cfg = CodexConfig {
+            low_reasoning: false,
             bin: fake_codex,
             workdir: dir.path().to_path_buf(),
             xdg_config_home,
@@ -870,6 +822,7 @@ printf 'session id: session-123\n' >&2
         let args = fs::read_to_string(args_path).unwrap();
         assert!(args.contains("# AGENTS.md"));
         assert!(args.contains("runtime-memory-marker"));
+        assert!(!args.contains("model_reasoning_effort"));
         assert!(!args.contains("# HEARTBEAT.md"));
     }
 
@@ -885,6 +838,7 @@ printf 'session id: session-123\n' >&2
             ),
         );
         let cfg = CodexConfig {
+            low_reasoning: false,
             bin: fake_codex,
             workdir: dir.path().to_path_buf(),
             xdg_config_home: dir.path().join("missing-config"),
@@ -1110,6 +1064,7 @@ sleep 5
         let xdg_config_home = root.join("config");
         crate::context::ensure_gateway_context_files(&xdg_config_home).unwrap();
         CodexConfig {
+            low_reasoning: false,
             bin: bin.to_path_buf(),
             workdir: root.to_path_buf(),
             xdg_config_home,

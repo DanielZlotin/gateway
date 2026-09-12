@@ -68,7 +68,7 @@ fn session_key(chat_id: i64) -> SessionKey {
 mod tests {
     use super::*;
     use crate::cli::ChatArgs;
-    use crate::config::{Config, ModelRole, ProviderModel, TelegramBotConfig};
+    use crate::config::{Config, ProviderModel, TelegramBotConfig};
     use crate::provider::Provider;
     use crate::session::SessionStore;
     use crate::status::StatusSections;
@@ -171,7 +171,6 @@ mod tests {
             models: vec![ProviderModel {
                 provider: Provider::Codex,
                 model: "gpt-default".to_string(),
-                role: ModelRole::Default,
             }],
             tts: None,
             state_dir: root.join("state/gateway"),

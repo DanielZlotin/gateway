@@ -1131,7 +1131,6 @@ done
             models: vec![crate::config::ProviderModel {
                 provider: crate::provider::Provider::Codex,
                 model: "gpt-test".to_string(),
-                role: crate::config::ModelRole::Default,
             }],
             tts,
             state_dir: root.join("state/gateway"),

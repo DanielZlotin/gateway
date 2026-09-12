@@ -431,7 +431,6 @@ printf 'done\n' > "$out"
             models: vec![crate::config::ProviderModel {
                 provider: crate::provider::Provider::Codex,
                 model: "gpt-test".to_string(),
-                role: crate::config::ModelRole::Default,
             }],
             tts: None,
             state_dir: root.join("state/gateway"),
@@ -449,6 +448,7 @@ printf 'done\n' > "$out"
     fn test_codex_config(cfg: &Config, bin: PathBuf) -> CodexConfig {
         crate::context::ensure_gateway_context_files(&cfg.xdg_config_home).unwrap();
         CodexConfig {
+            low_reasoning: false,
             bin,
             workdir: cfg.codex_workdir.clone(),
             xdg_config_home: cfg.xdg_config_home.clone(),

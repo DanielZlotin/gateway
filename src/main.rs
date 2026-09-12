@@ -74,7 +74,7 @@ fn print_output(output: Result<String, String>) -> Result<(), String> {
 mod tests {
     use super::*;
     use gateway::cli::{ChatArgs, RunArgs};
-    use gateway::config::{Config, ModelRole, ProviderModel, TelegramBotConfig};
+    use gateway::config::{Config, ProviderModel, TelegramBotConfig};
     use gateway::provider::Provider;
     use std::path::Path;
     use std::time::Duration;
@@ -154,7 +154,6 @@ mod tests {
             models: vec![ProviderModel {
                 provider: Provider::Codex,
                 model: "gpt-test".to_string(),
-                role: ModelRole::Default,
             }],
             tts: None,
             state_dir: state_dir.clone(),

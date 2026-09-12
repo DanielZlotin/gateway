@@ -318,15 +318,18 @@ fn summarize_git_status_with_codex(
         Err(err) => return unavailable_git_summary(&err),
     };
     let prompt = git_summary_prompt(label, &input);
-    let light_model = cfg.light_provider_model();
+    let default_model = cfg.default_provider_model();
     let mut last_error = String::new();
     for _ in 0..2 {
         match run_codex(
-            codex,
+            &CodexConfig {
+                low_reasoning: true,
+                ..codex.clone()
+            },
             &prompt,
             None,
-            light_model.provider,
-            &light_model.model,
+            default_model.provider,
+            &default_model.model,
             GIT_SUMMARY_TIMEOUT.min(cfg.codex_timeout),
             &cfg.state_dir,
         ) {
@@ -888,7 +891,7 @@ pub const fn typing_interval() -> Duration {
 mod tests {
     use super::*;
     use crate::codex::CodexConfig;
-    use crate::config::{ModelRole, ProviderModel, TelegramBotConfig};
+    use crate::config::{ProviderModel, TelegramBotConfig};
     use crate::provider::Provider;
     use std::fs;
     use std::io::{BufRead, BufReader, Write as IoWrite};
@@ -1105,6 +1108,7 @@ mod tests {
         let cfg = test_config(dir.path());
         let started_path = dir.path().join("codex-started");
         let codex = CodexConfig {
+            low_reasoning: false,
             bin: executable(
                 dir.path().join("codex-should-not-start"),
                 &format!(
@@ -1129,6 +1133,7 @@ mod tests {
         let cfg = test_config(dir.path());
         let attempts_path = dir.path().join("attempts");
         let codex = CodexConfig {
+            low_reasoning: false,
             bin: executable(
                 dir.path().join("codex-summary"),
                 &format!(
@@ -1155,6 +1160,7 @@ mod tests {
         let cfg = test_config(dir.path());
         let attempts_path = dir.path().join("attempts");
         let codex = CodexConfig {
+            low_reasoning: false,
             bin: executable(
                 dir.path().join("codex-summary"),
                 &format!(
@@ -1181,6 +1187,7 @@ mod tests {
         let cfg = test_config(dir.path());
         let attempts_path = dir.path().join("attempts");
         let codex = CodexConfig {
+            low_reasoning: false,
             bin: executable(
                 dir.path().join("codex-summary"),
                 &format!(
@@ -1210,6 +1217,7 @@ mod tests {
         fs::remove_file(cfg.xdg_config_home.join("gateway/AGENTS.md")).unwrap();
         let started_path = dir.path().join("codex-started");
         let codex = CodexConfig {
+            low_reasoning: false,
             bin: executable(
                 dir.path().join("codex-should-not-start"),
                 &format!(
@@ -1324,8 +1332,8 @@ mod tests {
     }
 
     #[test]
-    fn dirty_git_status_uses_codex_light_model_summary() {
-        for expected_model in [Some("gpt-light"), Some("gpt-default"), None] {
+    fn dirty_git_status_uses_default_model_summary() {
+        for expected_model in [Some("gpt-default"), None] {
             let dir = tempfile::tempdir().unwrap();
             let repo = tempfile::tempdir().unwrap();
             assert!(Command::new("git")
@@ -1349,14 +1357,11 @@ mod tests {
             let args_path = dir.path().join("codex.args");
             let prompt_path = dir.path().join("codex.prompt");
             let mut cfg = test_config(dir.path());
-            if expected_model != Some("gpt-light") {
-                cfg.models
-                    .retain(|item| item.role != crate::config::ModelRole::Light);
-            }
             if expected_model.is_none() {
                 cfg.models[0].model.clear();
             }
             let codex = CodexConfig {
+            low_reasoning: false,
             bin: executable(
                 dir.path().join("codex-summary"),
                 &format!(
@@ -1379,6 +1384,9 @@ mod tests {
                 .find(|pair| pair[0] == "-m")
                 .map(|pair| pair[1]);
             assert_eq!(actual_model, expected_model);
+            assert!(arguments
+                .windows(2)
+                .any(|pair| pair == ["-c", "model_reasoning_effort=\"low\""]));
             let prompt = fs::read_to_string(prompt_path).unwrap();
             assert!(prompt.contains("actual content changes"));
             assert!(prompt.contains("before"));
@@ -1766,12 +1774,10 @@ exit 2
                 ProviderModel {
                     provider: Provider::Codex,
                     model: "gpt-default".to_string(),
-                    role: ModelRole::Default,
                 },
                 ProviderModel {
                     provider: Provider::Codex,
-                    model: "gpt-light".to_string(),
-                    role: ModelRole::Light,
+                    model: "gpt-alternative".to_string(),
                 },
             ],
             tts: None,

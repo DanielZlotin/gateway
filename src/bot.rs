@@ -1377,8 +1377,7 @@ fn handle_model_command(
     let arg = command_arg(text);
     if arg.is_empty() {
         let active = selected_provider_model(cfg, selections, key);
-        let reasoning =
-            model_reasoning_effort(&cfg.xdg_config_home, active.provider, &active.model);
+        let reasoning = model_reasoning_effort(&cfg.xdg_config_home);
         return tg.send_message_with_inline_keyboard(
             msg.chat.id,
             &format!(
@@ -1472,10 +1471,9 @@ fn model_buttons(cfg: &Config) -> Vec<InlineKeyboardButton> {
 
 fn provider_model_label(choice: &ProviderModel) -> String {
     format!(
-        "{}: {} ({})",
+        "{}: {}",
         choice.provider.label(),
         choice.provider.model_label(&choice.model),
-        choice.role.label()
     )
 }
 
@@ -1770,13 +1768,16 @@ fn auto_rename_session_in_background(
     let previous_name = state
         .saved_session_name(session_id)
         .map(ToString::to_string);
-    let light_model = cfg.light_provider_model();
+    let default_model = cfg.default_provider_model();
     let output = match run_codex(
-        codex,
+        &CodexConfig {
+            low_reasoning: true,
+            ..codex.clone()
+        },
         AUTO_RENAME_PROMPT,
         Some(session_id),
-        light_model.provider,
-        &light_model.model,
+        default_model.provider,
+        &default_model.model,
         cfg.codex_timeout,
         &cfg.state_dir,
     ) {
@@ -2448,7 +2449,6 @@ pub const fn typing_refresh_interval() -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ModelRole;
     use crate::provider::Provider;
     use crate::telegram::{Chat, Document, PhotoSize, User, Voice};
     use std::collections::VecDeque;
@@ -2465,7 +2465,6 @@ mod tests {
         let choice = ProviderModel {
             provider: Provider::Codex,
             model: String::new(),
-            role: crate::config::ModelRole::Default,
         };
         assert!(provider_model_label(&choice).contains("Codex default (inherited)"));
     }
@@ -3800,13 +3799,9 @@ printf 'session id: session-12345678\n' >&2
 
     #[test]
     fn rename_without_name_starts_auto_rename_without_waiting_or_sending_text() {
-        for expected_model in [Some("gpt-light"), Some("gpt-test"), None] {
+        for expected_model in [Some("gpt-test"), None] {
             let dir = tempdir().unwrap();
             let mut cfg = test_config(dir.path());
-            if expected_model != Some("gpt-light") {
-                cfg.models
-                    .retain(|item| item.role != crate::config::ModelRole::Light);
-            }
             if expected_model.is_none() {
                 cfg.models[0].model.clear();
             }
@@ -3873,6 +3868,9 @@ printf 'session id: aaaaaaaa-current\n' >&2
                 .find(|pair| pair[0] == "-m")
                 .map(|pair| pair[1]);
             assert_eq!(actual_model, expected_model);
+            assert!(arguments
+                .windows(2)
+                .any(|pair| pair == ["-c", "model_reasoning_effort=\"low\""]));
             let prompt = fs::read_to_string(dir.path().join("codex-title.prompt")).unwrap();
             assert!(prompt.contains("lowercase single-word"));
             assert!(prompt.contains("session-name"));
@@ -4299,13 +4297,13 @@ printf 'session id: aaaaaaaa-current\n' >&2
             matches!(
                 call,
                 Call::SendKeyboard { text, buttons, .. }
-                    if text == "🤖 Active: Codex: gpt-test (default)\n🧠 Reasoning: default\n⏱️ Timeout: 5 sec\n\nSelect model:"
+                    if text == "🤖 Active: Codex: gpt-test\n🧠 Reasoning: default\n⏱️ Timeout: 5 sec\n\nSelect model:"
                         && buttons.iter().map(|button| button.text.as_str()).collect::<Vec<_>>()
                             == vec![
-                                "Codex: gpt-test (default)",
-                                "Claude: claude-test (default)",
-                                "OpenRouter: openrouter/test (default)",
-                                "Codex: gpt-light (light)"
+                                "Codex: gpt-test",
+                                "Claude: claude-test",
+                                "OpenRouter: openrouter/test",
+                                "Codex: gpt-alternative"
                             ]
                         && buttons.iter().map(|button| button.callback_data.as_str()).collect::<Vec<_>>()
                             == vec!["model:0", "model:1", "model:2", "model:3"]
@@ -4401,7 +4399,7 @@ printf 'session id: aaaaaaaa-current\n' >&2
 
         assert!(tg.calls().contains(&Call::AnswerCallback {
             callback_query_id: "callback-1".to_string(),
-            text: "Selected OpenRouter: openrouter/test (default)".to_string(),
+            text: "Selected OpenRouter: openrouter/test".to_string(),
         }));
         let job = rx.recv().unwrap();
         assert_eq!(job.provider_model.provider, Provider::Openrouter);
@@ -5618,22 +5616,18 @@ exit 2
                 ProviderModel {
                     provider: Provider::Codex,
                     model: "gpt-test".to_string(),
-                    role: ModelRole::Default,
                 },
                 ProviderModel {
                     provider: Provider::Claude,
                     model: "claude-test".to_string(),
-                    role: ModelRole::Default,
                 },
                 ProviderModel {
                     provider: Provider::Openrouter,
                     model: "openrouter/test".to_string(),
-                    role: ModelRole::Default,
                 },
                 ProviderModel {
                     provider: Provider::Codex,
-                    model: "gpt-light".to_string(),
-                    role: ModelRole::Light,
+                    model: "gpt-alternative".to_string(),
                 },
             ],
             tts: None,
@@ -5652,6 +5646,7 @@ exit 2
     fn test_codex_config(cfg: &Config, bin: PathBuf) -> CodexConfig {
         crate::context::ensure_gateway_context_files(&cfg.xdg_config_home).unwrap();
         CodexConfig {
+            low_reasoning: false,
             bin,
             workdir: cfg.codex_workdir.clone(),
             xdg_config_home: cfg.xdg_config_home.clone(),
@@ -5719,7 +5714,6 @@ exit 2
             provider_model: ProviderModel {
                 provider: Provider::Codex,
                 model: "gpt-test".to_string(),
-                role: ModelRole::Default,
             },
             cancel_epoch: 0,
             stream_message_id: None,
