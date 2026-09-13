@@ -1319,13 +1319,14 @@ fn handle_new_command(
         return Ok(());
     }
     match store.reset(key) {
-        Ok(state) => {
+        Ok(_) => {
             clear_selection(selections, key);
+            let choice = selected_provider_model(cfg, selections, key);
             tg.send_message(
                 msg.chat.id,
                 &format!(
                     "🆕 New session ready. 🤖 Model: {}",
-                    state.provider.model_label(&state.model)
+                    choice.provider.model_label(&choice.model)
                 ),
                 msg.message_id,
             )
@@ -4393,37 +4394,56 @@ printf 'session id: aaaaaaaa-current\n' >&2
 
     #[test]
     fn model_index_selection_is_in_memory_and_resets_on_new_session() {
-        let dir = tempdir().unwrap();
-        let cfg = test_config(dir.path());
-        let store = SessionStore::new(
-            cfg.chat_state_dir.clone(),
-            cfg.default_provider_model().model.clone(),
-        );
-        let tg = FakeTelegram::new();
-        let selections = RuntimeSelections::default();
-        let (tx, rx) = mpsc::sync_channel(1);
-        let msg = message(42, 10, "/model");
+        for (model, label) in [("gpt-test", "gpt-test"), ("", "Codex default (inherited)")] {
+            let dir = tempdir().unwrap();
+            let mut cfg = test_config(dir.path());
+            cfg.models[0].model = model.to_string();
+            let store = SessionStore::new(
+                cfg.chat_state_dir.clone(),
+                cfg.default_provider_model().model.clone(),
+            );
+            store
+                .set_provider(
+                    &SessionKey::Chat {
+                        chat_id: 42,
+                        thread_id: None,
+                    },
+                    Provider::Claude,
+                    "previous-session-model",
+                )
+                .unwrap();
+            let tg = FakeTelegram::new();
+            let selections = RuntimeSelections::default();
+            let (tx, rx) = mpsc::sync_channel(1);
+            let msg = message(42, 10, "/model");
 
-        handle_command(&cfg, &tg, &store, &selections, &msg, "/model 1", "/model").unwrap();
-        handle_message(&cfg, &tg, &store, &selections, &tx, message(42, 11, "run")).unwrap();
-        let selected_job = rx.recv().unwrap();
-        assert_eq!(selected_job.provider_model.provider, Provider::Claude);
-        assert_eq!(selected_job.provider_model.model, "claude-test");
-        assert!(!cfg.gateway_config_file.exists());
+            handle_command(&cfg, &tg, &store, &selections, &msg, "/model 1", "/model").unwrap();
+            handle_message(&cfg, &tg, &store, &selections, &tx, message(42, 11, "run")).unwrap();
+            let selected_job = rx.recv().unwrap();
+            assert_eq!(selected_job.provider_model.provider, Provider::Claude);
+            assert_eq!(selected_job.provider_model.model, "claude-test");
+            assert!(!cfg.gateway_config_file.exists());
 
-        handle_command(&cfg, &tg, &store, &selections, &msg, "/new", "/new").unwrap();
-        handle_message(
-            &cfg,
-            &tg,
-            &store,
-            &selections,
-            &tx,
-            message(42, 12, "run again"),
-        )
-        .unwrap();
-        let default_job = rx.recv().unwrap();
-        assert_eq!(default_job.provider_model.provider, Provider::Codex);
-        assert_eq!(default_job.provider_model.model, "gpt-test");
+            handle_command(&cfg, &tg, &store, &selections, &msg, "/new", "/new").unwrap();
+            handle_message(
+                &cfg,
+                &tg,
+                &store,
+                &selections,
+                &tx,
+                message(42, 12, "run again"),
+            )
+            .unwrap();
+            let default_job = rx.recv().unwrap();
+            assert_eq!(default_job.provider_model.provider, Provider::Codex);
+            assert_eq!(default_job.provider_model.model, model);
+            assert!(
+                tg.sent_text()
+                    .contains(&format!("🆕 New session ready. 🤖 Model: {label}")),
+                "{:?}",
+                tg.sent_text()
+            );
+        }
     }
 
     #[test]
