@@ -77,6 +77,10 @@ impl SessionStore {
         self.load_path(&self.path(key))
     }
 
+    pub fn execution_path(&self, key: &SessionKey) -> PathBuf {
+        self.path(key).with_extension("run.json")
+    }
+
     pub fn reset(&self, key: &SessionKey) -> Result<ChatSession, String> {
         let mut state = self.load(key);
         state.session_id = None;

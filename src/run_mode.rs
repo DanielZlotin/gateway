@@ -1,6 +1,7 @@
 use crate::cli::RunArgs;
-use crate::codex::{run_codex, CodexConfig};
+use crate::codex::{run_codex_tracked, CodexConfig, CodexRun};
 use crate::config::Config;
+use crate::session::{SessionKey, SessionStore};
 use crate::telegram::TelegramClient;
 use crate::text::{is_ok_response, redact_private_data, split_telegram_message};
 use std::fs;
@@ -65,14 +66,26 @@ fn run_with_sender_and_codex(
         .as_deref()
         .unwrap_or(&default_provider_model.model);
     let chat_id = target_chat_id(&args, &cfg)?;
-    let output = run_codex(
+    let store = SessionStore::new(cfg.chat_state_dir.clone(), model.to_string());
+    let key = SessionKey::Chat {
+        chat_id,
+        thread_id: None,
+    };
+    let output = run_codex_tracked(
         codex,
-        &prompt,
-        None,
-        default_provider_model.provider,
-        model,
-        cfg.codex_timeout,
-        &cfg.state_dir,
+        CodexRun {
+            prompt: &prompt,
+            session_id: None,
+            provider: default_provider_model.provider,
+            model,
+            timeout: cfg.codex_timeout,
+            state_dir: &cfg.state_dir,
+            image_paths: &[],
+            cancel: None,
+            on_model: None,
+        },
+        &store.execution_path(&key),
+        |_| {},
     )?;
     if should_send_telegram_result(&output.final_text) {
         let telegram_text = redact_private_data(&output.final_text);
@@ -194,7 +207,7 @@ printf 'session id: session-cli\n' >&2
 
         assert_eq!(output, "OK");
         assert!(sends.lock().unwrap().is_empty());
-        assert!(!cfg.chat_state_dir.exists());
+        assert!(!cfg.chat_state_dir.join("42-main.json").exists());
     }
 
     #[test]
@@ -215,6 +228,7 @@ for arg in "$@"; do
 done
 cat >/dev/null
 printf 'done\n' > "$out"
+printf 'OpenAI Codex v1\n--------\nmodel: gpt-resolved\n--------\n' >&2
 printf 'session id: session-run\n' >&2
 "#,
             ),
@@ -237,12 +251,17 @@ printf 'session id: session-run\n' >&2
             })
             .unwrap();
 
+        let execution =
+            crate::execution::read_execution(&cfg.chat_state_dir.join("42-main.run.json")).unwrap();
+        assert!(!execution.running);
+        assert_eq!(execution.configured.model, "gpt-override");
+        assert_eq!(execution.last_used.unwrap().model, "gpt-resolved");
         assert_eq!(output, "done");
         assert_eq!(
             *sends.lock().unwrap(),
             vec![("token".to_string(), 42, "done".to_string())]
         );
-        assert!(!cfg.chat_state_dir.exists());
+        assert!(!cfg.chat_state_dir.join("42-main.json").exists());
     }
 
     #[test]

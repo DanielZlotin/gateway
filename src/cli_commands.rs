@@ -2,7 +2,7 @@ use crate::cli::ChatArgs;
 use crate::codex::CodexConfig;
 use crate::config::Config;
 use crate::session::{SessionKey, SessionStore};
-use crate::status::{format_status_message, status_sections, StatusSections};
+use crate::status::{format_status_message, status_sections, ModelStatus, StatusSections};
 use crate::update::{run_gateway_update_inline, GatewayUpdateRun};
 
 pub fn list(args: ChatArgs, cfg: Config) -> Result<String, String> {
@@ -29,6 +29,7 @@ fn status_with_sections(
     let state = store.load(&key);
     Ok(format_status_message(
         &state,
+        &ModelStatus::load(&store, &key, cfg.default_provider_model()),
         &sections.heartbeat,
         &sections.codex,
         &sections.git,
@@ -105,6 +106,34 @@ mod tests {
     }
 
     #[test]
+    fn status_reads_live_execution_instead_of_saved_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_config(dir.path());
+        cfg.models[0].model.clear();
+        let store = test_store(&cfg);
+        let key = session_key(42);
+        store.set_model(&key, "gpt-5.6-sol").unwrap();
+        let run =
+            crate::execution::Execution::begin(&store.execution_path(&key), cfg.models[0].clone())
+                .unwrap();
+        run.report_model("gpt-6-astra").unwrap();
+        let output = status_with_sections(
+            ChatArgs { chat: None },
+            cfg,
+            StatusSections {
+                heartbeat: String::new(),
+                codex: String::new(),
+                git: String::new(),
+                fetch: String::new(),
+            },
+        )
+        .unwrap();
+        assert!(output.contains("Active model: gpt-6-astra"));
+        assert!(output.contains("Configured model: Codex default (inherited)"));
+        assert!(!output.contains("gpt-5.6-sol"));
+    }
+
+    #[test]
     fn status_prints_sections_for_requested_chat() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = test_config(dir.path());
@@ -130,7 +159,7 @@ mod tests {
         .unwrap();
 
         assert!(output.contains("📦 Gateway version:"));
-        assert!(output.contains("🤖 Model: gpt-default"));
+        assert!(output.contains("⚙️ Configured model: gpt-default (explicit override)"));
         assert!(output.contains("🫀 Heartbeat: done 12:00"));
         assert!(output.contains("🧠 Codex: ok"));
         assert!(output.contains("🧾 Git: clean"));

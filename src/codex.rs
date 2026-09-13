@@ -4,7 +4,7 @@ use crate::context;
 use crate::provider::Provider;
 use serde::Deserialize;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -48,6 +48,7 @@ pub struct CodexRun<'a> {
     pub timeout: Duration,
     pub state_dir: &'a Path,
     pub cancel: Option<Arc<AtomicBool>>,
+    pub on_model: Option<&'a dyn Fn(&str)>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -157,8 +158,37 @@ pub fn run_codex(
             timeout,
             state_dir,
             cancel: None,
+            on_model: None,
         },
         |_| {},
+    )
+}
+
+pub fn run_codex_tracked(
+    cfg: &CodexConfig,
+    run: CodexRun<'_>,
+    execution_path: &Path,
+    on_stdout: impl FnMut(&str),
+) -> Result<CodexOutput, String> {
+    let execution = crate::execution::Execution::begin(
+        execution_path,
+        crate::config::ProviderModel {
+            provider: run.provider,
+            model: run.model.to_string(),
+        },
+    )?;
+    let on_model = |model: &str| {
+        if let Err(err) = execution.report_model(model) {
+            crate::logs::warn(format_args!("report execution model: {err}"));
+        }
+    };
+    run_codex_stream(
+        cfg,
+        CodexRun {
+            on_model: Some(&on_model),
+            ..run
+        },
+        on_stdout,
     )
 }
 
@@ -222,10 +252,22 @@ pub fn run_codex_stream(
             }
         }
     });
+    let (model_tx, model_rx) = mpsc::channel();
     let stderr_handle = thread::spawn(move || {
-        let mut reader = stderr;
+        let mut reader = BufReader::new(stderr);
+        let mut header = StartupHeader::default();
         let mut buf = Vec::new();
-        let _ = reader.read_to_end(&mut buf);
+        loop {
+            let start = buf.len();
+            match reader.read_until(b'\n', &mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    if let Some(model) = header.model(&String::from_utf8_lossy(&buf[start..])) {
+                        let _ = model_tx.send(model);
+                    }
+                }
+            }
+        }
         buf
     });
 
@@ -239,7 +281,15 @@ pub fn run_codex_stream(
 
     let start = Instant::now();
     let mut stdout_text = String::new();
+    let report_models = || {
+        for model in model_rx.try_iter() {
+            if let Some(on_model) = run.on_model {
+                on_model(&model);
+            }
+        }
+    };
     loop {
+        report_models();
         while let Ok(chunk) = stdout_rx.try_recv() {
             stdout_text.push_str(&chunk);
             on_stdout(&chunk);
@@ -274,6 +324,7 @@ pub fn run_codex_stream(
                 on_stdout(&chunk);
             }
             let stderr = stderr_handle.join().unwrap_or_default();
+            report_models();
             let final_text = fs::read_to_string(&out_path)
                 .unwrap_or_default()
                 .trim()
@@ -297,6 +348,53 @@ pub fn run_codex_stream(
                 .join("\n\n"));
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[derive(Default)]
+enum HeaderPhase {
+    #[default]
+    Banner,
+    Separator,
+    Fields,
+    Done,
+}
+
+#[derive(Default)]
+struct StartupHeader {
+    phase: HeaderPhase,
+    lines: usize,
+}
+
+impl StartupHeader {
+    fn model(&mut self, line: &str) -> Option<String> {
+        self.lines += 1;
+        let line = line.trim();
+        if self.lines > 40 {
+            self.phase = HeaderPhase::Done;
+        }
+        match self.phase {
+            HeaderPhase::Banner if line.starts_with("OpenAI Codex ") => {
+                self.phase = HeaderPhase::Separator
+            }
+            HeaderPhase::Separator if line == "--------" => self.phase = HeaderPhase::Fields,
+            HeaderPhase::Fields if line.contains(':') => {
+                if let Some(model) = line.strip_prefix("model:") {
+                    self.phase = HeaderPhase::Done;
+                    let model = model.trim();
+                    if !model.is_empty()
+                        && model.len() <= 128
+                        && model
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"-._/:".contains(&byte))
+                    {
+                        return Some(model.to_string());
+                    }
+                }
+            }
+            _ => self.phase = HeaderPhase::Done,
+        }
+        None
     }
 }
 
@@ -764,6 +862,7 @@ printf 'session id: session-123\n' >&2
                 timeout: Duration::from_secs(5),
                 state_dir: &dir.path().join("state"),
                 cancel: None,
+                on_model: None,
             },
             |chunk| streamed.push_str(chunk),
         )
@@ -777,6 +876,82 @@ printf 'session id: session-123\n' >&2
             }
         );
         assert!(streamed.contains("streamed"));
+    }
+
+    #[test]
+    fn startup_model_is_reported_before_process_exit() {
+        let dir = tempdir().unwrap();
+        let acknowledged = dir.path().join("model-seen");
+        let fake = executable(
+            dir.path().join("codex-live"),
+            &format!(
+                r#"#!/bin/sh
+cat >/dev/null
+printf 'OpenAI Codex v1.0\n--------\nworkdir: /tmp\nmo' >&2
+printf 'del: gpt-6-astra\n--------\nuser\nmodel: private-prompt\n' >&2
+while [ ! -f '{}' ]; do sleep 0.01; done
+printf 'session id: live-session\n' >&2
+printf 'done\n'
+"#,
+                acknowledged.display()
+            ),
+        );
+        let cfg = codex_config(&fake, dir.path());
+        let on_model = |model: &str| {
+            assert_eq!(model, "gpt-6-astra");
+            fs::write(&acknowledged, model).unwrap();
+        };
+        let output = run_codex_stream(
+            &cfg,
+            CodexRun {
+                prompt: "prompt",
+                session_id: None,
+                provider: Provider::Codex,
+                model: "",
+                image_paths: &[],
+                timeout: Duration::from_secs(2),
+                state_dir: dir.path(),
+                cancel: None,
+                on_model: Some(&on_model),
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(output.final_text, "done");
+        assert_eq!(output.session_id.as_deref(), Some("live-session"));
+    }
+
+    #[test]
+    fn model_parser_is_limited_to_startup_header() {
+        for (input, expected) in [
+            (
+                "OpenAI Codex v1\n--------\nmodel: gpt-6-astra\n--------\nuser\nmodel: secret",
+                Some("gpt-6-astra"),
+            ),
+            (
+                "OpenAI Codex v1\n--------\nworkdir: /tmp\n--------\nmodel: secret",
+                None,
+            ),
+            (
+                "model: secret\nOpenAI Codex v1\n--------\nmodel: spoof",
+                None,
+            ),
+            ("OpenAI Codex v1\n--------\nmodel: has spaces", None),
+            (
+                "OpenAI Codex v1\n--------\nworkdir: /tmp\nuser\nmodel: secret",
+                None,
+            ),
+        ] {
+            let mut parser = StartupHeader::default();
+            let models: Vec<_> = input
+                .lines()
+                .filter_map(|line| parser.model(line))
+                .collect();
+            assert_eq!(
+                models,
+                expected.into_iter().map(str::to_string).collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]
@@ -813,6 +988,7 @@ printf 'session id: session-123\n' >&2
                 timeout: Duration::from_secs(5),
                 state_dir: &dir.path().join("state"),
                 cancel: None,
+                on_model: None,
             },
             |_| {},
         )
@@ -855,6 +1031,7 @@ printf 'session id: session-123\n' >&2
                 timeout: Duration::from_secs(5),
                 state_dir: &dir.path().join("state"),
                 cancel: None,
+                on_model: None,
             },
             |_| {},
         )
@@ -902,6 +1079,7 @@ cat >/dev/null
                 timeout: Duration::from_secs(5),
                 state_dir: &dir.path().join("state"),
                 cancel: None,
+                on_model: None,
             },
             |_| {},
         )
@@ -1029,6 +1207,7 @@ sleep 5
                 timeout: Duration::from_secs(5),
                 state_dir: &dir.path().join("state"),
                 cancel: Some(cancel.clone()),
+                on_model: None,
             },
             |chunk| {
                 if chunk.contains("ready") {

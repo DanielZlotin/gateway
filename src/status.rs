@@ -1,6 +1,7 @@
 use crate::codex::{run_codex, CodexConfig};
-use crate::config::Config;
-use crate::session::ChatSession;
+use crate::config::{Config, ProviderModel};
+use crate::execution::{read_execution, ExecutionState};
+use crate::session::{ChatSession, SessionKey, SessionStore};
 use crate::text::{redact_private_data, session_label};
 use chrono::{DateTime, Local, NaiveDateTime, Utc};
 use serde::Deserialize;
@@ -62,14 +63,64 @@ const FASTFETCH_CONFIG: &str = r#"{
 }
 "#;
 
-pub fn status_header(state: &ChatSession) -> String {
-    format!(
-        "📦 Gateway version: {}\n🔌 Provider: {}\n🤖 Model: {}\n🧵 Session: {}",
+pub struct ModelStatus {
+    pub configured: ProviderModel,
+    pub execution: Option<ExecutionState>,
+}
+
+impl ModelStatus {
+    pub fn load(store: &SessionStore, key: &SessionKey, configured: &ProviderModel) -> Self {
+        Self {
+            configured: configured.clone(),
+            execution: read_execution(&store.execution_path(key)),
+        }
+    }
+}
+
+fn configured_model_label(choice: &ProviderModel) -> String {
+    if choice.model.is_empty() {
+        choice.provider.model_label(&choice.model).to_string()
+    } else {
+        format!("{} (explicit override)", choice.model)
+    }
+}
+
+pub fn status_header(state: &ChatSession, models: &ModelStatus) -> String {
+    let active = models.execution.as_ref().filter(|run| run.running);
+    let provider = active
+        .map(|run| run.configured.provider)
+        .unwrap_or(models.configured.provider);
+    let model = active
+        .map(|run| {
+            run.model
+                .as_deref()
+                .unwrap_or("unknown (awaiting startup metadata)")
+        })
+        .unwrap_or("none (idle)");
+    let mut header = format!(
+        "📦 Gateway version: {}\n🔌 Provider: {}\n🤖 Active model: {}\n⚙️ Configured model: {}",
         env!("CARGO_PKG_VERSION"),
-        state.provider.label(),
-        state.provider.model_label(&state.model),
+        provider.label(),
+        model,
+        configured_model_label(&models.configured),
+    );
+    if let Some(run) = active {
+        header.push_str(&format!(
+            "\n▶️ Run selection: {}",
+            configured_model_label(&run.configured)
+        ));
+    }
+    let last = models
+        .execution
+        .as_ref()
+        .and_then(|run| run.last_used.as_ref())
+        .map(|last| format!("{} / {}", last.provider.label(), last.model))
+        .unwrap_or_else(|| "unknown".to_string());
+    header.push_str(&format!(
+        "\n💾 Last-used model: {last}\n🧵 Session: {}",
         current_session_label(state)
-    )
+    ));
+    header
 }
 
 fn current_session_label(state: &ChatSession) -> String {
@@ -89,12 +140,13 @@ fn current_session_label(state: &ChatSession) -> String {
 
 pub fn format_status_message(
     state: &ChatSession,
+    models: &ModelStatus,
     heartbeat: &str,
     codex: &str,
     git: &str,
     fetch: &str,
 ) -> String {
-    let mut sections = vec![status_header(state)];
+    let mut sections = vec![status_header(state, models)];
     for section in [heartbeat, codex, git, fetch] {
         let section = section.trim();
         if !section.is_empty() {
@@ -901,14 +953,66 @@ mod tests {
     use std::thread;
 
     #[test]
+    fn execution_status_distinguishes_active_configured_and_last_used_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.json");
+        let configured = crate::config::ProviderModel {
+            provider: Provider::Codex,
+            model: String::new(),
+        };
+        let state = ChatSession {
+            model: "gpt-5.6-sol".into(),
+            ..ChatSession::default()
+        };
+        let render = || {
+            status_header(
+                &state,
+                &ModelStatus {
+                    configured: configured.clone(),
+                    execution: crate::execution::read_execution(&path),
+                },
+            )
+        };
+        assert!(render().contains("Active model: none (idle)"));
+        assert!(render().contains("Configured model: Codex default (inherited)"));
+        assert!(!render().contains("gpt-5.6-sol"));
+        let run = crate::execution::Execution::begin(
+            &path,
+            crate::config::ProviderModel {
+                provider: Provider::Codex,
+                model: "override".into(),
+            },
+        )
+        .unwrap();
+        assert!(render().contains("Active model: unknown (awaiting startup metadata)"));
+        assert!(render().contains("Run selection: override (explicit override)"));
+        run.report_model("gpt-6-astra").unwrap();
+        assert!(render().contains("Active model: gpt-6-astra"));
+        drop(run);
+        assert!(render().contains("Active model: none (idle)"));
+        assert!(render().contains("Last-used model: Codex / gpt-6-astra"));
+    }
+
+    fn idle_models() -> ModelStatus {
+        ModelStatus {
+            configured: ProviderModel {
+                provider: Provider::Codex,
+                model: String::new(),
+            },
+            execution: None,
+        }
+    }
+
+    #[test]
     fn inherited_model_status_is_clear() {
-        assert!(status_header(&ChatSession::default()).contains("Codex default (inherited)"));
+        assert!(status_header(&ChatSession::default(), &idle_models())
+            .contains("Codex default (inherited)"));
     }
 
     #[test]
     fn status_header_prints_gateway_version_first() {
         let state = ChatSession::default();
-        let got = status_header(&state);
+        let got = status_header(&state, &idle_models());
         let expected = format!("📦 Gateway version: {}", env!("CARGO_PKG_VERSION"));
 
         assert_eq!(got.lines().next(), Some(expected.as_str()));
@@ -922,9 +1026,9 @@ mod tests {
             ..ChatSession::default()
         };
 
-        let got = status_header(&state);
+        let got = status_header(&state, &idle_models());
 
-        assert!(got.contains("🤖 Model: gpt-test"));
+        assert!(got.contains("🤖 Active model: none (idle)"));
         assert!(got.contains("🧵 Session: 12345678"));
         assert!(!got.contains("/commands"));
     }
@@ -943,7 +1047,7 @@ mod tests {
             ..ChatSession::default()
         };
 
-        let got = status_header(&state);
+        let got = status_header(&state, &idle_models());
 
         assert!(got.contains("🧵 Session: 12345678 (daily)"));
     }
@@ -958,13 +1062,14 @@ mod tests {
 
         let got = format_status_message(
             &state,
+            &idle_models(),
             "🫀 Heartbeat: completed at 2026-06-11 06:49:00",
             "🧠 Codex: ok",
             "🧾 Git\n• 🌉 Gateway: clean",
             "OS: test",
         );
 
-        assert!(got.contains("🤖 Model: gpt-test"));
+        assert!(got.contains("🤖 Active model: none (idle)"));
         assert!(got.contains(
             "🫀 Heartbeat: completed at 2026-06-11 06:49:00\n\n🧠 Codex: ok\n\n🧾 Git\n• 🌉 Gateway: clean\n\nOS: test"
         ));

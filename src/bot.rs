@@ -1,9 +1,9 @@
-use crate::codex::{model_reasoning_effort, run_codex, run_codex_stream, CodexConfig, CodexRun};
+use crate::codex::{model_reasoning_effort, run_codex, run_codex_tracked, CodexConfig, CodexRun};
 use crate::commands::{directive_from_command, is_allowed, unknown_directive_message, Directive};
 use crate::config::{Config, ProviderModel};
 use crate::logs;
 use crate::session::{SessionKey, SessionStore};
-use crate::status::{format_status_message, status_sections};
+use crate::status::{format_status_message, status_sections, ModelStatus};
 use crate::telegram::{CallbackQuery, InlineKeyboardButton, Message, TelegramClient, Update};
 use crate::text::{
     command_arg, is_ok_response, log_line_count, parse_command, redact_private_data, session_label,
@@ -463,6 +463,7 @@ fn startup_statuses_in_background<T: TelegramApi>(
                     chat_id,
                     &format_status_message(
                         &state,
+                        &ModelStatus::load(&store, &key, cfg.default_provider_model()),
                         &sections.heartbeat,
                         &sections.codex,
                         &sections.git,
@@ -1928,7 +1929,8 @@ fn handle_status_command_in_background<T: TelegramApi>(
         tg,
         msg.chat.id,
         &format_status_message(
-            &state_with_provider_model(&state, &selected_provider_model(cfg, selections, key)),
+            &state,
+            &ModelStatus::load(store, key, &selected_provider_model(cfg, selections, key)),
             &sections.heartbeat,
             &sections.codex,
             &sections.git,
@@ -1936,16 +1938,6 @@ fn handle_status_command_in_background<T: TelegramApi>(
         ),
         msg.message_id,
     )
-}
-
-fn state_with_provider_model(
-    state: &crate::session::ChatSession,
-    choice: &ProviderModel,
-) -> crate::session::ChatSession {
-    let mut state = state.clone();
-    state.provider = choice.provider;
-    state.model = choice.model.clone();
-    state
 }
 
 fn worker_loop(cfg: Config, rx: mpsc::Receiver<Job>, cancellations: CancellationState) {
@@ -2077,7 +2069,7 @@ where
     let cancel = register_active_cancel(cancellations, &key);
     let mut streamed = String::new();
     let mut last_edit = Instant::now();
-    let run_result = run_codex_stream(
+    let run_result = run_codex_tracked(
         codex,
         CodexRun {
             prompt: &job.prompt,
@@ -2088,7 +2080,9 @@ where
             timeout: cfg.codex_timeout,
             state_dir: &cfg.state_dir,
             cancel: Some(cancel.clone()),
+            on_model: None,
         },
+        &store.execution_path(&key),
         |chunk| {
             streamed.push_str(chunk);
             if last_edit.elapsed() >= Duration::from_millis(1200) {
@@ -2573,7 +2567,7 @@ mod tests {
         );
         assert_call_eventually(
             &tg,
-            |call| matches!(call, Call::Send { chat_id: 42, reply_to: 0, text } if text.contains("🤖 Model: gpt-test")),
+            |call| matches!(call, Call::Send { chat_id: 42, reply_to: 0, text } if text.contains("⚙️ Configured model: gpt-test (explicit override)")),
         );
         assert!(tg.calls().contains(&Call::GetUpdates {
             offset: 0,
@@ -3720,6 +3714,11 @@ printf 'session id: session-12345678\n' >&2
             chat_id: 42,
             thread_id: None,
         };
+        store.set_model(&key, "gpt-5.6-sol").unwrap();
+        let run =
+            crate::execution::Execution::begin(&store.execution_path(&key), cfg.models[0].clone())
+                .unwrap();
+        run.report_model("gpt-6-astra").unwrap();
         let codex = inert_codex_config(&cfg);
 
         handle_status_command_in_background(&cfg, &codex, &tg, &store, &selections, &msg, &key)
@@ -3734,6 +3733,8 @@ printf 'session id: session-12345678\n' >&2
                 .format("%H:%M")
                 .to_string();
         let sent = tg.sent_text().join("\n");
+        assert!(sent.contains("Active model: gpt-6-astra"));
+        assert!(!sent.contains("gpt-5.6-sol"));
         assert!(
             sent.contains(&format!(
                 "🫀 Heartbeat: done {local_time} · heartbeat body ran"
@@ -4591,6 +4592,58 @@ printf 'session id: aaaaaaaa-current\n' >&2
                 && text.contains("Invalid `tts` config")
                 && text.contains("falling back to local Voicebox")
         }));
+    }
+
+    #[test]
+    fn job_publishes_live_model_and_clears_active_state_on_exit() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        let release = dir.path().join("release");
+        let codex = test_codex_config(
+            &cfg,
+            executable(
+                dir.path().join("codex-live"),
+                &format!(
+                    r#"#!/bin/sh
+cat >/dev/null
+printf 'OpenAI Codex v1\n--------\nmodel: gpt-6-astra\n--------\nuser\nprivate prompt\n' >&2
+while [ ! -f '{}' ]; do sleep 0.01; done
+printf 'OK\n'
+"#,
+                    release.display()
+                ),
+            ),
+        );
+        let store = SessionStore::new(cfg.chat_state_dir.clone(), "gpt-5.6-sol".into());
+        let key = SessionKey::Chat {
+            chat_id: 42,
+            thread_id: None,
+        };
+        let tg = FakeTelegram::new();
+        thread::scope(|scope| {
+            let worker =
+                scope.spawn(|| run_job_with_codex(&cfg, &codex, &tg, &store, job("prompt")));
+            let start = Instant::now();
+            let mut live = None;
+            while start.elapsed() < Duration::from_secs(2) {
+                live = crate::execution::read_execution(&store.execution_path(&key));
+                if live.as_ref().is_some_and(|run| run.model.is_some()) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            fs::write(&release, "done").unwrap();
+            worker.join().unwrap().unwrap();
+            let live = live.expect("job must publish execution metadata while running");
+            assert!(live.running);
+            assert_eq!(live.model.as_deref(), Some("gpt-6-astra"));
+        });
+        let state = crate::execution::read_execution(&store.execution_path(&key)).unwrap();
+        assert!(!state.running);
+        assert_eq!(state.last_used.unwrap().model, "gpt-6-astra");
+        assert!(!fs::read_to_string(store.execution_path(&key))
+            .unwrap()
+            .contains("private prompt"));
     }
 
     #[test]

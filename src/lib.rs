@@ -6,6 +6,7 @@ pub mod codex;
 pub mod commands;
 pub mod config;
 pub mod context;
+pub mod execution;
 pub mod heartbeat;
 pub mod json_file;
 pub mod launchd;

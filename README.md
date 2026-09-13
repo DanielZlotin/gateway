@@ -182,7 +182,10 @@ It tails the canonical event log, including bot, heartbeat, and update events.
 📚 `gateway list [--chat ID]` prints saved sessions for a configured chat.
 
 📊 `gateway status [--chat ID]` prints Codex, gateway, and system status for a
-configured chat.
+configured chat. CLI and Telegram status distinguish the active model, configured
+selection, and last-used model. The active model comes from the running Codex
+startup header; it is unknown until that metadata arrives and shows idle after
+execution ends. This reports the CLI-selected model, not backend routing.
 
 🫀 `gateway heartbeat` checks whether scheduled work is due; the heartbeat
 LaunchAgent invokes it every 60 seconds. When due, it runs the update flow below,
