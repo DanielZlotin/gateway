@@ -270,7 +270,10 @@ impl SessionStore {
         if state.sessions.is_empty() {
             return "📭 No saved sessions yet. Send a normal message to create one.".to_string();
         }
-        let mut lines = vec!["💾 Saved sessions:".to_string()];
+        let mut lines = vec![format!(
+            "💾 Saved sessions:\n🤖 Resume model: {}",
+            self.default_provider.model_label(&self.default_model)
+        )];
         for (index, item) in state.sessions.into_iter().enumerate() {
             let marker = if Some(item.id.as_str()) == state.session_id.as_deref() {
                 "⭐"
@@ -278,24 +281,8 @@ impl SessionStore {
                 "▫️"
             };
             let name = item.name.as_deref().unwrap_or("(unnamed)");
-            let model = item.provider.model_label(&item.model);
-            let provider = match item.provider {
-                Provider::Codex => "",
-                _ => item.provider.label(),
-            };
-            let show_model =
-                item.provider != self.default_provider || item.model != self.default_model;
-            let provider_model = if show_model && !provider.is_empty() {
-                format!(" {provider} {model}")
-            } else if show_model {
-                format!(" {model}")
-            } else if !provider.is_empty() {
-                format!(" {provider}")
-            } else {
-                String::new()
-            };
             lines.push(format!(
-                "{}. {marker} {}{provider_model} {name}",
+                "{}. {marker} {} {name}",
                 index + 1,
                 session_label(&item.id)
             ));
@@ -580,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn list_omits_default_model_and_prints_non_default_models() {
+    fn list_shows_resume_model_instead_of_stale_session_models() {
         let dir = tempdir().unwrap();
         let store = SessionStore::new(dir.path().join("chats"), "gpt-default".to_string());
         let key = SessionKey::Chat {
@@ -623,10 +610,12 @@ mod tests {
 
         assert!(list.contains("💾 Saved sessions:"));
         assert!(list.contains("1. ⭐ session- (unnamed)"));
-        assert!(list.contains("2. ▫️ session- Codex default (inherited) (unnamed)"));
-        assert!(list.contains("3. ▫️ session- gpt-alt (unnamed)"));
-        assert!(list.contains("4. ▫️ session- Claude claude-test (unnamed)"));
-        assert!(!list.contains("gpt-default"));
+        assert!(list.contains("2. ▫️ session- (unnamed)"));
+        assert!(list.contains("3. ▫️ session- (unnamed)"));
+        assert!(list.contains("4. ▫️ session- (unnamed)"));
+        assert!(list.contains("🤖 Resume model: gpt-default"));
+        assert!(!list.contains("gpt-alt"));
+        assert!(!list.contains("claude-test"));
         assert!(dir.path().join("chats/7-thread-99.json").exists());
     }
 

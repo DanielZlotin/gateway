@@ -1198,7 +1198,9 @@ fn handle_command_with_codex(
         Some(Directive::New) => handle_new_command(cfg, codex, tg, store, selections, msg, &key),
         Some(Directive::Update) => handle_update_command(cfg, tg, msg),
         Some(Directive::Model) => handle_model_command(cfg, tg, store, selections, msg, text, &key),
-        Some(Directive::Resume) => handle_resume_command(tg, store, selections, msg, text, &key),
+        Some(Directive::Resume) => {
+            handle_resume_command(cfg, tg, store, selections, msg, text, &key)
+        }
         Some(Directive::Rename) => handle_rename_command(cfg, codex, tg, store, msg, text, &key),
         Some(Directive::List) => {
             send_long_message(tg, msg.chat.id, &store.list(&key), msg.message_id)
@@ -1570,6 +1572,7 @@ fn is_allowed_private_chat(
 }
 
 fn handle_resume_command(
+    cfg: &Config,
     tg: &impl TelegramApi,
     store: &SessionStore,
     selections: &RuntimeSelections,
@@ -1589,7 +1592,12 @@ fn handle_resume_command(
     match result {
         Ok(state) => {
             clear_selection(selections, key);
-            send_resumed_session(tg, msg, &state)
+            send_resumed_session(
+                tg,
+                msg,
+                &state,
+                &selected_provider_model(cfg, selections, key),
+            )
         }
         Err(err) => tg.send_message(msg.chat.id, &err, msg.message_id),
     }
@@ -1599,13 +1607,14 @@ fn send_resumed_session(
     tg: &impl TelegramApi,
     msg: &Message,
     state: &crate::session::ChatSession,
+    choice: &ProviderModel,
 ) -> Result<(), String> {
     tg.send_message(
         msg.chat.id,
         &format!(
             "↩️ Resumed session {}\n🤖 Model: {}",
             session_label(state.session_id.as_deref().unwrap_or("")),
-            state.provider.model_label(&state.model)
+            choice.provider.model_label(&choice.model)
         ),
         msg.message_id,
     )
@@ -3793,30 +3802,68 @@ printf 'session id: session-12345678\n' >&2
     }
 
     #[test]
-    fn resume_numeric_argument_selects_list_index() {
-        let dir = tempdir().unwrap();
-        let cfg = test_config(dir.path());
-        let store = SessionStore::new(
-            cfg.chat_state_dir.clone(),
-            cfg.default_provider_model().model.clone(),
-        );
-        let tg = FakeTelegram::new();
-        let selections = RuntimeSelections::default();
-        let msg = message(42, 10, "/resume 2");
-        let key = SessionKey::Chat {
-            chat_id: 42,
-            thread_id: None,
-        };
-        seed_session_history(&store, &key);
+    fn resume_by_index_or_id_reports_next_message_model() {
+        for target in ["2", "bbbbbbbb-previous"] {
+            let dir = tempdir().unwrap();
+            let mut cfg = test_config(dir.path());
+            cfg.models[0].model.clear();
+            let store = SessionStore::new(
+                cfg.chat_state_dir.clone(),
+                cfg.default_provider_model().model.clone(),
+            );
+            let tg = FakeTelegram::new();
+            let selections = RuntimeSelections::default();
+            let msg = message(42, 10, "/resume 2");
+            let key = SessionKey::Chat {
+                chat_id: 42,
+                thread_id: None,
+            };
+            store.set_model(&key, "stale-saved-model").unwrap();
+            seed_session_history(&store, &key);
+            set_selection(&selections, &key, cfg.models[1].clone());
 
-        handle_command(&cfg, &tg, &store, &selections, &msg, "/resume 2", "/resume").unwrap();
+            handle_command(
+                &cfg,
+                &tg,
+                &store,
+                &selections,
+                &msg,
+                &format!("/resume {target}"),
+                "/resume",
+            )
+            .unwrap();
 
-        let state = store.load(&key);
-        assert_eq!(state.session_id.as_deref(), Some("bbbbbbbb-previous"));
-        assert!(tg
-            .sent_text()
-            .iter()
-            .any(|text| text.contains("↩️ Resumed session bbbbbbbb")));
+            let state = store.load(&key);
+            assert_eq!(state.session_id.as_deref(), Some("bbbbbbbb-previous"));
+            assert!(tg
+                .sent_text()
+                .iter()
+                .any(|text| text
+                    == "↩️ Resumed session bbbbbbbb\n🤖 Model: Codex default (inherited)"));
+            let (tx, rx) = mpsc::sync_channel(1);
+            handle_message(
+                &cfg,
+                &tg,
+                &store,
+                &selections,
+                &tx,
+                message(42, 11, "continue"),
+            )
+            .unwrap();
+            assert_eq!(rx.recv().unwrap().provider_model, cfg.models[0]);
+            handle_command(&cfg, &tg, &store, &selections, &msg, "/list", "/list").unwrap();
+            handle_command(&cfg, &tg, &store, &selections, &msg, "/resume", "/resume").unwrap();
+            assert_eq!(
+                tg.sent_text()
+                    .iter()
+                    .filter(
+                        |text| text.contains("🤖 Resume model: Codex default (inherited)")
+                            && !text.contains("stale-saved-model")
+                    )
+                    .count(),
+                2
+            );
+        }
     }
 
     #[test]

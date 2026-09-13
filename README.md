@@ -231,6 +231,7 @@ Sessions are kept separately per chat, and commands are case-insensitive.
    and selection buttons; `/model 0`, `/model 1`, etc. select by index.
 2. ↩️ `/resume` and `/resume 0` list sessions; `/resume 1` steps back one
    saved session; names, full session IDs, and first 8 characters also match.
+   Lists and resume confirmations show the configured default used after resuming.
 3. 🏷️ `/rename` without a name asks Codex to create one.
 4. 🫧 Bot prompts stream progress and split long final answers.
 5. 📎 Photos and image documents are attached; other documents become file paths.
