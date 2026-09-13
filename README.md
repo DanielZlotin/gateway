@@ -191,6 +191,9 @@ execution ends. This reports the CLI-selected model, not backend routing.
 update flow below, then execute `$XDG_CONFIG_HOME/gateway/HEARTBEAT.md` in a fresh
 session. An update failure or an already-running update skips the prompt.
 Telegram runs heartbeat in the background so the bot keeps responding.
+Heartbeat updates files without restarting either running service, so the bot and
+heartbeat can finish their work. Use `/update` or `gateway update` to restart
+services and activate a new build.
 The heartbeat LaunchAgent invokes `gateway heartbeat --scheduled` every 60 seconds
 to run only when due.
 

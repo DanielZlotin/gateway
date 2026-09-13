@@ -323,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_does_not_reload_heartbeat_when_running_inside_heartbeat() {
+    fn setup_does_not_stop_services_when_running_inside_heartbeat() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let stub_dir = root.join("bin");
@@ -363,13 +363,12 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        let launchctl_log = fs::read_to_string(launchctl_log).unwrap();
-        assert!(launchctl_log.contains("ai.gateway"));
+        let launchctl_log = fs::read_to_string(launchctl_log).unwrap_or_default();
         assert!(
-            !launchctl_log.contains("ai.gateway.heartbeat"),
-            "heartbeat should not be reloaded while heartbeat is active:\n{launchctl_log}"
+            launchctl_log.is_empty(),
+            "heartbeat must not terminate itself or other bot work:\n{launchctl_log}"
         );
-        assert!(home
+        assert!(!home
             .join(".local/state/gateway/suppress-startup-status.once")
             .exists());
         assert!(home

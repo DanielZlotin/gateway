@@ -96,13 +96,16 @@ pub fn start_gateway_update(cfg: &Config) -> Result<GatewayUpdateStart, String> 
     Ok(GatewayUpdateStart::Started)
 }
 
-pub fn run_gateway_update_inline(cfg: &Config) -> Result<GatewayUpdateRun, String> {
+pub fn run_gateway_update_inline(
+    cfg: &Config,
+    heartbeat_active: bool,
+) -> Result<GatewayUpdateRun, String> {
     let lock_file = gateway_update_lock_file(cfg);
     if !acquire_gateway_update_lock(&lock_file)? {
         return Ok(GatewayUpdateRun::AlreadyRunning);
     }
 
-    let run_result = gateway_update_script_command(&lock_file, None)
+    let run_result = gateway_update_script_command(&lock_file, heartbeat_active)
         .stdin(Stdio::null())
         .status()
         .map_err(|err| format!("run gateway update: {err}"));
@@ -276,18 +279,17 @@ fn submit_gateway_update(_lock_file: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn gateway_update_script_command(lock_file: &Path, label: Option<&str>) -> Command {
+fn gateway_update_script_command(lock_file: &Path, heartbeat_active: bool) -> Command {
     let mut command = Command::new("/bin/zsh");
     command
-        .args([
-            "-lc",
-            GATEWAY_UPDATE_SCRIPT,
-            "gateway-update",
-            label.unwrap_or_default(),
-        ])
+        .args(["-lc", GATEWAY_UPDATE_SCRIPT, "gateway-update", ""])
         .arg(lock_file)
         .arg(gateway_root())
         .arg(env!("CARGO_PKG_VERSION"));
+    command.env(
+        crate::heartbeat::HEARTBEAT_ACTIVE_ENV,
+        if heartbeat_active { "1" } else { "" },
+    );
     command
 }
 
@@ -353,9 +355,7 @@ mod tests {
             .unwrap();
         let brew_update = script.find("brew update").unwrap();
         let brew_cleanup = script.find("brew cleanup").unwrap();
-        let brewsave = script
-            .find("brew bundle dump --global --force")
-            .unwrap();
+        let brewsave = script.find("brew bundle dump --global --force").unwrap();
         let setup = script.find("gateway_step setup ./setup").unwrap();
         assert!(gateway_pull < xdg_pull);
         assert!(xdg_pull < brew_update);

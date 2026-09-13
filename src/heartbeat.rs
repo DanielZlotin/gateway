@@ -35,12 +35,11 @@ pub fn run(cfg: Config) -> Result<String, String> {
 }
 
 fn run_with_schedule(cfg: Config, schedule: HeartbeatSchedule) -> Result<String, String> {
-    std::env::set_var(HEARTBEAT_ACTIVE_ENV, "1");
     run_due_heartbeat(
         cfg,
         current_total_minutes(),
         schedule,
-        run_gateway_update_inline,
+        |cfg| run_gateway_update_inline(cfg, true),
         run_mode::run,
     )
 }
@@ -416,6 +415,7 @@ mod tests {
 
     #[test]
     fn manual_heartbeat_runs_even_when_not_due() {
+        let original_context = std::env::var_os(HEARTBEAT_ACTIVE_ENV);
         let dir = tempdir().unwrap();
         let cfg = test_config(dir.path());
         fs::create_dir_all(&cfg.state_dir).unwrap();
@@ -427,6 +427,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(run(cfg).unwrap(), "gateway update already running");
+        assert_eq!(std::env::var_os(HEARTBEAT_ACTIVE_ENV), original_context);
     }
 
     #[test]

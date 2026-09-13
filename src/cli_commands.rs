@@ -17,7 +17,7 @@ pub fn status(args: ChatArgs, cfg: Config) -> Result<String, String> {
 }
 
 pub fn update(cfg: Config) -> Result<String, String> {
-    update_with_runner(cfg, run_gateway_update_inline)
+    update_with_runner(cfg, |cfg| run_gateway_update_inline(cfg, false))
 }
 
 fn status_with_sections(
