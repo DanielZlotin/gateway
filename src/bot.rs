@@ -1310,6 +1310,7 @@ fn handle_heartbeat_command(
     tg: &impl TelegramApi,
     msg: &Message,
 ) -> Result<(), String> {
+    tg.send_message(msg.chat.id, "🫀 Heartbeat started…", msg.message_id)?;
     let text = crate::heartbeat::run_now(cfg.clone())
         .unwrap_or_else(|err| format!("⚠️ Heartbeat failed: {err}"));
     send_long_message(tg, msg.chat.id, &text, msg.message_id)
@@ -3584,7 +3585,7 @@ printf 'session id: session-12345678\n' >&2
     }
 
     #[test]
-    fn heartbeat_command_prints_heartbeat_result() {
+    fn heartbeat_command_replies_with_start_then_result() {
         let dir = tempdir().unwrap();
         let cfg = test_config(dir.path());
         fs::create_dir_all(&cfg.state_dir).unwrap();
@@ -3618,8 +3619,46 @@ printf 'session id: session-12345678\n' >&2
         .unwrap();
 
         assert_eq!(
-            tg.sent_text(),
-            vec!["gateway update already running".to_string()]
+            tg.calls(),
+            vec![
+                Call::Send {
+                    chat_id: 42,
+                    reply_to: 10,
+                    text: "🫀 Heartbeat started…".to_string(),
+                },
+                Call::Send {
+                    chat_id: 42,
+                    reply_to: 10,
+                    text: "gateway update already running".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn heartbeat_command_replies_with_start_then_failure() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        fs::create_dir_all(&cfg.state_dir).unwrap();
+        fs::write(cfg.state_dir.join("heartbeat.last"), "invalid").unwrap();
+        let tg = FakeTelegram::new();
+        let msg = message(42, 10, "/heartbeat");
+
+        handle_heartbeat_command(&cfg, &tg, &msg).unwrap();
+
+        let calls = tg.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0],
+            Call::Send {
+                chat_id: 42,
+                reply_to: 10,
+                text: "🫀 Heartbeat started…".to_string(),
+            }
+        );
+        assert!(
+            matches!(&calls[1], Call::Send { chat_id: 42, reply_to: 10, text }
+            if text.starts_with("⚠️ Heartbeat failed: parse heartbeat state:"))
         );
     }
 
