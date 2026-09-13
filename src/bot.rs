@@ -1198,9 +1198,7 @@ fn handle_command_with_codex(
         Some(Directive::New) => handle_new_command(cfg, codex, tg, store, selections, msg, &key),
         Some(Directive::Update) => handle_update_command(cfg, tg, msg),
         Some(Directive::Model) => handle_model_command(cfg, tg, store, selections, msg, text, &key),
-        Some(Directive::Resume) => {
-            handle_resume_command(cfg, tg, store, selections, msg, text, &key)
-        }
+        Some(Directive::Resume) => handle_resume_command(tg, store, selections, msg, text, &key),
         Some(Directive::Rename) => handle_rename_command(cfg, codex, tg, store, msg, text, &key),
         Some(Directive::List) => {
             send_long_message(tg, msg.chat.id, &store.list(&key), msg.message_id)
@@ -1572,7 +1570,6 @@ fn is_allowed_private_chat(
 }
 
 fn handle_resume_command(
-    cfg: &Config,
     tg: &impl TelegramApi,
     store: &SessionStore,
     selections: &RuntimeSelections,
@@ -1592,12 +1589,7 @@ fn handle_resume_command(
     match result {
         Ok(state) => {
             clear_selection(selections, key);
-            send_resumed_session(
-                tg,
-                msg,
-                &state,
-                &selected_provider_model(cfg, selections, key),
-            )
+            send_resumed_session(tg, msg, &state)
         }
         Err(err) => tg.send_message(msg.chat.id, &err, msg.message_id),
     }
@@ -1607,14 +1599,12 @@ fn send_resumed_session(
     tg: &impl TelegramApi,
     msg: &Message,
     state: &crate::session::ChatSession,
-    choice: &ProviderModel,
 ) -> Result<(), String> {
     tg.send_message(
         msg.chat.id,
         &format!(
-            "↩️ Resumed session {}\n🤖 Model: {}",
-            session_label(state.session_id.as_deref().unwrap_or("")),
-            choice.provider.model_label(&choice.model)
+            "↩️ Resumed session {}",
+            session_label(state.session_id.as_deref().unwrap_or(""))
         ),
         msg.message_id,
     )
@@ -3802,7 +3792,7 @@ printf 'session id: session-12345678\n' >&2
     }
 
     #[test]
-    fn resume_by_index_or_id_reports_next_message_model() {
+    fn resume_by_index_or_id_omits_models_and_resets_selection() {
         for target in ["2", "bbbbbbbb-previous"] {
             let dir = tempdir().unwrap();
             let mut cfg = test_config(dir.path());
@@ -3838,8 +3828,7 @@ printf 'session id: session-12345678\n' >&2
             assert!(tg
                 .sent_text()
                 .iter()
-                .any(|text| text
-                    == "↩️ Resumed session bbbbbbbb\n🤖 Model: Codex default (inherited)"));
+                .any(|text| text == "↩️ Resumed session bbbbbbbb"));
             let (tx, rx) = mpsc::sync_channel(1);
             handle_message(
                 &cfg,
@@ -3856,10 +3845,8 @@ printf 'session id: session-12345678\n' >&2
             assert_eq!(
                 tg.sent_text()
                     .iter()
-                    .filter(
-                        |text| text.contains("🤖 Resume model: Codex default (inherited)")
-                            && !text.contains("stale-saved-model")
-                    )
+                    .filter(|text| text.starts_with("💾 Saved sessions:\n1.")
+                        && !text.contains("model"))
                     .count(),
                 2
             );

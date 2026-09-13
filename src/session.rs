@@ -270,10 +270,7 @@ impl SessionStore {
         if state.sessions.is_empty() {
             return "📭 No saved sessions yet. Send a normal message to create one.".to_string();
         }
-        let mut lines = vec![format!(
-            "💾 Saved sessions:\n🤖 Resume model: {}",
-            self.default_provider.model_label(&self.default_model)
-        )];
+        let mut lines = vec!["💾 Saved sessions:".to_string()];
         for (index, item) in state.sessions.into_iter().enumerate() {
             let marker = if Some(item.id.as_str()) == state.session_id.as_deref() {
                 "⭐"
@@ -567,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn list_shows_resume_model_instead_of_stale_session_models() {
+    fn list_omits_models() {
         let dir = tempdir().unwrap();
         let store = SessionStore::new(dir.path().join("chats"), "gpt-default".to_string());
         let key = SessionKey::Chat {
@@ -613,7 +610,8 @@ mod tests {
         assert!(list.contains("2. ▫️ session- (unnamed)"));
         assert!(list.contains("3. ▫️ session- (unnamed)"));
         assert!(list.contains("4. ▫️ session- (unnamed)"));
-        assert!(list.contains("🤖 Resume model: gpt-default"));
+        assert!(!list.contains("model"));
+        assert!(!list.contains("gpt-default"));
         assert!(!list.contains("gpt-alt"));
         assert!(!list.contains("claude-test"));
         assert!(dir.path().join("chats/7-thread-99.json").exists());
