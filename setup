@@ -149,6 +149,9 @@ gateway_voicebox_asset_name() {
 }
 
 gateway_install_voicebox_app() {
+  if [[ -x "$gateway_voicebox_executable" && "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$gateway_voicebox_app/Contents/Info.plist" 2>/dev/null)" == "$gateway_voicebox_version" ]]; then
+    return 0
+  fi
   local gateway_asset gateway_url gateway_staged_executable
   gateway_asset="$(gateway_voicebox_asset_name)"
   gateway_voicebox_archive="$gateway_voicebox_root/$gateway_asset"

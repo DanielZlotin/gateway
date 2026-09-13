@@ -289,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "0.1.79"
+version = "0.1.80"
 dependencies = [
  "chrono",
  "clap",
