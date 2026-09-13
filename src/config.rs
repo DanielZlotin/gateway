@@ -11,7 +11,7 @@ pub const GATEWAY_TELEGRAM_TOKEN_ENV: &str = "GATEWAY_TELEGRAM_TOKEN";
 pub const GATEWAY_TELEGRAM_CHAT_ID_ENV: &str = "GATEWAY_TELEGRAM_CHAT_ID";
 pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-4-8";
 pub const DEFAULT_OPENROUTER_MODEL: &str = "openai/gpt-5.5";
-pub const DEFAULT_CODEX_TIMEOUT_MINS: u64 = 60;
+pub const DEFAULT_CODEX_TIMEOUT: &str = "1h";
 pub const DEFAULT_HEARTBEAT: &str = "1d";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -59,8 +59,8 @@ pub struct TelegramBotConfig {
 #[serde(deny_unknown_fields)]
 pub struct GatewayConfigFile {
     pub models: Vec<ProviderModel>,
-    #[serde(default = "default_timeout_mins")]
-    pub timeout_mins: u64,
+    #[serde(default = "default_timeout")]
+    pub timeout: String,
     #[serde(default = "default_heartbeat")]
     pub heartbeat: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -120,7 +120,7 @@ pub fn load_from_env(env: &BTreeMap<String, String>) -> Result<Config, String> {
         launchd_target,
         poll_timeout_sec: 50,
         queue_depth: 8,
-        codex_timeout: Duration::from_secs(timeout_secs(gateway_config.timeout_mins)?),
+        codex_timeout: parse_duration("timeout", &gateway_config.timeout)?,
         heartbeat_interval,
     })
 }
@@ -286,7 +286,7 @@ impl Default for GatewayConfigFile {
     fn default() -> Self {
         Self {
             models: default_models(),
-            timeout_mins: default_timeout_mins(),
+            timeout: default_timeout(),
             heartbeat: default_heartbeat(),
             tts: None,
         }
@@ -296,16 +296,15 @@ impl Default for GatewayConfigFile {
 impl GatewayConfigFile {
     pub fn normalize(&mut self) -> Result<(), String> {
         normalize_models(&mut self.models)?;
-        if self.timeout_mins == 0 {
-            return Err("timeout_mins must be greater than zero".to_string());
-        }
+        self.timeout = self.timeout.trim().to_ascii_lowercase();
+        parse_duration("timeout", &self.timeout)?;
         self.heartbeat = self.heartbeat.trim().to_ascii_lowercase();
         self.heartbeat_interval()?;
         Ok(())
     }
 
     pub fn heartbeat_interval(&self) -> Result<Duration, String> {
-        heartbeat_interval(&self.heartbeat)
+        parse_duration("heartbeat", &self.heartbeat)
     }
 }
 
@@ -326,42 +325,38 @@ pub fn default_models() -> Vec<ProviderModel> {
     ]
 }
 
-const fn default_timeout_mins() -> u64 {
-    DEFAULT_CODEX_TIMEOUT_MINS
+fn default_timeout() -> String {
+    DEFAULT_CODEX_TIMEOUT.to_string()
 }
 
 fn default_heartbeat() -> String {
     DEFAULT_HEARTBEAT.to_string()
 }
 
-fn timeout_secs(timeout_mins: u64) -> Result<u64, String> {
-    timeout_mins
-        .checked_mul(60)
-        .ok_or_else(|| "timeout_mins is too large".to_string())
-}
-
-fn heartbeat_interval(value: &str) -> Result<Duration, String> {
+fn parse_duration(field: &str, value: &str) -> Result<Duration, String> {
     let value = value.trim();
-    if value.len() < 2 {
-        return Err("heartbeat must use a positive duration like 1m, 3h, or 1d".to_string());
+    if value.len() < 2 || !value.is_ascii() {
+        return Err(format!(
+            "{field} must use a positive duration like 1m, 3h, or 1d"
+        ));
     }
     let (number, unit) = value.split_at(value.len() - 1);
     let count = number
         .parse::<u64>()
-        .map_err(|_| "heartbeat must use a positive duration like 1m, 3h, or 1d".to_string())?;
+        .map_err(|_| format!("{field} must use a positive duration like 1m, 3h, or 1d"))?;
     if count == 0 {
-        return Err("heartbeat must be greater than zero".to_string());
+        return Err(format!("{field} must be greater than zero"));
     }
     let seconds_per_unit = match unit {
         "m" => 60,
         "h" => 60 * 60,
         "d" => 24 * 60 * 60,
-        _ => return Err("heartbeat unit must be m, h, or d".to_string()),
+        _ => return Err(format!("{field} unit must be m, h, or d")),
     };
     count
         .checked_mul(seconds_per_unit)
         .map(Duration::from_secs)
-        .ok_or_else(|| "heartbeat is too large".to_string())
+        .ok_or_else(|| format!("{field} is too large"))
 }
 
 impl Config {
@@ -493,6 +488,63 @@ fn normalize_models(models: &mut [ProviderModel]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loads_timeout_durations() {
+        let (_dir, env) = env_with_token();
+        let path = PathBuf::from(&env["XDG_CONFIG_HOME"]).join("gateway/config.json");
+        for (timeout, seconds) in [("9m", 540), ("1h", 3600), ("1d", 86400), (" 2H ", 7200)] {
+            fs::write(
+                &path,
+                serde_json::json!({"models":[{"provider":"codex"}],"timeout":timeout}).to_string(),
+            )
+            .unwrap();
+            assert_eq!(
+                load_from_env(&env).unwrap().codex_timeout,
+                Duration::from_secs(seconds)
+            );
+            let saved: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(saved["timeout"], timeout.trim().to_ascii_lowercase());
+            assert!(saved.get("timeout_mins").is_none());
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_timeout_durations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        for timeout in serde_json::json!([
+            "",
+            "0m",
+            "1",
+            "m",
+            "3x",
+            "-1h",
+            "1.5h",
+            "1日",
+            "18446744073709551615d",
+            60
+        ])
+        .as_array()
+        .unwrap()
+        {
+            fs::write(
+                &path,
+                serde_json::json!({"models":[{"provider":"codex"}],"timeout":timeout}).to_string(),
+            )
+            .unwrap();
+            assert!(load_gateway_config(&path).is_err(), "timeout={timeout}");
+        }
+        fs::write(
+            &path,
+            r#"{"models":[{"provider":"codex"}],"timeout_mins":60}"#,
+        )
+        .unwrap();
+        assert!(load_gateway_config(&path)
+            .unwrap_err()
+            .contains("unknown field"));
+    }
 
     #[test]
     fn inherited_models_survive_repeated_load_save() {
@@ -722,7 +774,7 @@ mod tests {
         fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
         fs::write(
             &cfg_path,
-            r#"{"models":[{"provider":"codex","model":"gpt-test"}],"timeout_mins":9}"#,
+            r#"{"models":[{"provider":"codex","model":"gpt-test"}],"timeout":"9m"}"#,
         )
         .unwrap();
 
@@ -821,7 +873,7 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
-            r#"{"models":[{"provider":"claude","model":" claude-test "}],"timeout_mins":30}"#,
+            r#"{"models":[{"provider":"claude","model":" claude-test "}],"timeout":"30m"}"#,
         )
         .unwrap();
 
@@ -837,7 +889,7 @@ mod tests {
         let text = fs::read_to_string(&path).unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert!(value.get("provider").is_none());
-        assert!(text.contains("\"timeout_mins\": 30"));
+        assert!(text.contains(r#""timeout": "30m""#));
     }
 
     #[test]
@@ -869,10 +921,10 @@ mod tests {
 
         let cfg = load_gateway_config(&path).unwrap();
 
-        assert_eq!(DEFAULT_CODEX_TIMEOUT_MINS, 60);
-        assert_eq!(cfg.timeout_mins, DEFAULT_CODEX_TIMEOUT_MINS);
+        assert_eq!(DEFAULT_CODEX_TIMEOUT, "1h");
+        assert_eq!(cfg.timeout, DEFAULT_CODEX_TIMEOUT);
         let text = fs::read_to_string(&path).unwrap();
-        assert!(text.contains("\"timeout_mins\": 60"));
+        assert!(text.contains(r#""timeout": "1h""#));
     }
 
     #[test]
@@ -945,7 +997,7 @@ mod tests {
             PathBuf::from(env.get("XDG_CONFIG_HOME").unwrap()).join("gateway/config.json");
         fs::write(
             &cfg_path,
-            r#"{"models":[{"provider":"codex","model":"gpt-test"}],"timeout_mins":30,"tts":{"provider":"elevenlabs","model":"eleven_v3","voice":"voice-abc","speed":1.25}}"#,
+            r#"{"models":[{"provider":"codex","model":"gpt-test"}],"timeout":"30m","tts":{"provider":"elevenlabs","model":"eleven_v3","voice":"voice-abc","speed":1.25}}"#,
         )
         .unwrap();
 
@@ -979,7 +1031,7 @@ mod tests {
             PathBuf::from(env.get("XDG_CONFIG_HOME").unwrap()).join("gateway/config.json");
         fs::write(
             &cfg_path,
-            r#"{"models":[{"provider":"codex","model":"gpt-test"}],"timeout_mins":30,"tts":{"provider":17,"unknown":{"nested":true}}}"#,
+            r#"{"models":[{"provider":"codex","model":"gpt-test"}],"timeout":"30m","tts":{"provider":17,"unknown":{"nested":true}}}"#,
         )
         .unwrap();
 
@@ -1000,7 +1052,7 @@ mod tests {
             PathBuf::from(env.get("XDG_CONFIG_HOME").unwrap()).join("gateway/config.json");
         fs::write(
             &cfg_path,
-            r#"{"models":[{"provider":"codex","model":"gpt-test"}],"timeout_mins":30,"tts":{"provider":"elevenlabs","model":" ","voice":"voice-abc","speed":0}}"#,
+            r#"{"models":[{"provider":"codex","model":"gpt-test"}],"timeout":"30m","tts":{"provider":"elevenlabs","model":" ","voice":"voice-abc","speed":0}}"#,
         )
         .unwrap();
 
@@ -1017,7 +1069,7 @@ mod tests {
             PathBuf::from(env.get("XDG_CONFIG_HOME").unwrap()).join("gateway/config.json");
         fs::write(
             &cfg_path,
-            r#"{"models":[{"provider":"codex","model":"gpt-test"}],"timeout_mins":30,"tts":{"provider":"elevenlabs","model":"eleven_v3","voice_id":"voice-abc"}}"#,
+            r#"{"models":[{"provider":"codex","model":"gpt-test"}],"timeout":"30m","tts":{"provider":"elevenlabs","model":"eleven_v3","voice_id":"voice-abc"}}"#,
         )
         .unwrap();
 
@@ -1035,13 +1087,13 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
-            r#"{"models":[{"provider":"codex","model":"gpt"}],"timeout_mins":30,"fastfetch":{"args":["--pipe"]}}"#,
+            r#"{"models":[{"provider":"codex","model":"gpt"}],"timeout":"30m","fastfetch":{"args":["--pipe"]}}"#,
         )
         .unwrap();
         let err = load_gateway_config(&path).unwrap_err();
         assert!(err.contains("parse gateway config"));
 
-        fs::write(&path, r#"{"models":[],"timeout_mins":30}"#).unwrap();
+        fs::write(&path, r#"{"models":[],"timeout":"30m"}"#).unwrap();
         let err = load_gateway_config(&path).unwrap_err();
         assert!(err.contains("at least one"));
     }
@@ -1110,11 +1162,11 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
-            r#"{"models":[{"provider":"codex","model":"gpt-test"}],"timeout_mins":0}"#,
+            r#"{"models":[{"provider":"codex","model":"gpt-test"}],"timeout":"0m"}"#,
         )
         .unwrap();
         let err = load_gateway_config(&path).unwrap_err();
-        assert!(err.contains("timeout_mins must be greater than zero"));
+        assert!(err.contains("timeout must be greater than zero"));
 
         let (_dir, env) = env_with_token();
         let path = PathBuf::from(env.get("XDG_CONFIG_HOME").unwrap()).join("gateway/config.json");
@@ -1122,13 +1174,13 @@ mod tests {
         fs::write(
             &path,
             format!(
-                r#"{{"models":[{{"provider":"codex","model":"gpt-test"}}],"timeout_mins":{}}}"#,
+                r#"{{"models":[{{"provider":"codex","model":"gpt-test"}}],"timeout":"{}m"}}"#,
                 u64::MAX
             ),
         )
         .unwrap();
         let err = load_from_env(&env).unwrap_err();
-        assert!(err.contains("timeout_mins is too large"));
+        assert!(err.contains("timeout is too large"));
     }
 
     #[test]
