@@ -18,9 +18,14 @@ fn run() -> Result<(), String> {
 
     match mode {
         Mode::Bot => gateway::bot::run(load_config_with_context(&Mode::Bot)?),
-        Mode::Heartbeat => print_output(gateway::heartbeat::run(load_config_with_context(
-            &Mode::Heartbeat,
-        )?)),
+        Mode::Heartbeat { scheduled } => {
+            let cfg = load_config_with_context(&mode)?;
+            print_output(if scheduled {
+                gateway::heartbeat::run_scheduled(cfg)
+            } else {
+                gateway::heartbeat::run(cfg)
+            })
+        }
         Mode::List(args) => {
             print_output(gateway::cli_commands::list(args, gateway::config::load()?))
         }
@@ -58,7 +63,7 @@ fn load_config_with_context(mode: &Mode) -> Result<gateway::config::Config, Stri
 
 fn ensure_context_for_mode(mode: &Mode, cfg: &gateway::config::Config) -> Result<(), String> {
     match mode {
-        Mode::Bot | Mode::Heartbeat | Mode::Run(_) | Mode::Status(_) => {
+        Mode::Bot | Mode::Heartbeat { .. } | Mode::Run(_) | Mode::Status(_) => {
             gateway::context::ensure_gateway_context_files(&cfg.xdg_config_home)
         }
         Mode::List(_) | Mode::Logs(_) | Mode::Update | Mode::Uninstall | Mode::Version => Ok(()),
@@ -84,7 +89,8 @@ mod tests {
     fn ensure_context_for_codex_modes_creates_context_files() {
         let modes = [
             Mode::Bot,
-            Mode::Heartbeat,
+            Mode::Heartbeat { scheduled: false },
+            Mode::Heartbeat { scheduled: true },
             Mode::Run(RunArgs {
                 prompt: Some("status".to_string()),
                 prompt_file: None,

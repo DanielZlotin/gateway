@@ -26,11 +26,11 @@ pub struct HeartbeatRunState {
     pub message: String,
 }
 
-pub fn run(cfg: Config) -> Result<String, String> {
+pub fn run_scheduled(cfg: Config) -> Result<String, String> {
     run_with_schedule(cfg, HeartbeatSchedule::WhenDue)
 }
 
-pub fn run_now(cfg: Config) -> Result<String, String> {
+pub fn run(cfg: Config) -> Result<String, String> {
     run_with_schedule(cfg, HeartbeatSchedule::Now)
 }
 
@@ -412,6 +412,21 @@ mod tests {
         let state = fs::read_to_string(cfg.state_dir.join("heartbeat.json")).unwrap();
         assert!(state.contains(r#""result": "initialized""#), "{state}");
         assert!(state.contains(r#""message": "initialized""#), "{state}");
+    }
+
+    #[test]
+    fn manual_heartbeat_runs_even_when_not_due() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        fs::create_dir_all(&cfg.state_dir).unwrap();
+        fs::write(cfg.state_dir.join("heartbeat.last"), i64::MAX.to_string()).unwrap();
+        fs::write(
+            crate::update::gateway_update_lock_file(&cfg),
+            format!("pid {}\n", std::process::id()),
+        )
+        .unwrap();
+
+        assert_eq!(run(cfg).unwrap(), "gateway update already running");
     }
 
     #[test]

@@ -305,7 +305,7 @@ mod tests {
         assert!(heartbeat_plist.contains("<string>/bin/zsh</string>"));
         assert!(heartbeat_plist.contains("<string>-lc</string>"));
         assert!(heartbeat_plist.contains(&format!(
-            "<string>exec {}/target/release/gateway heartbeat</string>",
+            "<string>exec {}/target/release/gateway heartbeat --scheduled</string>",
             env!("CARGO_MANIFEST_DIR")
         )));
         assert!(!heartbeat_plist.contains("__GATEWAY_HEARTBEAT_LAUNCH__"));

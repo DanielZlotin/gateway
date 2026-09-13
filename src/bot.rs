@@ -1312,9 +1312,17 @@ fn handle_heartbeat_command(
     msg: &Message,
 ) -> Result<(), String> {
     tg.send_message(msg.chat.id, "🫀 Heartbeat started…", msg.message_id)?;
-    let text = crate::heartbeat::run_now(cfg.clone())
-        .unwrap_or_else(|err| format!("⚠️ Heartbeat failed: {err}"));
-    send_long_message(tg, msg.chat.id, &text, msg.message_id)
+    let cfg = cfg.clone();
+    let tg = tg.clone();
+    let msg = msg.clone();
+    thread::spawn(move || {
+        let text =
+            crate::heartbeat::run(cfg).unwrap_or_else(|err| format!("⚠️ Heartbeat failed: {err}"));
+        if let Err(err) = send_long_message(&tg, msg.chat.id, &text, msg.message_id) {
+            logs::warn(format_args!("telegram heartbeat reply failed: {err}"));
+        }
+    });
+    Ok(())
 }
 
 fn handle_new_command(
@@ -3579,6 +3587,50 @@ printf 'session id: session-12345678\n' >&2
     }
 
     #[test]
+    fn heartbeat_does_not_block_following_messages() {
+        let dir = tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        fs::create_dir_all(&cfg.state_dir).unwrap();
+        let gate = cfg.state_dir.join("heartbeat.last");
+        assert!(Command::new("mkfifo")
+            .arg(&gate)
+            .status()
+            .unwrap()
+            .success());
+        let tg = FakeTelegram::new();
+        let worker_tg = tg.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            let store = SessionStore::new(
+                cfg.chat_state_dir.clone(),
+                cfg.default_provider_model().model.clone(),
+            );
+            let selections = RuntimeSelections::default();
+            for msg in [
+                message(42, 10, "/heartbeat"),
+                message(42, 11, "/list"),
+                message(42, 12, "hello"),
+            ] {
+                handle_message(&cfg, &worker_tg, &store, &selections, &tx, msg).unwrap();
+            }
+            done_tx.send(()).unwrap();
+        });
+        assert_sent_text_eventually(&tg, |text| text == "🫀 Heartbeat started…");
+        let responsive = done_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+        // Release the blocked state read even when the responsiveness assertion fails.
+        fs::write(&gate, "invalid\n").unwrap();
+        worker.join().unwrap();
+        assert_sent_text_eventually(&tg, |text| text.starts_with("⚠️ Heartbeat failed:"));
+        assert!(responsive, "heartbeat blocked subsequent messages");
+        assert!(rx.recv_timeout(Duration::from_secs(1)).is_ok());
+        assert!(tg
+            .calls()
+            .iter()
+            .any(|call| matches!(call, Call::Send { reply_to: 11, .. })));
+    }
+
+    #[test]
     fn heartbeat_command_replies_with_start_then_result() {
         let dir = tempdir().unwrap();
         let cfg = test_config(dir.path());
@@ -3612,6 +3664,8 @@ printf 'session id: session-12345678\n' >&2
         )
         .unwrap();
 
+        assert_sent_text_eventually(&tg, |text| text == "gateway update already running");
+
         assert_eq!(
             tg.calls(),
             vec![
@@ -3639,6 +3693,8 @@ printf 'session id: session-12345678\n' >&2
         let msg = message(42, 10, "/heartbeat");
 
         handle_heartbeat_command(&cfg, &tg, &msg).unwrap();
+
+        assert_sent_text_eventually(&tg, |text| text.starts_with("⚠️ Heartbeat failed:"));
 
         let calls = tg.calls();
         assert_eq!(calls.len(), 2);

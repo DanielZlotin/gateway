@@ -14,7 +14,7 @@
     <array>
       <string>/bin/zsh</string>
       <string>-lc</string>
-      <string>exec __GATEWAY_RELEASE_BIN__ heartbeat</string>
+      <string>exec __GATEWAY_RELEASE_BIN__ heartbeat --scheduled</string>
     </array>
   </dict>
 </plist>

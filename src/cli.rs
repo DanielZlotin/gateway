@@ -35,7 +35,7 @@ pub enum CliAction {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Mode {
     Bot,
-    Heartbeat,
+    Heartbeat { scheduled: bool },
     List(ChatArgs),
     Logs(usize),
     Run(RunArgs),
@@ -73,8 +73,11 @@ struct Cli {
 enum Command {
     #[command(about = "Run the Telegram bot for allowed chats.")]
     Bot,
-    #[command(about = "Run scheduled heartbeat work when due.")]
-    Heartbeat,
+    #[command(about = "Run heartbeat work immediately.")]
+    Heartbeat {
+        #[arg(long, help = "Run only when due (for the heartbeat scheduler).")]
+        scheduled: bool,
+    },
     #[command(about = "List saved sessions for a configured chat.")]
     List {
         #[arg(
@@ -179,7 +182,7 @@ where
 fn mode_from_cli(cli: Cli) -> Mode {
     match cli.command {
         None | Some(Command::Bot) => Mode::Bot,
-        Some(Command::Heartbeat) => Mode::Heartbeat,
+        Some(Command::Heartbeat { scheduled }) => Mode::Heartbeat { scheduled },
         Some(Command::List { chat }) => Mode::List(ChatArgs { chat }),
         Some(Command::Logs(args)) => Mode::Logs(normalize_log_line_count(args.lines)),
         Some(Command::Run(args)) => Mode::Run(RunArgs {
@@ -290,7 +293,15 @@ mod tests {
     #[test]
     fn parses_heartbeat_mode() {
         let mode = parse_args_from(["gateway", "heartbeat"]).unwrap();
-        assert_eq!(mode, Mode::Heartbeat);
+        assert_eq!(mode, Mode::Heartbeat { scheduled: false });
+    }
+
+    #[test]
+    fn parses_scheduled_heartbeat_mode() {
+        assert_eq!(
+            parse_args_from(["gateway", "heartbeat", "--scheduled"]).unwrap(),
+            Mode::Heartbeat { scheduled: true }
+        );
     }
 
     #[test]
@@ -305,7 +316,7 @@ mod tests {
                 "bot",
                 "Run the Telegram bot for allowed chats.",
                 "heartbeat",
-                "Run scheduled heartbeat work when due.",
+                "Run heartbeat work immediately.",
                 "list",
                 "List saved sessions for a configured chat.",
                 "logs",

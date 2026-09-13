@@ -187,11 +187,12 @@ selection, and last-used model. The active model comes from the running Codex
 startup header; it is unknown until that metadata arrives and shows idle after
 execution ends. This reports the CLI-selected model, not backend routing.
 
-🫀 `gateway heartbeat` checks whether scheduled work is due; the heartbeat
-LaunchAgent invokes it every 60 seconds. When due, it runs the update flow below,
-then executes `$XDG_CONFIG_HOME/gateway/HEARTBEAT.md` in a fresh session. An update
-failure or an already-running update skips the prompt. Telegram `/heartbeat`
-forces a run immediately, including the update step.
+🫀 `gateway heartbeat` and Telegram `/heartbeat` run immediately: they run the
+update flow below, then execute `$XDG_CONFIG_HOME/gateway/HEARTBEAT.md` in a fresh
+session. An update failure or an already-running update skips the prompt.
+Telegram runs heartbeat in the background so the bot keeps responding.
+The heartbeat LaunchAgent invokes `gateway heartbeat --scheduled` every 60 seconds
+to run only when due.
 
 📦 `gateway update` runs inline: it pulls this repository and `$XDG_CONFIG_HOME`
 (when it is a Git checkout), updates and upgrades Homebrew packages, runs Homebrew
